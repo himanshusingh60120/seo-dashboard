@@ -12,10 +12,12 @@ const SRC = ["client.indexScan"];
 export function SiteResult({ cell }: { cell: SiteCell }) {
   if (!cell) return <span className="muted">Not run</span>;
   const cls = cell.status === "found" ? "ok" : cell.status === "not_found" ? "no" : "warn";
-  const label = cell.status === "found" ? "Found" : cell.status === "not_found" ? "Not found" : "Error";
+  const label = cell.status === "found" ? "Indexed" : cell.status === "not_found" ? "Not indexed" : "Inconclusive";
   return (
     <div className="ev">
       <span className={`pill ${cls}`}>{label}</span>{" "}
+      <span className="muted">{cell.reason}</span>
+      <br />
       <a href={cell.googleUrl} target="_blank" rel="noreferrer">Repeat on Google</a>
       {cell.archiveUrl && <> · <a href={cell.archiveUrl} target="_blank" rel="noreferrer">Saved page</a></>}
     </div>
@@ -147,7 +149,7 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
     <Section
       title="Indexed and unindexed pages"
       source={cache ? SRC : undefined}
-      lede="This tab collects URLs from your sitemaps and search results, then checks each one two ways: Google's URL Inspection API (Search Console's own record) and a site: search on Google (site: followed by the full URL). Pages that earned impressions count as indexed until checked. Results are saved in this browser."
+      lede="This tab collects URLs from your sitemaps and search results, then checks each one two ways: Google's URL Inspection API (Search Console's own record) and a site: search (site: followed by the full URL — indexed only if the first result is the page and the page loads with HTTP 200, directly or through redirects). Pages that earned impressions count as indexed until checked. Results are saved in this browser."
     >
       <div className="panel">
         <div className="row">
@@ -244,7 +246,7 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
                   { key: "checkedAt", label: "Inspected" },
                   { key: "link", label: "", render: (r) => openLink(r.link) },
                 ]}
-                csvRow={(r) => ({ url: r.url, reason: r.state, checked_by: r.how, site_search: r.site, site_search_checked: r.siteCheckedAt, site_google_url: r.siteCell?.googleUrl || "", site_saved_page: r.siteCell?.archiveUrl || "", in_sitemap: r.inSitemap, last_crawled: r.lastCrawl, inspected_at: r.checkedAt, search_console_link: r.link })}
+                csvRow={(r) => ({ url: r.url, reason: r.state, checked_by: r.how, site_search: r.site, site_reason: r.siteCell?.reason || "", http_status: r.siteCell?.http || "", site_search_checked: r.siteCheckedAt, site_google_url: r.siteCell?.googleUrl || "", site_saved_page: r.siteCell?.archiveUrl || "", in_sitemap: r.inSitemap, last_crawled: r.lastCrawl, inspected_at: r.checkedAt, search_console_link: r.link })}
                 initialSort="state"
                 initialDesc={false}
                 csvName="not-indexed.csv"
@@ -263,7 +265,7 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
                   { key: "lastCrawl", label: "Last crawled" },
                   { key: "link", label: "", render: (r) => openLink(r.link) },
                 ]}
-                csvRow={(r) => ({ url: r.url, confirmed_by: r.how, status: r.state, site_search: r.site, site_search_checked: r.siteCheckedAt, site_google_url: r.siteCell?.googleUrl || "", site_saved_page: r.siteCell?.archiveUrl || "", last_crawled: r.lastCrawl, inspected_at: r.checkedAt, search_console_link: r.link })}
+                csvRow={(r) => ({ url: r.url, confirmed_by: r.how, status: r.state, site_search: r.site, site_reason: r.siteCell?.reason || "", http_status: r.siteCell?.http || "", site_search_checked: r.siteCheckedAt, site_google_url: r.siteCell?.googleUrl || "", site_saved_page: r.siteCell?.archiveUrl || "", last_crawled: r.lastCrawl, inspected_at: r.checkedAt, search_console_link: r.link })}
                 csvName="indexed.csv"
                 source={SRC}
               />
