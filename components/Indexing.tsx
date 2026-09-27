@@ -1,30 +1,52 @@
+// components/Indexing.tsx
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Inspection } from "@/lib/types";
-import { loadIndexCache, saveIndexCache, classify, IndexCache } from "@/lib/indexCache";
-import { DataTable, Kpis, Section, SubTabs, Bars, num } from "./ui";
+import type { SiteCheck } from "@/lib/types";
+import { loadIndexCache, saveIndexCache, classify, IndexCache, SiteCell } from "@/lib/indexCache";
+import { inspectBatch, siteBatch, runBatches, providerInfo, InspectionRec } from "@/lib/checks";
+import { DataTable, Kpis, Section, SubTabs, Bars, PanelTitle, num } from "./ui";
 
-const CHUNK = 20;
-type V = "not" | "indexed" | "unchecked" | "errors";
+type V = "not" | "indexed" | "unchecked" | "disagree" | "errors";
+const SRC = ["client.indexScan"];
 
-export default function Indexing({ site }: { site: string }) {
+export function SiteResult({ cell }: { cell: SiteCell }) {
+  if (!cell) return <span className="muted">Not run</span>;
+  const cls = cell.status === "found" ? "ok" : cell.status === "not_found" ? "no" : "warn";
+  const label = cell.status === "found" ? "Found" : cell.status === "not_found" ? "Not found" : "Error";
+  return (
+    <div className="ev">
+      <span className={`pill ${cls}`}>{label}</span>{" "}
+      <a href={cell.googleUrl} target="_blank" rel="noreferrer">Repeat on Google</a>
+      {cell.archiveUrl && <> · <a href={cell.archiveUrl} target="_blank" rel="noreferrer">Saved page</a></>}
+    </div>
+  );
+}
+
+export default function Indexing({ site, onChange }: { site: string; onChange?: () => void }) {
   const [cache, setCache] = useState<IndexCache | null>(null);
   const [listing, setListing] = useState(false);
-  const [scan, setScan] = useState<{ done: number; total: number } | null>(null);
+  const [scan, setScan] = useState<{ what: string; done: number; total: number } | null>(null);
   const [limit, setLimit] = useState(200);
   const [includeSeen, setIncludeSeen] = useState(false);
   const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
   const [view, setView] = useState<V>("not");
+  const [provider, setProvider] = useState<{ provider: string | null; archives: boolean } | null>(null);
   const stop = useRef(false);
+  const cacheRef = useRef<IndexCache | null>(null);
 
   useEffect(() => {
-    setCache(loadIndexCache(site));
+    const c = loadIndexCache(site);
+    setCache(c);
+    cacheRef.current = c;
     setMsg(null);
   }, [site]);
+  useEffect(() => { providerInfo().then(setProvider); }, []);
 
   const update = (c: IndexCache) => {
+    cacheRef.current = c;
     setCache(c);
     saveIndexCache(site, c);
+    onChange?.();
   };
 
   const loadUrls = async () => {
@@ -34,7 +56,7 @@ export default function Indexing({ site }: { site: string }) {
       const res = await fetch(`/api/gsc/sitemap-urls?site=${encodeURIComponent(site)}`, { cache: "no-store" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      update({ urls: data.urls, sitemaps: data.sitemaps, inspected: cache?.inspected || {}, listedAt: new Date().toISOString() });
+      update({ urls: data.urls, sitemaps: data.sitemaps, inspected: cache?.inspected || {}, site: cache?.site || {}, listedAt: new Date().toISOString() });
       const fromMaps = data.urls.filter((u: any) => u.sources.includes("sitemap")).length;
       setMsg({
         text: `Found ${num(data.urls.length)} URLs: ${num(fromMaps)} from ${data.sitemaps.length} sitemap file(s), the rest from search results.` +
@@ -47,31 +69,46 @@ export default function Indexing({ site }: { site: string }) {
   };
 
   const inspect = async (urls: string[]) => {
-    if (!cache || !urls.length) return;
+    if (!cacheRef.current || !urls.length) return;
     stop.current = false;
-    let c = cache;
-    setScan({ done: 0, total: urls.length });
     setMsg(null);
-    for (let i = 0; i < urls.length; i += CHUNK) {
-      if (stop.current) break;
-      const res = await fetch("/api/gsc/inspect", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ siteUrl: site, urls: urls.slice(i, i + CHUNK) }),
-      });
-      const data = await res.json();
-      if (!res.ok) { setMsg({ text: data.error, error: true }); break; }
-      const now = new Date().toISOString();
-      const inspected = { ...c.inspected };
-      (data.results as Inspection[]).forEach((r) => { if (r.verdict !== "ERROR" || !inspected[r.url]) inspected[r.url] = { ...r, checkedAt: now }; });
-      c = { ...c, inspected };
-      update(c);
-      setScan({ done: Math.min(i + CHUNK, urls.length), total: urls.length });
-      if (data.quotaExceeded) {
-        setMsg({ text: "Google's daily URL Inspection quota for this property is used up (about 2,000 checks a day). Results so far are saved; continue tomorrow.", error: true });
-        break;
-      }
-    }
+    setScan({ what: "URL Inspection", done: 0, total: urls.length });
+    const r = await runBatches<InspectionRec>(
+      urls,
+      (b) => inspectBatch(site, b),
+      (results, done) => {
+        const c = cacheRef.current!;
+        const inspected = { ...c.inspected };
+        results.forEach((x) => { if (x.verdict !== "ERROR" || !inspected[x.url]) inspected[x.url] = x; });
+        update({ ...c, inspected });
+        setScan({ what: "URL Inspection", done, total: urls.length });
+      },
+      () => stop.current
+    );
+    if (r.quotaExceeded) setMsg({ text: "Google's daily URL Inspection quota for this property is used up (about 2,000 checks a day). Results so far are saved; continue tomorrow.", error: true });
+    else if (r.error) setMsg({ text: r.error, error: true });
+    setScan(null);
+  };
+
+  const searchSite = async (urls: string[]) => {
+    if (!cacheRef.current || !urls.length) return;
+    stop.current = false;
+    setMsg(null);
+    setScan({ what: "site: search", done: 0, total: urls.length });
+    const r = await runBatches<SiteCheck>(
+      urls,
+      (b) => siteBatch(site, b),
+      (results, done) => {
+        const c = cacheRef.current!;
+        const s = { ...(c.site || {}) };
+        results.forEach((x) => { if (x.status !== "error" || !s[x.url]) s[x.url] = x; });
+        update({ ...c, site: s });
+        setScan({ what: "site: search", done, total: urls.length });
+      },
+      () => stop.current
+    );
+    if (r.quotaExceeded) setMsg({ text: `Your ${provider?.provider || "search provider"} credits are used up. Results so far are saved.`, error: true });
+    else if (r.error) setMsg({ text: r.error, error: true });
     setScan(null);
   };
 
@@ -82,7 +119,19 @@ export default function Indexing({ site }: { site: string }) {
     const pending = cache.urls.filter((u) => !cache.inspected[u.url] && (includeSeen || !u.sources.includes("search")));
     inspect(pending.slice(0, limit).map((u) => u.url));
   };
-  const recheckNot = () => result && inspect(result.notIndexed.slice(0, limit).map((r) => r.url));
+  const recheckNot = () => result && inspect(result.notIndexed.filter((r) => r.how === "URL Inspection").slice(0, limit).map((r) => r.url));
+
+  /** site: search runs on the list currently on screen, skipping URLs already searched today. */
+  const today = new Date().toDateString();
+  const viewUrls = (): string[] => {
+    if (!result) return [];
+    const list = view === "not" ? result.notIndexed : view === "indexed" ? result.indexed : view === "unchecked" ? result.unchecked : view === "disagree" ? result.disagree : [];
+    return list.map((r) => r.url).filter((u) => {
+      const s = cache?.site?.[u];
+      return !s || new Date(s.checkedAt).toDateString() !== today;
+    });
+  };
+  const viewName = { not: "not indexed", indexed: "indexed", unchecked: "not checked", disagree: "disagreeing", errors: "" }[view];
 
   const reasons = useMemo(() => {
     const m = new Map<string, number>();
@@ -91,11 +140,14 @@ export default function Indexing({ site }: { site: string }) {
   }, [result]);
 
   const openLink = (link: string) => (link ? <a href={link} target="_blank" rel="noreferrer">Open in Search Console</a> : "");
+  const siteFound = result ? Object.values(cache?.site || {}).filter((s) => s.status === "found").length : 0;
+  const siteRun = Object.keys(cache?.site || {}).length;
 
   return (
     <Section
       title="Indexed and unindexed pages"
-      lede="Search Console's API doesn't expose the Pages report, so this tab builds it: it collects URLs from your sitemaps and search results, then checks each with the URL Inspection API. Pages that earned impressions count as indexed without using quota. Results are saved in this browser."
+      source={cache ? SRC : undefined}
+      lede="This tab collects URLs from your sitemaps and search results, then checks each one two ways: Google's URL Inspection API (Search Console's own record) and a site: search on Google (site: followed by the full URL). Pages that earned impressions count as indexed until checked. Results are saved in this browser."
     >
       <div className="panel">
         <div className="row">
@@ -105,7 +157,7 @@ export default function Indexing({ site }: { site: string }) {
           <label className="control" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
             Check up to
             <select value={limit} onChange={(e) => setLimit(Number(e.target.value))} style={{ minWidth: 90 }}>
-              {[50, 200, 500, 1000, 1900].map((n) => <option key={n} value={n}>{n}</option>)}
+              {[20, 50, 200, 500, 1000, 1900].map((n) => <option key={n} value={n}>{n}</option>)}
             </select>
             URLs
           </label>
@@ -113,41 +165,57 @@ export default function Indexing({ site }: { site: string }) {
             <input type="checkbox" checked={includeSeen} onChange={(e) => setIncludeSeen(e.target.checked)} />
             Also inspect pages that already have impressions
           </label>
-          <button className="btn" onClick={queueNext} disabled={!cache?.urls.length || !!scan}>Check index status</button>
-          <button className="btn" onClick={recheckNot} disabled={!result?.notIndexed.length || !!scan}>Re-check unindexed</button>
+        </div>
+        <div className="row" style={{ marginTop: 10 }}>
+          <button className="btn" onClick={queueNext} disabled={!cache?.urls.length || !!scan}>Inspect in Search Console</button>
+          <button className="btn" onClick={recheckNot} disabled={!result?.notIndexed.length || !!scan}>Re-inspect unindexed</button>
+          <button
+            className="btn"
+            onClick={() => searchSite(viewUrls().slice(0, limit))}
+            disabled={!provider?.provider || !result || !!scan || view === "errors"}
+            title={provider?.provider ? `Runs site:<url> through ${provider.provider}` : "Add SERPAPI_KEY or SERPER_API_KEY to enable"}
+          >
+            Run site: search on {viewName || "this list"}
+          </button>
           {scan && <button className="btn" onClick={() => (stop.current = true)}>Stop</button>}
           {cache && !scan && (
-            <button className="btn" onClick={() => { localStorage.removeItem(`dash:index:${site}`); setCache(null); }}>Clear saved results</button>
+            <button className="btn" onClick={() => { localStorage.removeItem(`dash:index:${site}`); setCache(null); cacheRef.current = null; onChange?.(); }}>Clear saved results</button>
           )}
         </div>
+        {provider && !provider.provider && (
+          <p className="muted" style={{ marginBottom: 0 }}>
+            site: search is off. Add <code>SERPAPI_KEY</code> (keeps a saved copy of each Google results page as evidence) or <code>SERPER_API_KEY</code> to your environment variables and redeploy.
+          </p>
+        )}
         {scan && (
           <div style={{ marginTop: 12 }}>
             <div className="progress"><div style={{ width: `${(scan.done / scan.total) * 100}%` }} /></div>
-            <p className="muted">Checked {num(scan.done)} of {num(scan.total)}</p>
+            <p className="muted">{scan.what}: checked {num(scan.done)} of {num(scan.total)}</p>
           </div>
         )}
         {msg && <p className={msg.error ? "notice error" : "muted"} style={{ marginBottom: 0 }}>{msg.text}</p>}
         {cache && <p className="muted" style={{ marginBottom: 0 }}>URL list loaded {new Date(cache.listedAt).toLocaleString()}.</p>}
       </div>
 
-      {!cache && <div className="notice" style={{ marginTop: 16 }}>Load the URL list to start. Inspection uses Google's quota of about 2,000 URLs per property per day.</div>}
+      {!cache && <div className="notice" style={{ marginTop: 16 }}>Load the URL list to start. URL Inspection uses Google's quota of about 2,000 URLs per property per day; each site: search uses one credit from your search provider.</div>}
 
       {result && (
         <>
           <div style={{ marginTop: 16 }}>
             <Kpis
               items={[
-                { label: "Known URLs", value: num(result.total) },
-                { label: "Indexed", value: num(result.indexed.length), sub: `${num(result.indexed.filter((r) => r.how === "Inspected").length)} confirmed by inspection` },
-                { label: "Not indexed", value: num(result.notIndexed.length) },
+                { label: "Known URLs", value: num(result.total), source: SRC },
+                { label: "Indexed", value: num(result.indexed.length), sub: `${num(result.indexed.filter((r) => r.how === "URL Inspection").length)} confirmed by URL Inspection`, source: SRC },
+                { label: "Not indexed", value: num(result.notIndexed.length), source: SRC },
+                { label: "Found with site:", value: siteRun ? `${num(siteFound)} / ${num(siteRun)}` : "–", sub: siteRun ? "found / searched" : "not run yet", source: SRC },
+                { label: "Checks disagree", value: num(result.disagree.length), source: SRC },
                 { label: "Not checked yet", value: num(result.unchecked.length) },
-                { label: "Errors", value: num(result.errors.length) },
               ]}
             />
           </div>
           {reasons.length > 0 && (
             <div className="panel" style={{ marginTop: 16 }}>
-              <h3>Why pages aren't indexed</h3>
+              <PanelTitle source={SRC}>Why pages aren't indexed</PanelTitle>
               <Bars items={reasons} color="var(--down)" />
             </div>
           )}
@@ -159,6 +227,7 @@ export default function Indexing({ site }: { site: string }) {
                 { id: "not", label: `Not indexed (${result.notIndexed.length})` },
                 { id: "indexed", label: `Indexed (${result.indexed.length})` },
                 { id: "unchecked", label: `Not checked (${result.unchecked.length})` },
+                { id: "disagree", label: `Checks disagree (${result.disagree.length})` },
                 { id: "errors", label: `Errors (${result.errors.length})` },
               ]}
             />
@@ -168,13 +237,18 @@ export default function Indexing({ site }: { site: string }) {
                 cols={[
                   { key: "url", label: "URL", url: true },
                   { key: "state", label: "Reason", render: (r) => <span className="pill no">{r.state}</span> },
+                  { key: "how", label: "Checked by" },
+                  { key: "site", label: "site: search", render: (r) => <SiteResult cell={r.siteCell} /> },
                   { key: "inSitemap", label: "In sitemap" },
                   { key: "lastCrawl", label: "Last crawled" },
+                  { key: "checkedAt", label: "Inspected" },
                   { key: "link", label: "", render: (r) => openLink(r.link) },
                 ]}
+                csvRow={(r) => ({ url: r.url, reason: r.state, checked_by: r.how, site_search: r.site, site_search_checked: r.siteCheckedAt, site_google_url: r.siteCell?.googleUrl || "", site_saved_page: r.siteCell?.archiveUrl || "", in_sitemap: r.inSitemap, last_crawled: r.lastCrawl, inspected_at: r.checkedAt, search_console_link: r.link })}
                 initialSort="state"
                 initialDesc={false}
                 csvName="not-indexed.csv"
+                source={SRC}
                 empty="No unindexed pages found among the URLs checked so far."
               />
             )}
@@ -185,26 +259,50 @@ export default function Indexing({ site }: { site: string }) {
                   { key: "url", label: "URL", url: true },
                   { key: "how", label: "Confirmed by", render: (r) => <span className="pill ok">{r.how}</span> },
                   { key: "state", label: "Status" },
+                  { key: "site", label: "site: search", render: (r) => <SiteResult cell={r.siteCell} /> },
                   { key: "lastCrawl", label: "Last crawled" },
                   { key: "link", label: "", render: (r) => openLink(r.link) },
                 ]}
+                csvRow={(r) => ({ url: r.url, confirmed_by: r.how, status: r.state, site_search: r.site, site_search_checked: r.siteCheckedAt, site_google_url: r.siteCell?.googleUrl || "", site_saved_page: r.siteCell?.archiveUrl || "", last_crawled: r.lastCrawl, inspected_at: r.checkedAt, search_console_link: r.link })}
                 csvName="indexed.csv"
+                source={SRC}
               />
             )}
             {view === "unchecked" && (
               <DataTable
                 rows={result.unchecked}
                 cols={[{ key: "url", label: "URL", url: true }, { key: "sources", label: "Found in" }]}
+                csvRow={(r) => ({ url: r.url, found_in: r.sources })}
                 csvName="not-checked.csv"
                 empty="Every known URL has a status."
               />
+            )}
+            {view === "disagree" && (
+              <>
+                <p className="muted" style={{ marginTop: 0 }}>
+                  URL Inspection and site: search give different answers for these pages. URL Inspection is Search Console's own record; site: results can lag or vary by location. Re-run both before reporting a change.
+                </p>
+                <DataTable
+                  rows={result.disagree}
+                  cols={[
+                    { key: "url", label: "URL", url: true },
+                    { key: "inspection", label: "URL Inspection" },
+                    { key: "site", label: "site: search", render: (r) => <SiteResult cell={r.siteCell} /> },
+                    { key: "link", label: "", render: (r) => openLink(r.link) },
+                  ]}
+                  csvRow={(r) => ({ url: r.url, url_inspection: r.inspection, site_search: r.site, site_google_url: r.siteCell?.googleUrl || "", site_saved_page: r.siteCell?.archiveUrl || "", search_console_link: r.link })}
+                  csvName="checks-disagree.csv"
+                  source={SRC}
+                  empty="The two checks agree on every page checked both ways."
+                />
+              </>
             )}
             {view === "errors" && (
               <DataTable
                 rows={result.errors}
                 cols={[{ key: "url", label: "URL", url: true }, { key: "error", label: "Error" }]}
-                csvName="inspection-errors.csv"
-                empty="No inspection errors."
+                csvName="check-errors.csv"
+                empty="No errors."
               />
             )}
           </div>
