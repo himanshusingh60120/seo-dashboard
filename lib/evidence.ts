@@ -36,7 +36,9 @@ function evidenceHtml(c: UrlCheck | undefined) {
   const s = c.site;
   if (s) {
     parts.push(
-      `<div><b>${esc(s.query)}:</b> ${s.status === "found" ? "Found" : s.status === "not_found" ? `Not found (${s.resultsReturned} other result${s.resultsReturned === 1 ? "" : "s"})` : `Error – ${esc(s.error)}`}` +
+      `<div><b>${esc(s.query)}:</b> ${s.status === "found" ? "Indexed" : s.status === "not_found" ? "Not indexed" : "Inconclusive"} – ${esc(s.reason)}` +
+        `${s.firstResultUrl ? `<br><span class=m>First result: ${esc(s.firstResultUrl)}</span>` : ""}` +
+        `${s.http ? `<br><span class=m>Page HTTP: ${esc(s.http.chain.map((c) => `${c.status} ${c.url}`).join(" → ") || s.http.error || "no response")}</span>` : ""}` +
         `<br><span class=m>Checked ${esc(when(s.checkedAt))} via ${esc(s.provider)}${s.searchId ? ` · search ID ${esc(s.searchId)}` : ""}</span>` +
         `<br>${link(s.googleUrl, "Repeat this search on Google")}${s.archiveUrl ? ` · ${link(s.archiveUrl, "Saved Google results page")}` : ""}</div>`
     );
@@ -79,7 +81,7 @@ td.u{max-width:320px;overflow-wrap:anywhere}td div+div{margin-top:6px}a{color:#2
 <div><b>${Object.keys(cur.checks).length}</b>Pages checked</div>
 </div>
 <div class=note><b>How this was checked.</b> Each page was checked with ${esc(methods)}.
-The site: search is <code>site:</code> followed immediately by the full page URL; a page counts as found only when that exact URL appears in the results.
+The site: search is <code>site:</code> followed immediately by the full page URL. A page counts as indexed only when the <b>first</b> result is that page (or the URL it redirects to) <b>and</b> the page loads with HTTP 200, directly or through working redirects. Pages that time out or answer 403, 429 or 5xx are marked inconclusive, never deindexed.
 A page is listed as deindexed when at least one check found it indexed on ${prev ? esc(prev.date) : "the earlier day"} and a check on ${esc(cur.date)} found it not indexed.
 When the two checks disagree today it is listed under “possibly deindexed”. Search Console's URL Inspection is Google's own record for the property and is the stronger evidence; site: results can vary by location and time.
 Every row links to Search Console, to the same Google search, and (where available) to a saved copy of Google's results page.</div>
@@ -100,6 +102,7 @@ export function reportCsvRows(rows: DeindexRow[], prevDate: string, curDate: str
     before_inspection: r.before.inspection ? `${r.before.inspection.verdict} – ${r.before.inspection.coverageState}` : "",
     before_inspection_checked_at: r.before.inspection?.checkedAt || "",
     before_site_search: r.before.site?.status || "",
+    before_site_reason: r.before.site?.reason || "",
     before_site_checked_at: r.before.site?.checkedAt || "",
     before_site_archive: r.before.site?.archiveUrl || "",
     now_inspection: r.now.inspection ? `${r.now.inspection.verdict} – ${r.now.inspection.coverageState}` : "",
@@ -108,6 +111,10 @@ export function reportCsvRows(rows: DeindexRow[], prevDate: string, curDate: str
     now_search_console_link: r.now.inspection?.link || "",
     now_site_query: r.now.site?.query || "",
     now_site_search: r.now.site?.status || "",
+    now_site_reason: r.now.site?.reason || "",
+    now_site_first_result: r.now.site?.firstResultUrl || "",
+    now_http_status: r.now.site?.http?.chain.map((c) => c.status).join(" > ") || "",
+    now_final_url: r.now.site?.http?.finalUrl || "",
     now_site_checked_at: r.now.site?.checkedAt || "",
     now_site_google_url: r.now.site?.googleUrl || "",
     now_site_archive: r.now.site?.archiveUrl || "",
