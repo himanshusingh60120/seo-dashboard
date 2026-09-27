@@ -49,9 +49,10 @@ export function saveIndexCache(site: string, c: IndexCache) {
 export const isIndexedVerdict = (v: string) => v === "PASS" || v === "PARTIAL";
 export const isNotIndexedVerdict = (v: string) => v === "FAIL" || v === "NEUTRAL";
 
-export type SiteCell = { status: string; googleUrl: string; archiveUrl?: string; checkedAt: string } | null;
+export type SiteCell = { status: string; reason: string; http: string; googleUrl: string; archiveUrl?: string; checkedAt: string } | null;
+export const httpText = (s?: SiteCheck) => (s?.http ? s.http.chain.map((c) => c.status).join(" → ") || "no response" : "");
 const siteCell = (s?: SiteCheck): SiteCell =>
-  s ? { status: s.status, googleUrl: s.googleUrl, archiveUrl: s.archiveUrl, checkedAt: s.checkedAt } : null;
+  s ? { status: s.status, reason: s.reason || "", http: httpText(s), googleUrl: s.googleUrl, archiveUrl: s.archiveUrl, checkedAt: s.checkedAt } : null;
 const siteLabel = (s?: SiteCheck) => (!s ? "Not run" : s.status === "found" ? "Found" : s.status === "not_found" ? "Not found" : "Error");
 
 /**
@@ -75,7 +76,7 @@ export function classify(c: IndexCache) {
     const base: Base = { url, site: siteLabel(s), siteCell: siteCell(s), siteCheckedAt: s?.checkedAt?.slice(0, 16).replace("T", " ") || "" };
     const checkedAt = r?.checkedAt?.slice(0, 16).replace("T", " ") || "";
     if (r && r.verdict === "ERROR") errors.push({ url, error: r.coverageState });
-    if (s && s.status === "error") errors.push({ url, error: `site: search failed: ${s.error || "unknown error"}` });
+    if (s && s.status === "error") errors.push({ url, error: `site: check: ${s.reason || s.error || "unknown error"}` });
 
     if (r && isIndexedVerdict(r.verdict)) {
       indexed.push({ ...base, how: "URL Inspection", state: r.coverageState, lastCrawl: r.lastCrawlTime.slice(0, 10), link: r.link, checkedAt });
@@ -84,9 +85,9 @@ export function classify(c: IndexCache) {
       notIndexed.push({ ...base, how: "URL Inspection", state: r.coverageState, lastCrawl: r.lastCrawlTime.slice(0, 10), inSitemap: sources.includes("sitemap") ? "Yes" : "No", link: r.link, checkedAt });
       if (s?.status === "found") disagree.push({ ...base, inspection: `Not indexed (${r.coverageState})`, link: r.link });
     } else if (s?.status === "found") {
-      indexed.push({ ...base, how: "site: search", state: "Returned by site: search", lastCrawl: "", link: "", checkedAt: "" });
+      indexed.push({ ...base, how: "site: search", state: s.reason || "First site: result, HTTP 200", lastCrawl: "", link: "", checkedAt: "" });
     } else if (s?.status === "not_found") {
-      notIndexed.push({ ...base, how: "site: search", state: "Not returned by site: search", lastCrawl: "", inSitemap: sources.includes("sitemap") ? "Yes" : "No", link: "", checkedAt: "" });
+      notIndexed.push({ ...base, how: "site: search", state: s.reason || "Not the first site: result", lastCrawl: "", inSitemap: sources.includes("sitemap") ? "Yes" : "No", link: "", checkedAt: "" });
     } else if (sources.includes("search")) {
       indexed.push({ ...base, how: "Search impressions", state: "Appeared in search (last 90 days)", lastCrawl: "", link: "", checkedAt: "" });
     } else unchecked.push({ ...base, sources: sources.join(", ") });
@@ -111,7 +112,8 @@ export function indexScanSource(c: IndexCache | null) {
     rowCount: c.urls.length,
     formula:
       `URLs come from your sitemaps (${c.sitemaps.length} file(s)) and from pages with search impressions in the last 90 days, listed ${new Date(c.listedAt).toLocaleString()}. ` +
-      `A page's status comes from its URL Inspection result if it has one (${insp.length} inspected, ${span(insp)}); otherwise from a site: search (${site.length} searched, ${span(site)}); otherwise pages with search impressions count as indexed.`,
+      `A page's status comes from its URL Inspection result if it has one (${insp.length} inspected, ${span(insp)}); otherwise from a site: search (${site.length} searched, ${span(site)}); otherwise pages with search impressions count as indexed. ` +
+      `site: rule: the page counts as indexed only when the first result for site:<full URL> is that page (or the URL it redirects to) and the page loads with HTTP 200, directly or through redirects. Timeouts, 403, 429 and 5xx responses are marked inconclusive rather than not indexed.`,
     verifyHow:
       "Every URL has its own evidence in the Indexing tab: “Open in Search Console” opens Google's inspection of that exact URL, and the site: links repeat the search on Google or open the saved results page.",
     verifyUrl: "https://search.google.com/search-console/index",
