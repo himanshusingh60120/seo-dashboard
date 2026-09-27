@@ -1,3 +1,4 @@
+// components/Rankings.tsx
 "use client";
 import { useState } from "react";
 import type { GscData, PageRow } from "@/lib/types";
@@ -36,6 +37,7 @@ export default function Rankings({ gsc }: { gsc: GscData }) {
     <>
       <Section
         title="Where pages rank"
+        source={["calc.buckets"]}
         lede="Each page is placed by its average position across all queries in the period. Select a band to list its pages."
       >
         <div className="panel">
@@ -68,12 +70,14 @@ export default function Rankings({ gsc }: { gsc: GscData }) {
             cols={[...pageCols, { key: "change", label: "Change", num: true, render: (r) => <Change v={r.change} /> }]}
             initialSort="clicks"
             csvName={`pages-${bucket}.csv`}
+            source={["calc.buckets"]}
           />
         </div>
       </Section>
 
       <Section
         title="Pages that lost rankings"
+        source={["calc.losers", "calc.vanished"]}
         lede={`Compared with ${gsc.previousRange.startDate} to ${gsc.previousRange.endDate}. Listed pages dropped at least 5 positions and had 20+ impressions before the drop.`}
       >
         <div className="panel">
@@ -99,6 +103,7 @@ export default function Rankings({ gsc }: { gsc: GscData }) {
               ]}
               initialSort="change"
               csvName="pages-lost-rank.csv"
+              source={["calc.losers"]}
               empty="No page dropped 5 or more positions. Rankings held steady."
             />
           ) : (
@@ -112,6 +117,7 @@ export default function Rankings({ gsc }: { gsc: GscData }) {
               ]}
               initialSort="prevImpressions"
               csvName="pages-no-longer-showing.csv"
+              source={["calc.vanished"]}
               empty="Every page that showed last period is still showing."
             />
           )}
