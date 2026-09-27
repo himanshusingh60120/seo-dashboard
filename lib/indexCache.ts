@@ -1,5 +1,6 @@
 // lib/indexCache.ts
 import type { Inspection, SiteCheck } from "./types";
+import { kvGet, kvSet, kvDel } from "./idb";
 
 export type IndexCache = {
   urls: { url: string; sources: string[] }[];
@@ -12,16 +13,38 @@ export type IndexCache = {
 
 const key = (site: string) => `dash:index:${site}`;
 
-export function loadIndexCache(site: string): IndexCache | null {
+/*
+ * Saved in IndexedDB (room for 50,000+ URLs). A copy is kept in memory so screens can read it
+ * instantly; writes to disk are batched every few seconds while a scan runs.
+ */
+const mem = new Map<string, IndexCache | null>();
+const pending = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** Latest saved results already in memory (null until loadIndexCache has run for this property). */
+export const peekIndexCache = (site: string) => mem.get(site) ?? null;
+
+export async function loadIndexCache(site: string): Promise<IndexCache | null> {
+  if (mem.has(site)) return mem.get(site)!;
+  let c: IndexCache | null = null;
   try {
-    const raw = localStorage.getItem(key(site));
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
+    c = (await kvGet<IndexCache>(key(site))) || null;
+  } catch {}
+  if (!c) {
+    // One-time move from the older localStorage copy
+    try {
+      const raw = localStorage.getItem(key(site));
+      if (raw) {
+        c = JSON.parse(raw);
+        await kvSet(key(site), c);
+        localStorage.removeItem(key(site));
+      }
+    } catch {}
   }
+  mem.set(site, c);
+  return c;
 }
 
-/** Keeps localStorage small: the full Google responses live in the daily snapshots (IndexedDB), not here. */
+/** Keeps stored results compact: the full Google responses live in the daily snapshots. */
 function slim(c: IndexCache): IndexCache {
   const inspected: IndexCache["inspected"] = {};
   for (const [u, r] of Object.entries(c.inspected)) {
@@ -34,16 +57,30 @@ function slim(c: IndexCache): IndexCache {
   return { ...c, inspected, site };
 }
 
-export function saveIndexCache(site: string, c: IndexCache) {
-  const s = slim(c);
-  try {
-    localStorage.setItem(key(site), JSON.stringify(s));
-  } catch {
-    // Storage full: drop the URL list but keep check results
-    try {
-      localStorage.setItem(key(site), JSON.stringify({ ...s, urls: [] }));
-    } catch {}
-  }
+const write = (site: string) => {
+  pending.delete(site);
+  const c = mem.get(site);
+  (c ? kvSet(key(site), c) : kvDel(key(site))).catch(() => {});
+};
+
+/** Updates memory now and writes to disk within 3 seconds (or immediately with `now`). */
+export function saveIndexCache(site: string, c: IndexCache, now = false) {
+  mem.set(site, slim(c));
+  if (pending.has(site)) clearTimeout(pending.get(site)!);
+  if (now) write(site);
+  else pending.set(site, setTimeout(() => write(site), 3000));
+}
+
+export function flushIndexCache(site: string) {
+  if (pending.has(site)) { clearTimeout(pending.get(site)!); write(site); }
+}
+
+export async function clearIndexCache(site: string) {
+  if (pending.has(site)) clearTimeout(pending.get(site)!);
+  pending.delete(site);
+  mem.set(site, null);
+  try { localStorage.removeItem(key(site)); } catch {}
+  await kvDel(key(site)).catch(() => {});
 }
 
 export const isIndexedVerdict = (v: string) => v === "PASS" || v === "PARTIAL";
