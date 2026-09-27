@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { signOut, useSession } from "next-auth/react";
 import type { GscData, Ga4Data, Properties, Sources } from "@/lib/types";
-import { loadIndexCache, indexScanSource } from "@/lib/indexCache";
+import { loadIndexCache, peekIndexCache, indexScanSource } from "@/lib/indexCache";
 import { downloadJson, fileSafe } from "@/lib/evidence";
 import { SourcesProvider } from "./ui";
 import DeindexReport from "./DeindexReport";
@@ -59,10 +59,15 @@ export default function Dashboard() {
 
   // Every source behind the numbers on screen, so any "Source" button can explain itself
   const sources = useMemo<Sources>(() => {
-    const idx = site && typeof window !== "undefined" ? indexScanSource(loadIndexCache(site)) : null;
+    const idx = site && typeof window !== "undefined" ? indexScanSource(peekIndexCache(site)) : null;
     return { ...(gsc?.sources || {}), ...(ga?.sources || {}), ...(idx ? { [idx.id]: idx } : {}) };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gsc, ga, site, indexVersion, tab]);
+
+  // Load the saved index results for this property into memory, then refresh the sources
+  useEffect(() => {
+    if (site) loadIndexCache(site).then(bumpIndex);
+  }, [site, bumpIndex]);
 
   const downloadEvidence = () => {
     downloadJson(`evidence-${fileSafe(site)}-${new Date().toISOString().slice(0, 10)}.json`, {
