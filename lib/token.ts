@@ -1,3 +1,4 @@
+// lib/token.ts
 import { getToken } from "next-auth/jwt";
 import type { NextRequest } from "next/server";
 import { isAllowedEmail } from "./auth";
@@ -32,4 +33,11 @@ export async function getGoogleAccessToken(req: NextRequest): Promise<string> {
   if (token.accessToken && Date.now() < expiresAt - 60_000) return token.accessToken as string;
   if (!token.refreshToken) throw new HttpError(401, "No refresh token. Sign out and sign in again.");
   return refresh(token.refreshToken as string);
+}
+
+/** Confirms the request comes from a signed-in, allowed user (without needing a Google token). */
+export async function requireUser(req: NextRequest) {
+  const token = await getToken({ req, secret: process.env.NEXTAUTH_SECRET });
+  if (!token || !isAllowedEmail(token.email)) throw new HttpError(401, "Not signed in.");
+  return token.email as string;
 }
