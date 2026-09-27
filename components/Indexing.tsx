@@ -31,7 +31,8 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
   // 0 = every URL in the list (the sitemap can hold tens of thousands)
   const [limit, setLimit] = useState(0);
   const cap = <T,>(list: T[]) => (limit ? list.slice(0, limit) : list);
-  const [includeSeen, setIncludeSeen] = useState(false);
+  // Inspect every URL by default: a page with impressions last month can still be deindexed today
+  const [includeSeen, setIncludeSeen] = useState(true);
   const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
   const [view, setView] = useState<V>("not");
   const [provider, setProvider] = useState<{ provider: string | null; archives: boolean } | null>(null);
@@ -177,7 +178,7 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
           </label>
           <label className="muted" style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <input type="checkbox" checked={includeSeen} onChange={(e) => setIncludeSeen(e.target.checked)} />
-            Also inspect pages that already have impressions
+            Include pages that already have search impressions
           </label>
         </div>
         <div className="row" style={{ marginTop: 10 }}>
@@ -198,7 +199,7 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
         </div>
         {provider && !provider.provider && (
           <p className="muted" style={{ marginBottom: 0 }}>
-            site: search is off. Add <code>SERPAPI_KEY</code> (keeps a saved copy of each Google results page as evidence) or <code>SERPER_API_KEY</code> to your environment variables and redeploy.
+            Pages are checked with URL Inspection only. site: search is optional and not set up; to add it later, set <code>SERPER_API_KEY</code> or <code>SERPAPI_KEY</code> in Vercel.
           </p>
         )}
         {scan && (
