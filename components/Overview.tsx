@@ -11,11 +11,15 @@ export default function Overview({ gsc, ga, gaError, hasGa4, site }: { gsc: GscD
   const [index, setIndex] = useState<{ indexed: number; notIndexed: number } | null>(null);
 
   useEffect(() => {
-    const cache = loadIndexCache(site);
-    if (cache) {
-      const r = classify(cache);
-      setIndex({ indexed: r.indexed.length, notIndexed: r.notIndexed.length });
-    } else setIndex(null);
+    let live = true;
+    loadIndexCache(site).then((cache) => {
+      if (!live) return;
+      if (cache) {
+        const r = classify(cache);
+        setIndex({ indexed: r.indexed.length, notIndexed: r.notIndexed.length });
+      } else setIndex(null);
+    });
+    return () => { live = false; };
   }, [site]);
 
   const search: KpiItem[] = [
