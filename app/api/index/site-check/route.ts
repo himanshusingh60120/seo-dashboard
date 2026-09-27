@@ -41,7 +41,7 @@ export async function POST(req: NextRequest) {
     };
 
     let quotaExceeded = false;
-    const results = await pool(urls.filter(own).slice(0, 20), 4, async (url): Promise<SiteCheck | null> => {
+    const results = await pool(urls.filter(own).slice(0, 20), 10, async (url): Promise<SiteCheck | null> => {
       if (quotaExceeded) return null;
       try {
         return await siteCheck(url);
