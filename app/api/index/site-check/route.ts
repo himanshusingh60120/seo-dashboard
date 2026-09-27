@@ -49,7 +49,7 @@ export async function POST(req: NextRequest) {
         if (e instanceof QuotaError) quotaExceeded = true;
         const query = siteQuery(url);
         return {
-          url, query, status: "error", matchedUrl: "", resultsReturned: 0, results: [], provider: serpProvider()?.label || "",
+          url, query, status: "error", reason: `Search failed: ${e instanceof Error ? e.message : "unknown error"}`, firstResultUrl: "", matchedUrl: "", resultsReturned: 0, results: [], provider: serpProvider()?.label || "",
           checkedAt: new Date().toISOString(), googleUrl: googleSearchUrl(query), error: e instanceof Error ? e.message : "Search failed",
         };
       }
