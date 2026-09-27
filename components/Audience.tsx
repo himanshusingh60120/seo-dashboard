@@ -1,7 +1,8 @@
+// components/Audience.tsx
 "use client";
 import { useState } from "react";
 import type { Ga4Data } from "@/lib/types";
-import { DataTable, Kpis, Section, SubTabs, Bars, Delta, num, pct, duration } from "./ui";
+import { DataTable, Kpis, Section, SubTabs, Bars, Delta, PanelTitle, num, pct, duration } from "./ui";
 import { TrafficTrend } from "./Charts";
 
 export default function Audience({ ga, gaError, hasGa4, loading }: { ga: Ga4Data | null; gaError: string | null; hasGa4: boolean; loading: boolean }) {
@@ -19,24 +20,24 @@ export default function Audience({ ga, gaError, hasGa4, loading }: { ga: Ga4Data
       <Section title="Traffic" lede={`Google Analytics 4, ${ga.range.startDate} to ${ga.range.endDate}. “Users” is GA4's count of unique users.`}>
         <Kpis
           items={[
-            { label: "Unique users", value: num(c.totalUsers), delta: <Delta cur={c.totalUsers} prev={p.totalUsers} /> },
-            { label: "New users", value: num(c.newUsers), delta: <Delta cur={c.newUsers} prev={p.newUsers} /> },
-            { label: "Sessions", value: num(c.sessions), delta: <Delta cur={c.sessions} prev={p.sessions} /> },
-            { label: "Page views", value: num(c.screenPageViews), delta: <Delta cur={c.screenPageViews} prev={p.screenPageViews} /> },
-            { label: "Engagement rate", value: pct(c.engagementRate), delta: <Delta cur={c.engagementRate * 100} prev={p.engagementRate * 100} asPoints /> },
-            { label: "Avg. session", value: duration(c.averageSessionDuration) },
+            { label: "Unique users", source: ["ga4.trend", "ga4.previous"], value: num(c.totalUsers), delta: <Delta cur={c.totalUsers} prev={p.totalUsers} /> },
+            { label: "New users", source: ["ga4.trend", "ga4.previous"], value: num(c.newUsers), delta: <Delta cur={c.newUsers} prev={p.newUsers} /> },
+            { label: "Sessions", source: ["ga4.trend", "ga4.previous"], value: num(c.sessions), delta: <Delta cur={c.sessions} prev={p.sessions} /> },
+            { label: "Page views", source: ["ga4.trend", "ga4.previous"], value: num(c.screenPageViews), delta: <Delta cur={c.screenPageViews} prev={p.screenPageViews} /> },
+            { label: "Engagement rate", source: ["ga4.trend", "ga4.previous"], value: pct(c.engagementRate), delta: <Delta cur={c.engagementRate * 100} prev={p.engagementRate * 100} asPoints /> },
+            { label: "Avg. session", source: ["ga4.trend", "ga4.previous"], value: duration(c.averageSessionDuration) },
           ]}
         />
         <div className="grid-2" style={{ marginTop: 16 }}>
-          <div className="panel"><h3>Users and sessions by day</h3><TrafficTrend data={ga.trend} /></div>
+          <div className="panel"><PanelTitle source={["ga4.trend", "ga4.organic"]}>Users and sessions by day</PanelTitle><TrafficTrend data={ga.trend} /></div>
           <div className="panel">
-            <h3>Sessions by channel</h3>
+            <PanelTitle source={["ga4.channels"]}>Sessions by channel</PanelTitle>
             <Bars items={ga.channels.map((r) => ({ label: r.channel, value: r.sessions }))} />
           </div>
         </div>
         {ga.realtime && (
           <div className="panel" style={{ marginTop: 16 }}>
-            <h3>Active in the last 30 minutes: {num(ga.realtime.activeUsers)}</h3>
+            <PanelTitle source={["ga4.realtime"]}>Active in the last 30 minutes: {num(ga.realtime.activeUsers)}</PanelTitle>
             {ga.realtime.countries.length ? (
               <Bars color="var(--up)" items={ga.realtime.countries.map((r) => ({ label: r.country, value: r.users }))} />
             ) : (
@@ -49,7 +50,7 @@ export default function Audience({ ga, gaError, hasGa4, loading }: { ga: Ga4Data
       <Section title="Where users are" lede="Users by country and city for the selected period.">
         <div className="grid-2">
           <div className="panel">
-            <h3>Top countries</h3>
+            <PanelTitle source={["ga4.countries"]}>Top countries</PanelTitle>
             <Bars items={countries.slice(0, 15).map((r) => ({ label: r.country, value: r.users, note: `${num(r.users)} · ${pct(r.share, 0)}` }))} />
           </div>
           <div className="panel">
@@ -67,6 +68,7 @@ export default function Audience({ ga, gaError, hasGa4, loading }: { ga: Ga4Data
                 initialSort="users"
                 pageSize={10}
                 csvName="users-by-country.csv"
+                source={["ga4.countries"]}
               />
             ) : (
               <DataTable
@@ -80,13 +82,14 @@ export default function Audience({ ga, gaError, hasGa4, loading }: { ga: Ga4Data
                 initialSort="users"
                 pageSize={10}
                 csvName="users-by-city.csv"
+                source={["ga4.cities"]}
               />
             )}
           </div>
         </div>
       </Section>
 
-      <Section title="Top landing pages">
+      <Section title="Top landing pages" source={["ga4.landing"]}>
         <div className="panel">
           <DataTable
             rows={ga.landingPages}
@@ -98,6 +101,7 @@ export default function Audience({ ga, gaError, hasGa4, loading }: { ga: Ga4Data
             ]}
             initialSort="sessions"
             csvName="landing-pages.csv"
+            source={["ga4.landing"]}
           />
         </div>
       </Section>
