@@ -1,3 +1,4 @@
+// lib/google.ts
 import { HttpError } from "./token";
 
 async function g<T = any>(token: string, url: string, init: RequestInit = {}): Promise<T> {
@@ -34,23 +35,29 @@ export async function listSites(token: string) {
 
 export type SARow = { keys: string[]; clicks: number; impressions: number; ctr: number; position: number };
 
+export type SABody = {
+  startDate: string;
+  endDate: string;
+  dimensions?: string[];
+  rowLimit?: number;
+  startRow?: number;
+  type?: string;
+  dimensionFilterGroups?: unknown[];
+};
+
+/** The exact body sent to searchAnalytics.query (defaults included), for the provenance log. */
+export const saRequest = (body: SABody) => ({ type: "web", dataState: "final", ...body });
+export const saEndpoint = (siteUrl: string) => `POST ${GSC}/webmasters/v3/sites/${site(siteUrl)}/searchAnalytics/query`;
+
 export async function searchAnalytics(
   token: string,
   siteUrl: string,
-  body: {
-    startDate: string;
-    endDate: string;
-    dimensions?: string[];
-    rowLimit?: number;
-    startRow?: number;
-    type?: string;
-    dimensionFilterGroups?: unknown[];
-  }
+  body: SABody
 ): Promise<SARow[]> {
   const data = await g<{ rows?: SARow[] }>(
     token,
     `${GSC}/webmasters/v3/sites/${site(siteUrl)}/searchAnalytics/query`,
-    { method: "POST", body: JSON.stringify({ type: "web", dataState: "final", ...body }) }
+    { method: "POST", body: JSON.stringify(saRequest(body)) }
   );
   return data.rows || [];
 }
@@ -93,13 +100,19 @@ export async function inspectUrl(token: string, siteUrl: string, inspectionUrl: 
     lastCrawlTime: (r.lastCrawlTime as string) || "",
     googleCanonical: (r.googleCanonical as string) || "",
     link: (data?.inspectionResult?.inspectionResultLink as string) || "",
+    /** Google's full indexStatusResult, kept as evidence. */
+    raw: r,
   };
 }
 
 /* ---------------- Google Analytics 4 ---------------- */
 
+export const INSPECT_ENDPOINT = `POST ${GSC}/v1/urlInspection/index:inspect`;
+
 const ADMIN = "https://analyticsadmin.googleapis.com/v1beta";
 const DATA = "https://analyticsdata.googleapis.com/v1beta";
+export const ga4Endpoint = (propertyId: string, realtime = false) =>
+  `POST ${DATA}/properties/${propertyId}:${realtime ? "runRealtimeReport" : "runReport"}`;
 
 export async function listGa4Properties(token: string) {
   const out: { id: string; name: string; account: string }[] = [];
