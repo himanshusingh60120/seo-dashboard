@@ -2,7 +2,7 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { SiteCheck } from "@/lib/types";
-import { loadIndexCache, saveIndexCache, classify, IndexCache, SiteCell } from "@/lib/indexCache";
+import { loadIndexCache, saveIndexCache, flushIndexCache, clearIndexCache, classify, IndexCache, SiteCell } from "@/lib/indexCache";
 import { inspectBatch, siteBatch, runBatches, providerInfo, InspectionRec } from "@/lib/checks";
 import { DataTable, Kpis, Section, SubTabs, Bars, PanelTitle, num } from "./ui";
 
@@ -28,7 +28,9 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
   const [cache, setCache] = useState<IndexCache | null>(null);
   const [listing, setListing] = useState(false);
   const [scan, setScan] = useState<{ what: string; done: number; total: number } | null>(null);
-  const [limit, setLimit] = useState(200);
+  // 0 = every URL in the list (the sitemap can hold tens of thousands)
+  const [limit, setLimit] = useState(0);
+  const cap = <T,>(list: T[]) => (limit ? list.slice(0, limit) : list);
   const [includeSeen, setIncludeSeen] = useState(false);
   const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
   const [view, setView] = useState<V>("not");
@@ -37,10 +39,16 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
   const cacheRef = useRef<IndexCache | null>(null);
 
   useEffect(() => {
-    const c = loadIndexCache(site);
-    setCache(c);
-    cacheRef.current = c;
+    let live = true;
+    setCache(null);
+    cacheRef.current = null;
     setMsg(null);
+    loadIndexCache(site).then((c) => {
+      if (!live) return;
+      setCache(c);
+      cacheRef.current = c;
+    });
+    return () => { live = false; flushIndexCache(site); };
   }, [site]);
   useEffect(() => { providerInfo().then(setProvider); }, []);
 
@@ -59,6 +67,7 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
       update({ urls: data.urls, sitemaps: data.sitemaps, inspected: cache?.inspected || {}, site: cache?.site || {}, listedAt: new Date().toISOString() });
+      flushIndexCache(site);
       const fromMaps = data.urls.filter((u: any) => u.sources.includes("sitemap")).length;
       setMsg({
         text: `Found ${num(data.urls.length)} URLs: ${num(fromMaps)} from ${data.sitemaps.length} sitemap file(s), the rest from search results.` +
@@ -87,7 +96,8 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
       },
       () => stop.current
     );
-    if (r.quotaExceeded) setMsg({ text: "Google's daily URL Inspection quota for this property is used up (about 2,000 checks a day). Results so far are saved; continue tomorrow.", error: true });
+    flushIndexCache(site);
+    if (r.quotaExceeded) setMsg({ text: "Google's daily URL Inspection quota for this property is used up (about 2,000 checks a day). Results so far are saved; click “Inspect in Search Console” again tomorrow and it continues with the pages not yet checked.", error: true });
     else if (r.error) setMsg({ text: r.error, error: true });
     setScan(null);
   };
@@ -109,6 +119,7 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
       },
       () => stop.current
     );
+    flushIndexCache(site);
     if (r.quotaExceeded) setMsg({ text: `Your ${provider?.provider || "search provider"} credits are used up. Results so far are saved.`, error: true });
     else if (r.error) setMsg({ text: r.error, error: true });
     setScan(null);
@@ -119,9 +130,9 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
   const queueNext = () => {
     if (!cache) return;
     const pending = cache.urls.filter((u) => !cache.inspected[u.url] && (includeSeen || !u.sources.includes("search")));
-    inspect(pending.slice(0, limit).map((u) => u.url));
+    inspect(cap(pending).map((u) => u.url));
   };
-  const recheckNot = () => result && inspect(result.notIndexed.filter((r) => r.how === "URL Inspection").slice(0, limit).map((r) => r.url));
+  const recheckNot = () => result && inspect(cap(result.notIndexed.filter((r) => r.how === "URL Inspection")).map((r) => r.url));
 
   /** site: search runs on the list currently on screen, skipping URLs already searched today. */
   const today = new Date().toDateString();
@@ -158,8 +169,9 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
           </button>
           <label className="control" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
             Check up to
-            <select value={limit} onChange={(e) => setLimit(Number(e.target.value))} style={{ minWidth: 90 }}>
-              {[20, 50, 200, 500, 1000, 1900].map((n) => <option key={n} value={n}>{n}</option>)}
+            <select value={limit} onChange={(e) => setLimit(Number(e.target.value))} style={{ minWidth: 150 }}>
+              <option value={0}>All{cache ? ` (${num(cache.urls.length)})` : ""}</option>
+              {[20, 50, 200, 500, 1000, 2000, 5000, 10000].map((n) => <option key={n} value={n}>{num(n)}</option>)}
             </select>
             URLs
           </label>
@@ -173,7 +185,7 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
           <button className="btn" onClick={recheckNot} disabled={!result?.notIndexed.length || !!scan}>Re-inspect unindexed</button>
           <button
             className="btn"
-            onClick={() => searchSite(viewUrls().slice(0, limit))}
+            onClick={() => searchSite(cap(viewUrls()))}
             disabled={!provider?.provider || !result || !!scan || view === "errors"}
             title={provider?.provider ? `Runs site:<url> through ${provider.provider}` : "Add SERPAPI_KEY or SERPER_API_KEY to enable"}
           >
@@ -181,7 +193,7 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
           </button>
           {scan && <button className="btn" onClick={() => (stop.current = true)}>Stop</button>}
           {cache && !scan && (
-            <button className="btn" onClick={() => { localStorage.removeItem(`dash:index:${site}`); setCache(null); cacheRef.current = null; onChange?.(); }}>Clear saved results</button>
+            <button className="btn" onClick={async () => { await clearIndexCache(site); setCache(null); cacheRef.current = null; onChange?.(); }}>Clear saved results</button>
           )}
         </div>
         {provider && !provider.provider && (
@@ -199,7 +211,7 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
         {cache && <p className="muted" style={{ marginBottom: 0 }}>URL list loaded {new Date(cache.listedAt).toLocaleString()}.</p>}
       </div>
 
-      {!cache && <div className="notice" style={{ marginTop: 16 }}>Load the URL list to start. URL Inspection uses Google's quota of about 2,000 URLs per property per day; each site: search uses one credit from your search provider.</div>}
+      {!cache && <div className="notice" style={{ marginTop: 16 }}>Load the URL list to start. “All” checks every URL from your sitemaps. URL Inspection allows about 2,000 URLs per property per day, so large sites take several days: each run continues with the pages not yet checked. Each site: search uses one credit from your search provider.</div>}
 
       {result && (
         <>
