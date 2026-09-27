@@ -41,6 +41,15 @@ export async function GET(req: NextRequest) {
 
     const sitemaps = await listSitemaps(token, siteUrl);
     const queue = sitemaps.map((s) => s.path);
+    // Also read the site's own /sitemap.xml, in case some sitemaps aren't submitted in Search Console
+    const host = siteUrl.startsWith("sc-domain:") ? siteUrl.slice(10) : new URL(siteUrl).host;
+    const bare = host.replace(/^www\./, "");
+    const fallback = siteUrl.startsWith("sc-domain:")
+      ? [`https://www.${bare}/sitemap.xml`, `https://${bare}/sitemap.xml`]
+      : [`${new URL(siteUrl).origin}/sitemap.xml`];
+    const optional = new Set(fallback.filter((f) => !queue.includes(f)));
+    queue.push(...optional);
+    const failedOptional = new Set<string>();
     const seenMaps = new Set<string>();
     const urls = new Map<string, Set<string>>();
     const errors: { sitemap: string; error: string }[] = [];
@@ -66,7 +75,8 @@ export async function GET(req: NextRequest) {
               urls.get(u)!.add("sitemap");
             }
           } catch (e) {
-            errors.push({ sitemap: sm, error: e instanceof Error ? e.message : "Failed" });
+            if (optional.has(sm)) failedOptional.add(sm);
+            else errors.push({ sitemap: sm, error: e instanceof Error ? e.message : "Failed" });
           }
         })
       );
@@ -84,7 +94,7 @@ export async function GET(req: NextRequest) {
     }
 
     return NextResponse.json({
-      sitemaps: Array.from(seenMaps),
+      sitemaps: Array.from(seenMaps).filter((m) => !failedOptional.has(m)),
       errors,
       urls: Array.from(urls.entries())
         .slice(0, MAX_URLS)
