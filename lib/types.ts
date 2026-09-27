@@ -1,8 +1,14 @@
+// lib/types.ts
+import type { Sources } from "./provenance";
+export type { Source, Sources } from "./provenance";
+export type { SiteCheck } from "./serp";
+
 export type Totals = { clicks: number; impressions: number; ctr: number; position: number };
 export type PageRow = Totals & { key: string; prevPosition: number | null; prevClicks: number; bucket: string; change?: number };
 export type QueryRow = Totals & { key: string; prevPosition: number | null; prevImpressions: number; change?: number };
 
 export type GscData = {
+  sources: Sources;
   range: { startDate: string; endDate: string };
   previousRange: { startDate: string; endDate: string };
   totals: { current: Totals; previous: Totals };
@@ -40,6 +46,7 @@ export type Ga4Totals = {
 };
 
 export type Ga4Data = {
+  sources: Sources;
   range: { startDate: string; endDate: string };
   totals: { current: Ga4Totals; previous: Ga4Totals };
   organicTotals: { sessions: number; users: number };
@@ -59,4 +66,8 @@ export type Properties = {
 export type Inspection = {
   url: string; verdict: string; coverageState: string; indexingState: string;
   lastCrawlTime: string; googleCanonical: string; link: string;
+  /** When the check ran (ISO). */
+  checkedAt?: string;
+  /** Google's full indexStatusResult. */
+  raw?: Record<string, unknown>;
 };
