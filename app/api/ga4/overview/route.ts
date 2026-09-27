@@ -1,6 +1,8 @@
+// app/api/ga4/overview/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { getGoogleAccessToken } from "@/lib/token";
-import { runReport, runRealtime } from "@/lib/google";
+import { runReport, runRealtime, ga4Endpoint, GaReport } from "@/lib/google";
+import { Recorder, ga4HomeUrl, GA4_EXPLORER } from "@/lib/provenance";
 import { ranges, parseDays } from "@/lib/dates";
 import { fail } from "@/lib/api";
 
@@ -19,34 +21,60 @@ export async function GET(req: NextRequest) {
     const m = (names: string[]) => names.map((name) => ({ name }));
     const byDesc = (metric: string) => [{ metric: { metricName: metric }, desc: true }];
 
+    const rec = new Recorder();
+    const system = "Google Analytics Data API (GA4)";
+    const base = {
+      system,
+      verifyUrl: ga4HomeUrl(id),
+      verifyLabel: "Open this GA4 property",
+      explorerUrl: GA4_EXPLORER,
+      explorerLabel: "Rerun this request in Google's GA4 Query Explorer",
+    };
+    const report = (sid: string, label: string, body: Record<string, any>, how: string) =>
+      rec.call(
+        { ...base, id: sid, label, endpoint: ga4Endpoint(id), request: body, range: body.dateRanges?.[0], verifyHow: how },
+        () => runReport(token, id, body),
+        (r: GaReport) => (r.totals.length ? [...r.rows, { totals: r.totals }] : r.rows)
+      );
+    const period = (r: { startDate: string; endDate: string }) => `set the date range to ${r.startDate} – ${r.endDate} (custom)`;
+
+    const realtimeBody = { dimensions: [{ name: "country" }], metrics: [{ name: "activeUsers" }], limit: 20 };
     const [trend, prev, countries, cities, channels, landing, organic, realtime] = await Promise.all([
-      runReport(token, id, {
+      report("ga4.trend", "Users, sessions and page views by day (this period)", {
         dateRanges: [current], dimensions: [{ name: "date" }], metrics: m(METRICS),
         metricAggregations: ["TOTAL"], orderBys: [{ dimension: { dimensionName: "date" } }], limit: 400,
-      }),
-      runReport(token, id, { dateRanges: [previous], metrics: m(METRICS) }),
-      runReport(token, id, {
+      }, `GA4 → Reports → Reports snapshot, ${period(current)}. “Users” here is GA4's Total users metric; Reports → User attributes → Overview shows it directly.`),
+      report("ga4.previous", "Totals for the previous period", { dateRanges: [previous], metrics: m(METRICS) },
+        `GA4 → Reports → Reports snapshot, ${period(previous)}.`),
+      report("ga4.countries", "Users by country", {
         dateRanges: [current], dimensions: [{ name: "country" }, { name: "countryId" }],
         metrics: m(["totalUsers", "sessions", "engagementRate"]), orderBys: byDesc("totalUsers"), limit: 250,
-      }),
-      runReport(token, id, {
+      }, `GA4 → Reports → User attributes → Demographic details, dimension Country, ${period(current)}.`),
+      report("ga4.cities", "Users by city", {
         dateRanges: [current], dimensions: [{ name: "city" }, { name: "country" }],
         metrics: m(["totalUsers", "sessions"]), orderBys: byDesc("totalUsers"), limit: 50,
-      }),
-      runReport(token, id, {
+      }, `GA4 → Reports → User attributes → Demographic details, dimension City, ${period(current)}.`),
+      report("ga4.channels", "Sessions by channel", {
         dateRanges: [current], dimensions: [{ name: "sessionDefaultChannelGroup" }],
         metrics: m(["sessions", "totalUsers"]), orderBys: byDesc("sessions"), limit: 20,
-      }),
-      runReport(token, id, {
+      }, `GA4 → Reports → Acquisition → Traffic acquisition (Session default channel group), ${period(current)}.`),
+      report("ga4.landing", "Top landing pages", {
         dateRanges: [current], dimensions: [{ name: "landingPage" }],
         metrics: m(["sessions", "totalUsers", "engagementRate"]), orderBys: byDesc("sessions"), limit: 50,
-      }),
-      runReport(token, id, {
+      }, `GA4 → Reports → Engagement → Landing page, ${period(current)}.`),
+      report("ga4.organic", "Organic search sessions by day", {
         dateRanges: [current], dimensions: [{ name: "date" }], metrics: m(["sessions", "totalUsers"]),
         dimensionFilter: { filter: { fieldName: "sessionDefaultChannelGroup", stringFilter: { value: "Organic Search" } } },
         metricAggregations: ["TOTAL"], orderBys: [{ dimension: { dimensionName: "date" } }], limit: 400,
-      }),
-      runRealtime(token, id, { dimensions: [{ name: "country" }], metrics: [{ name: "activeUsers" }], limit: 20 }).catch(() => null),
+      }, `GA4 → Reports → Acquisition → Traffic acquisition, row “Organic Search”, ${period(current)}.`),
+      rec
+        .call(
+          { ...base, id: "ga4.realtime", label: "Active users in the last 30 minutes", endpoint: ga4Endpoint(id, true), request: realtimeBody,
+            verifyHow: "GA4 → Reports → Realtime. The number changes minute to minute, so it will only match if checked at the same moment." },
+          () => runRealtime(token, id, realtimeBody),
+          (r) => r.rows
+        )
+        .catch(() => null),
     ]);
 
     const obj = (vals: number[]) => Object.fromEntries(METRICS.map((k, i) => [k, vals[i] ?? 0]));
@@ -54,6 +82,7 @@ export async function GET(req: NextRequest) {
     const fmtDate = (d: string) => `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
 
     return NextResponse.json({
+      sources: rec.sources,
       range: current,
       totals: { current: obj(trend.totals), previous: obj(prev.rows[0]?.mets || []) },
       organicTotals: { sessions: organic.totals[0] ?? 0, users: organic.totals[1] ?? 0 },
