@@ -3,6 +3,7 @@
 import type { SiteCheck } from "./types";
 import type { InspectionRec } from "./checks";
 import { isIndexedVerdict, isNotIndexedVerdict } from "./indexCache";
+import { tx } from "./idb";
 
 /* ---------- Types ---------- */
 
@@ -99,49 +100,24 @@ export function compare(prev: Snapshot | null, cur: Snapshot) {
 
 /* ---------- IndexedDB storage ---------- */
 
-const DB = "seo-dashboard";
-const STORE = "snapshots";
-
-function db(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB, 1);
-    req.onupgradeneeded = () => {
-      const s = req.result.createObjectStore(STORE, { keyPath: "id" });
-      s.createIndex("site", "site");
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-function tx<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
-  return db().then(
-    (d) =>
-      new Promise<T>((resolve, reject) => {
-        const t = d.transaction(STORE, mode);
-        const r = fn(t.objectStore(STORE));
-        r.onsuccess = () => resolve(r.result);
-        r.onerror = () => reject(r.error);
-      })
-  );
-}
+const snap = <T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T>) => tx<T>("snapshots", mode, fn);
 
 export const snapshotId = (site: string, date: string) => `${site}|${date}`;
 
 export async function listSnapshots(site: string): Promise<Snapshot[]> {
-  const all = await tx<Snapshot[]>("readonly", (s) => s.index("site").getAll(site));
+  const all = await snap<Snapshot[]>("readonly", (s) => s.index("site").getAll(site));
   return all.sort((a, b) => a.date.localeCompare(b.date));
 }
 
-export const putSnapshot = (s: Snapshot) => tx("readwrite", (st) => st.put(s));
-export const deleteSnapshot = (id: string) => tx("readwrite", (st) => st.delete(id));
+export const putSnapshot = (s: Snapshot) => snap("readwrite", (st) => st.put(s));
+export const deleteSnapshot = (id: string) => snap("readwrite", (st) => st.delete(id));
 
 /** Imports a history file exported earlier. Existing days are kept unless the file has more checks for that day. */
 export async function importSnapshots(list: Snapshot[]) {
   let n = 0;
   for (const s of list) {
     if (!s?.id || !s.site || !s.date || !s.checks) continue;
-    const existing = await tx<Snapshot | undefined>("readonly", (st) => st.get(s.id));
+    const existing = await snap<Snapshot | undefined>("readonly", (st) => st.get(s.id));
     if (!existing || Object.keys(existing.checks).length < Object.keys(s.checks).length) {
       await putSnapshot(s);
       n++;
