@@ -1,3 +1,4 @@
+/* app/globals.css */
 @import url("https://fonts.googleapis.com/css2?family=Public+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap");
 
 :root {
@@ -154,3 +155,39 @@ tr:hover td { background: #f8fafb; }
 .login-box h1 { font-size: 28px; margin: 0 0 8px; letter-spacing: -0.02em; }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* ---------- Source (provenance) ---------- */
+.src-btn {
+  margin-left: 8px; padding: 0 7px; border: 1px solid var(--rule); border-radius: 999px; background: var(--surface);
+  font-size: 11.5px; font-weight: 500; color: var(--link); cursor: pointer; line-height: 18px; vertical-align: 2px;
+}
+.src-btn:hover { border-color: var(--link); }
+.src-btn.compact { margin-left: 6px; }
+.panel-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.src-overlay { position: fixed; inset: 0; z-index: 50; background: rgba(23, 32, 43, .45); display: flex; justify-content: flex-end; }
+.src-dialog {
+  width: min(640px, 100%); height: 100%; overflow-y: auto; background: var(--surface);
+  padding: 20px 22px 32px; box-shadow: -8px 0 24px rgba(23, 32, 43, .18);
+}
+.src-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
+.src-head h3 { margin: 0; font-size: 18px; }
+.src { border-top: 1px solid var(--rule); padding: 14px 0 6px; }
+.src h4 { margin: 0 0 8px; font-size: 15px; }
+.src dl { display: grid; grid-template-columns: 140px 1fr; gap: 4px 12px; margin: 0 0 10px; font-size: 13.5px; }
+.src dt { color: var(--ink-3); }
+.src dd { margin: 0; overflow-wrap: anywhere; }
+.src code { font-size: 12.5px; background: var(--paper); padding: 1px 4px; border-radius: 3px; }
+.src-verify { background: var(--paper); border-radius: var(--radius); padding: 10px 12px; margin-bottom: 10px; font-size: 13.5px; }
+.src-verify p { margin: 4px 0 8px; }
+.src-verify .btn { font-size: 13px; padding: 5px 10px; display: inline-block; }
+.src details { margin: 6px 0; font-size: 13px; }
+.src summary { cursor: pointer; color: var(--link); }
+.src pre { background: var(--paper); padding: 10px; border-radius: var(--radius); overflow-x: auto; font-size: 12px; max-height: 320px; }
+.btn.small { font-size: 12px; padding: 3px 8px; margin: 6px 0; }
+@media (max-width: 520px) { .src dl { grid-template-columns: 1fr; } }
+
+/* ---------- Evidence cells (index checks) ---------- */
+.ev { font-size: 12.5px; line-height: 1.45; }
+.ev + .ev { margin-top: 4px; }
+.ev a { white-space: nowrap; }
+.pill.warn { color: var(--warn); border-color: #ecd6ab; background: #fdf7ec; }
