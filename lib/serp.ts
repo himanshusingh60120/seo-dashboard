@@ -101,7 +101,7 @@ export async function httpCheck(url: string): Promise<HttpCheck> {
         redirect: "manual",
         cache: "no-store",
         headers: { "User-Agent": UA, Accept: "text/html,*/*" },
-        signal: AbortSignal.timeout(15000),
+        signal: AbortSignal.timeout(10000),
       });
     } catch (e) {
       return { status: 0, finalUrl: cur, chain, ok: false, inconclusive: true, error: e instanceof Error ? e.message : "No response", checkedAt };
@@ -167,11 +167,11 @@ function finish(url: string, query: string, provider: string, results: SiteCheck
   };
 }
 
-async function viaSerpApi(url: string, key: string, http: HttpCheck): Promise<SiteCheck> {
+async function viaSerpApi(url: string, key: string, httpP: Promise<HttpCheck>): Promise<SiteCheck> {
   const query = siteQuery(url);
   const p = new URLSearchParams({ engine: "google", q: query, num: "10", hl: HL(), filter: "0", no_cache: "true", api_key: key });
   if (GL()) p.set("gl", GL());
-  const res = await fetch(`https://serpapi.com/search.json?${p.toString()}`, { cache: "no-store", signal: AbortSignal.timeout(45000) });
+  const res = await fetch(`https://serpapi.com/search.json?${p.toString()}`, { cache: "no-store", signal: AbortSignal.timeout(20000) });
   const data = await res.json().catch(() => ({}));
   if (res.status === 429 || /run out of searches|plan limit/i.test(data?.error || "")) throw new QuotaError(data?.error || "SerpApi search limit reached");
   if (!res.ok && !data?.search_metadata) throw new Error(data?.error || `SerpApi error ${res.status}`);
@@ -180,13 +180,13 @@ async function viaSerpApi(url: string, key: string, http: HttpCheck): Promise<Si
   const extra = { archiveUrl: meta.raw_html_file, jsonUrl: meta.json_endpoint, searchId: meta.id };
   // SerpApi reports an empty Google result page as an "error" message; that is a valid "not found".
   if (data.error && !/hasn't returned any results/i.test(data.error)) {
-    return { ...finish(url, query, "SerpApi", [], http, extra), status: "error", reason: `Search failed: ${data.error}`, error: data.error };
+    return { ...finish(url, query, "SerpApi", [], await httpP, extra), status: "error", reason: `Search failed: ${data.error}`, error: data.error };
   }
   const results = (data.organic_results || []).map((r: any) => ({ position: r.position, title: r.title || "", link: r.link || "" }));
-  return finish(url, query, "SerpApi", results, http, extra);
+  return finish(url, query, "SerpApi", results, await httpP, extra);
 }
 
-async function viaSerper(url: string, key: string, http: HttpCheck): Promise<SiteCheck> {
+async function viaSerper(url: string, key: string, httpP: Promise<HttpCheck>): Promise<SiteCheck> {
   const query = siteQuery(url);
   const body: Record<string, unknown> = { q: query, num: 10, hl: HL() };
   if (GL()) body.gl = GL();
@@ -195,19 +195,20 @@ async function viaSerper(url: string, key: string, http: HttpCheck): Promise<Sit
     cache: "no-store",
     headers: { "X-API-KEY": key, "Content-Type": "application/json" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(45000),
+    signal: AbortSignal.timeout(20000),
   });
   const data = await res.json().catch(() => ({}));
   if (res.status === 429 || (res.status === 400 && /credits/i.test(data?.message || ""))) throw new QuotaError(data?.message || "Serper credits used up");
   if (!res.ok) throw new Error(data?.message || `Serper error ${res.status}`);
   const results = (data.organic || []).map((r: any) => ({ position: r.position, title: r.title || "", link: r.link || "" }));
-  return finish(url, query, "Serper.dev", results, http, {});
+  return finish(url, query, "Serper.dev", results, await httpP, {});
 }
 
 export async function siteCheck(url: string): Promise<SiteCheck> {
   const p = serpProvider();
   if (!p) throw new Error("No search provider configured. Add SERPAPI_KEY or SERPER_API_KEY to the environment variables.");
-  // The page check is free, so it runs first; the search costs one credit
-  const http = await httpCheck(url);
-  return p.name === "serpapi" ? viaSerpApi(url, p.key, http) : viaSerper(url, p.key, http);
+  // The page check (free) and the search (one credit) run at the same time
+  const httpP = httpCheck(url);
+  httpP.catch(() => {});
+  return p.name === "serpapi" ? viaSerpApi(url, p.key, httpP) : viaSerper(url, p.key, httpP);
 }
