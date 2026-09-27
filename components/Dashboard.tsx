@@ -1,18 +1,24 @@
+// components/Dashboard.tsx
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { signOut, useSession } from "next-auth/react";
-import type { GscData, Ga4Data, Properties } from "@/lib/types";
+import type { GscData, Ga4Data, Properties, Sources } from "@/lib/types";
+import { loadIndexCache, indexScanSource } from "@/lib/indexCache";
+import { downloadJson, fileSafe } from "@/lib/evidence";
+import { SourcesProvider } from "./ui";
+import DeindexReport from "./DeindexReport";
 import Overview from "./Overview";
 import Rankings from "./Rankings";
 import Indexing from "./Indexing";
 import Queries from "./Queries";
 import Audience from "./Audience";
 
-type Tab = "overview" | "rankings" | "indexing" | "queries" | "audience";
+type Tab = "overview" | "rankings" | "indexing" | "deindexed" | "queries" | "audience";
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "rankings", label: "Rankings" },
   { id: "indexing", label: "Indexing" },
+  { id: "deindexed", label: "Deindexed pages" },
   { id: "queries", label: "Queries" },
   { id: "audience", label: "Traffic & geography" },
 ];
@@ -48,6 +54,28 @@ export default function Dashboard() {
   const [live, setLive] = useState(true);
   const [updated, setUpdated] = useState<Date | null>(null);
   const reqId = useRef(0);
+  const [indexVersion, setIndexVersion] = useState(0);
+  const bumpIndex = useCallback(() => setIndexVersion((v) => v + 1), []);
+
+  // Every source behind the numbers on screen, so any "Source" button can explain itself
+  const sources = useMemo<Sources>(() => {
+    const idx = site && typeof window !== "undefined" ? indexScanSource(loadIndexCache(site)) : null;
+    return { ...(gsc?.sources || {}), ...(ga?.sources || {}), ...(idx ? { [idx.id]: idx } : {}) };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gsc, ga, site, indexVersion, tab]);
+
+  const downloadEvidence = () => {
+    downloadJson(`evidence-${fileSafe(site)}-${new Date().toISOString().slice(0, 10)}.json`, {
+      about: "Every figure in the dashboard with the Google API request that produced it. Rerun any request in Google's API Explorer (Search Console) or GA4 Query Explorer to reproduce the numbers.",
+      exportedAt: new Date().toISOString(),
+      exportedBy: session?.user?.email,
+      searchConsoleProperty: site,
+      ga4Property: ga4 || null,
+      periodDays: days,
+      sources,
+      data: { searchConsole: gsc ? { ...gsc, sources: undefined } : null, ga4: ga ? { ...ga, sources: undefined } : null },
+    });
+  };
 
   // Load property lists once
   useEffect(() => {
@@ -144,6 +172,7 @@ export default function Dashboard() {
             </select>
           </label>
           <button className="btn" onClick={load} disabled={loading || !site}>{loading ? "Refreshing…" : "Refresh"}</button>
+          <button className="btn" onClick={downloadEvidence} disabled={!gsc} title="Download every number with the exact Google API request behind it">Download evidence</button>
           <button className="live btn" onClick={() => setLive(!live)} aria-pressed={live} title="Refresh automatically every 5 minutes">
             <span className={`live-dot ${live ? "" : "off"}`} /> {live ? "Auto-refresh on" : "Auto-refresh off"}
           </button>
@@ -158,6 +187,7 @@ export default function Dashboard() {
         </nav>
       </header>
 
+      <SourcesProvider value={sources}>
       <main>
         {error && <div className="notice error">{error}</div>}
         {props && props.gsc.length === 0 && (
@@ -167,16 +197,19 @@ export default function Dashboard() {
           <p className="muted" style={{ margin: 0 }}>
             Updated {updated.toLocaleTimeString()}
             {gsc && ` · Search data ${gsc.range.startDate} to ${gsc.range.endDate} (Search Console reports with a ~3 day delay)`}
+            {gsc && " · Every figure has a Source button showing the Google API call behind it."}
           </p>
         )}
         {!gsc && !error && <div className="notice">Loading data for {site || "your properties"}…</div>}
 
         {gsc && tab === "overview" && <Overview gsc={gsc} ga={ga} gaError={gaError} hasGa4={!!ga4} site={site} />}
         {gsc && tab === "rankings" && <Rankings gsc={gsc} />}
-        {site && tab === "indexing" && <Indexing site={site} />}
+        {site && tab === "indexing" && <Indexing site={site} onChange={bumpIndex} />}
+        {site && tab === "deindexed" && <DeindexReport site={site} onChange={bumpIndex} />}
         {gsc && tab === "queries" && <Queries gsc={gsc} />}
         {tab === "audience" && <Audience ga={ga} gaError={gaError} hasGa4={!!ga4} loading={loading} />}
       </main>
+      </SourcesProvider>
     </>
   );
 }
