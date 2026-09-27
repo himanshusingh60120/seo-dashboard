@@ -8,13 +8,38 @@
  *   - Serper.dev (SERPER_API_KEY): cheaper, returns the results as JSON only.
  */
 
+/** The page's own HTTP response, following redirects. Free: no search credit used. */
+export type HttpCheck = {
+  /** Final status after following redirects (0 = no response). */
+  status: number;
+  finalUrl: string;
+  /** Every hop, e.g. 301 → 200. */
+  chain: { url: string; status: number }[];
+  /** True when the page ends in HTTP 200, directly or through redirects. */
+  ok: boolean;
+  /** True when the response can't settle the question (timeout, 403, 429, 5xx), e.g. bot protection. */
+  inconclusive: boolean;
+  error?: string;
+  checkedAt: string;
+};
+
 export type SiteCheck = {
   url: string;
   /** Exactly what was searched: `site:` followed immediately by the full URL. */
   query: string;
+  /**
+   * found: the first result is this URL (or the URL it redirects to) AND the page loads with HTTP 200.
+   * not_found: either part failed. error: the search failed or the page check was inconclusive.
+   */
   status: "found" | "not_found" | "error";
+  /** Plain-language reason for the status. */
+  reason: string;
+  /** The first organic result's link. */
+  firstResultUrl: string;
   /** The result link that matched the URL, when found. */
   matchedUrl: string;
+  /** The page's HTTP status check. */
+  http?: HttpCheck;
   resultsReturned: number;
   results: { position: number; title: string; link: string }[];
   provider: string;
@@ -62,14 +87,77 @@ export function matchKey(u: string) {
   }
 }
 
-function finish(url: string, query: string, provider: string, results: SiteCheck["results"], extra: Partial<SiteCheck>): SiteCheck {
-  const target = matchKey(url);
-  const hit = results.find((r) => matchKey(r.link) === target);
+const UA = "Mozilla/5.0 (compatible; SearchDashboard/1.0; index check)";
+
+/** Requests the page and follows up to 5 redirects by hand so every hop is recorded. */
+export async function httpCheck(url: string): Promise<HttpCheck> {
+  const chain: HttpCheck["chain"] = [];
+  const checkedAt = new Date().toISOString();
+  let cur = url;
+  for (let hop = 0; hop < 6; hop++) {
+    let res: Response;
+    try {
+      res = await fetch(cur, {
+        redirect: "manual",
+        cache: "no-store",
+        headers: { "User-Agent": UA, Accept: "text/html,*/*" },
+        signal: AbortSignal.timeout(15000),
+      });
+    } catch (e) {
+      return { status: 0, finalUrl: cur, chain, ok: false, inconclusive: true, error: e instanceof Error ? e.message : "No response", checkedAt };
+    }
+    try { await res.body?.cancel(); } catch {}
+    chain.push({ url: cur, status: res.status });
+    const loc = res.headers.get("location");
+    if (res.status >= 300 && res.status < 400 && loc) {
+      cur = new URL(loc, cur).toString();
+      continue;
+    }
+    const inconclusive = res.status === 403 || res.status === 429 || res.status >= 500;
+    return { status: res.status, finalUrl: cur, chain, ok: res.status === 200, inconclusive, checkedAt };
+  }
+  return { status: chain[chain.length - 1]?.status || 0, finalUrl: cur, chain, ok: false, inconclusive: false, error: "More than 5 redirects", checkedAt };
+}
+
+const chainText = (h: HttpCheck) => h.chain.map((c) => c.status).join(" → ") || "no response";
+
+/**
+ * Applies the rule: indexed only when the FIRST site: result is the page (or where it redirects to)
+ * and the page loads with HTTP 200, directly or through working redirects.
+ */
+function finish(url: string, query: string, provider: string, results: SiteCheck["results"], http: HttpCheck, extra: Partial<SiteCheck>): SiteCheck {
+  const targets = new Set([matchKey(url), matchKey(http.finalUrl)]);
+  const first = results[0];
+  const firstMatches = !!first && targets.has(matchKey(first.link));
+  const elsewhere = results.find((r) => targets.has(matchKey(r.link)));
+
+  let status: SiteCheck["status"];
+  let reason: string;
+  if (http.inconclusive) {
+    status = "error";
+    reason = `Page check inconclusive (${http.error || `HTTP ${chainText(http)}`}); the site may be blocking automated requests`;
+  } else if (!results.length) {
+    status = "not_found";
+    reason = "site: returned no results";
+  } else if (!firstMatches) {
+    status = "not_found";
+    reason = elsewhere ? `Page is result #${elsewhere.position}, not the first` : "Page is not in the site: results";
+  } else if (!http.ok) {
+    status = "not_found";
+    reason = `First result, but the page returns HTTP ${chainText(http)}${http.error ? ` (${http.error})` : ""}`;
+  } else {
+    status = "found";
+    reason = `First result, page returns HTTP ${chainText(http)}`;
+  }
+
   return {
     url,
     query,
-    status: hit ? "found" : "not_found",
-    matchedUrl: hit?.link || "",
+    status,
+    reason,
+    firstResultUrl: first?.link || "",
+    matchedUrl: firstMatches ? first.link : "",
+    http,
     resultsReturned: results.length,
     results,
     provider,
@@ -79,7 +167,7 @@ function finish(url: string, query: string, provider: string, results: SiteCheck
   };
 }
 
-async function viaSerpApi(url: string, key: string): Promise<SiteCheck> {
+async function viaSerpApi(url: string, key: string, http: HttpCheck): Promise<SiteCheck> {
   const query = siteQuery(url);
   const p = new URLSearchParams({ engine: "google", q: query, num: "10", hl: HL(), filter: "0", no_cache: "true", api_key: key });
   if (GL()) p.set("gl", GL());
@@ -92,13 +180,13 @@ async function viaSerpApi(url: string, key: string): Promise<SiteCheck> {
   const extra = { archiveUrl: meta.raw_html_file, jsonUrl: meta.json_endpoint, searchId: meta.id };
   // SerpApi reports an empty Google result page as an "error" message; that is a valid "not found".
   if (data.error && !/hasn't returned any results/i.test(data.error)) {
-    return { ...finish(url, query, "SerpApi", [], extra), status: "error", error: data.error };
+    return { ...finish(url, query, "SerpApi", [], http, extra), status: "error", reason: `Search failed: ${data.error}`, error: data.error };
   }
   const results = (data.organic_results || []).map((r: any) => ({ position: r.position, title: r.title || "", link: r.link || "" }));
-  return finish(url, query, "SerpApi", results, extra);
+  return finish(url, query, "SerpApi", results, http, extra);
 }
 
-async function viaSerper(url: string, key: string): Promise<SiteCheck> {
+async function viaSerper(url: string, key: string, http: HttpCheck): Promise<SiteCheck> {
   const query = siteQuery(url);
   const body: Record<string, unknown> = { q: query, num: 10, hl: HL() };
   if (GL()) body.gl = GL();
@@ -113,11 +201,13 @@ async function viaSerper(url: string, key: string): Promise<SiteCheck> {
   if (res.status === 429 || (res.status === 400 && /credits/i.test(data?.message || ""))) throw new QuotaError(data?.message || "Serper credits used up");
   if (!res.ok) throw new Error(data?.message || `Serper error ${res.status}`);
   const results = (data.organic || []).map((r: any) => ({ position: r.position, title: r.title || "", link: r.link || "" }));
-  return finish(url, query, "Serper.dev", results, {});
+  return finish(url, query, "Serper.dev", results, http, {});
 }
 
 export async function siteCheck(url: string): Promise<SiteCheck> {
   const p = serpProvider();
   if (!p) throw new Error("No search provider configured. Add SERPAPI_KEY or SERPER_API_KEY to the environment variables.");
-  return p.name === "serpapi" ? viaSerpApi(url, p.key) : viaSerper(url, p.key);
+  // The page check is free, so it runs first; the search costs one credit
+  const http = await httpCheck(url);
+  return p.name === "serpapi" ? viaSerpApi(url, p.key, http) : viaSerper(url, p.key, http);
 }
