@@ -2,7 +2,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SiteCheck, Source } from "@/lib/types";
-import { loadIndexCache, saveIndexCache, IndexCache } from "@/lib/indexCache";
+import { loadIndexCache, saveIndexCache, flushIndexCache, IndexCache } from "@/lib/indexCache";
 import { inspectBatch, siteBatch, runBatches, providerInfo, localDate, InspectionRec } from "@/lib/checks";
 import {
   Snapshot, UrlCheck, Method, DeindexRow, compare, overall, listSnapshots, putSnapshot, deleteSnapshot,
@@ -12,7 +12,7 @@ import { reportHtml, reportCsvRows, downloadFile, downloadJson, fileSafe } from 
 import { DataTable, Kpis, Section, SubTabs, SourcesProvider, useSources, num } from "./ui";
 
 type View = "deindexed" | "possible" | "newly" | "all" | "history";
-const LIMITS = [20, 50, 200, 500, 1000, 1900];
+const LIMITS = [20, 50, 200, 500, 1000, 2000, 5000, 10000];
 
 /* ---------- Evidence cell: both checks for one URL on one day ---------- */
 
@@ -62,7 +62,8 @@ export default function DeindexReport({ site, onChange }: { site: string; onChan
   const [loaded, setLoaded] = useState(false);
   const [provider, setProvider] = useState<{ provider: string | null; archives: boolean } | null>(null);
   const [methods, setMethods] = useState<Method[]>(["inspection", "site"]);
-  const [limit, setLimit] = useState(200);
+  // 0 = every known page
+  const [limit, setLimit] = useState(0);
   const [progress, setProgress] = useState<{ inspection?: [number, number]; site?: [number, number] } | null>(null);
   const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
   const [selected, setSelected] = useState<string>("");
@@ -127,8 +128,8 @@ export default function DeindexReport({ site, onChange }: { site: string; onChan
       const res = await fetch(`/api/gsc/sitemap-urls?site=${encodeURIComponent(site)}`, { cache: "no-store" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      const c = loadIndexCache(site);
-      saveIndexCache(site, { urls: data.urls, sitemaps: data.sitemaps, inspected: c?.inspected || {}, site: c?.site || {}, listedAt: new Date().toISOString() });
+      const c = await loadIndexCache(site);
+      saveIndexCache(site, { urls: data.urls, sitemaps: data.sitemaps, inspected: c?.inspected || {}, site: c?.site || {}, listedAt: new Date().toISOString() }, true);
       onChange?.();
       setMsg({ text: `Loaded ${num(data.urls.length)} URLs from your sitemaps and search results. Run today's check to continue.` });
     } catch (e) {
@@ -143,12 +144,12 @@ export default function DeindexReport({ site, onChange }: { site: string; onChan
     setMsg(null);
     const list = await refresh();
     const latestPrev = [...list].filter((s) => s.date < today).pop() || null;
-    const cache = loadIndexCache(site);
+    const cache = await loadIndexCache(site);
     const existing = fresh ? null : list.find((s) => s.date === today) || null;
     const pool = candidates(latestPrev, cache);
     const planned = existing
-      ? Array.from(new Set([...existing.planned, ...pool])).slice(0, Math.max(limit, existing.planned.length))
-      : pool.slice(0, limit);
+      ? (limit ? Array.from(new Set([...existing.planned, ...pool])).slice(0, Math.max(limit, existing.planned.length)) : Array.from(new Set([...existing.planned, ...pool])))
+      : limit ? pool.slice(0, limit) : pool;
 
     if (!planned.length) {
       setMsg({ text: "There are no pages to check yet. Load the URL list first.", error: true });
@@ -186,7 +187,7 @@ export default function DeindexReport({ site, onChange }: { site: string; onChan
       snap = { ...s, checks, updatedAt: new Date().toISOString() };
       snapRef.current = snap;
       await putSnapshot(snap);
-      const c = loadIndexCache(site);
+      const c = await loadIndexCache(site);
       if (c) {
         if (field === "inspection") results.forEach((r) => { if ((r as InspectionRec).verdict !== "ERROR") c.inspected[r.url] = r as InspectionRec; });
         else { c.site = c.site || {}; results.forEach((r) => { if ((r as SiteCheck).status !== "error") c.site![r.url] = r as SiteCheck; }); }
@@ -215,6 +216,7 @@ export default function DeindexReport({ site, onChange }: { site: string; onChan
         }),
     ]);
     setProgress(null);
+    flushIndexCache(site);
     onChange?.();
     await refresh();
     if (stop.current) notes.push("Stopped. Results so far are saved; “Continue today's check” picks up where it left off.");
@@ -298,8 +300,9 @@ export default function DeindexReport({ site, onChange }: { site: string; onChan
             </button>
             <label className="control" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
               Pages to check
-              <select value={limit} onChange={(e) => setLimit(Number(e.target.value))} style={{ minWidth: 90 }} disabled={running}>
-                {LIMITS.map((n) => <option key={n} value={n}>{n}</option>)}
+              <select value={limit} onChange={(e) => setLimit(Number(e.target.value))} style={{ minWidth: 150 }} disabled={running}>
+                <option value={0}>All pages</option>
+                {LIMITS.map((n) => <option key={n} value={n}>{num(n)}</option>)}
               </select>
             </label>
             <label className="muted" style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -317,7 +320,7 @@ export default function DeindexReport({ site, onChange }: { site: string; onChan
             {!running && <button className="btn" onClick={loadUrlList} disabled={listing}>{listing ? "Reading sitemaps…" : "Reload URL list"}</button>}
           </div>
           <p className="muted" style={{ marginBottom: 0 }}>
-            Pages that were indexed at the last check are checked first. URL Inspection allows about 2,000 pages per property per day; each site: search uses one credit from your provider.
+            Pages that were indexed at the last check are checked first. URL Inspection allows about 2,000 pages per property per day; when it runs out, the check stops and “Continue today's check” (or tomorrow's run) carries on. Each site: search uses one credit from your provider.
           </p>
           {progress && (
             <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
