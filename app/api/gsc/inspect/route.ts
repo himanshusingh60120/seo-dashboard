@@ -1,3 +1,4 @@
+// app/api/gsc/inspect/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { getGoogleAccessToken, HttpError } from "@/lib/token";
 import { inspectUrl } from "@/lib/google";
@@ -17,10 +18,10 @@ export async function POST(req: NextRequest) {
     const results = await pool(urls.slice(0, 25), 5, async (url) => {
       if (quotaExceeded) return null;
       try {
-        return await inspectUrl(token, siteUrl, url);
+        return { ...(await inspectUrl(token, siteUrl, url)), checkedAt: new Date().toISOString() };
       } catch (e) {
         if (e instanceof HttpError && e.status === 429) quotaExceeded = true;
-        return { url, verdict: "ERROR", coverageState: e instanceof Error ? e.message : "Failed", indexingState: "", lastCrawlTime: "", googleCanonical: "", link: "" };
+        return { url, verdict: "ERROR", coverageState: e instanceof Error ? e.message : "Failed", indexingState: "", lastCrawlTime: "", googleCanonical: "", link: "", checkedAt: new Date().toISOString() };
       }
     });
 
