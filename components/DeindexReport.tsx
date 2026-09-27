@@ -37,7 +37,8 @@ function Evidence({ c }: { c?: UrlCheck }) {
       )}
       {s && (
         <div className="ev">
-          <span className={`pill ${pill(sStatus)}`}>{s.status === "found" ? "site: found" : s.status === "not_found" ? "site: not found" : "site: error"}</span>
+          <span className={`pill ${pill(sStatus)}`}>{s.status === "found" ? "site: indexed" : s.status === "not_found" ? "site: not indexed" : "site: inconclusive"}</span>{" "}
+          {s.reason}
           <br />
           <span className="muted">
             {s.query} · {new Date(s.checkedAt).toLocaleString()}
@@ -259,7 +260,7 @@ export default function DeindexReport({ site, onChange }: { site: string; onChan
       request: { query: "site:<full page URL>", inspection: { inspectionUrl: "<each URL>", siteUrl: site } },
       fetchedAt: cur.updatedAt,
       rowCount: Object.keys(cur.checks).length,
-      formula: `${inspected} page(s) inspected and ${searched} searched with site: on ${cur.date}. A page is “deindexed” when at least one check found it indexed on ${prev?.date || "the earlier day"} and a check on ${cur.date} found it not indexed; if today's two checks disagree it's listed as “possibly deindexed”. For site:, a page counts as found only when that exact URL (ignoring protocol, www and a trailing slash) is in the results.`,
+      formula: `${inspected} page(s) inspected and ${searched} searched with site: on ${cur.date}. A page is “deindexed” when at least one check found it indexed on ${prev?.date || "the earlier day"} and a check on ${cur.date} found it not indexed; if today's two checks disagree it's listed as “possibly deindexed”. For site:, a page counts as indexed only when the FIRST result for site:<full URL> is that page (or the URL it redirects to; protocol, www and a trailing slash are ignored) and the page loads with HTTP 200, directly or through redirects. Timeouts, 403, 429 and 5xx are marked inconclusive, never deindexed.`,
       verifyHow: "Each row has its own evidence: “Search Console” opens Google's inspection of that URL, “Repeat on Google” reruns the same site: search, and “Saved results page” (SerpApi) shows the Google page exactly as it looked at the time of the check.",
     };
     return { ...parentSources, [src.id]: src };
