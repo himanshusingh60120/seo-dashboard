@@ -1,6 +1,8 @@
+// app/api/gsc/performance/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { getGoogleAccessToken } from "@/lib/token";
-import { searchAnalytics, searchAnalyticsAll, normalizeHost, SARow } from "@/lib/google";
+import { searchAnalytics, searchAnalyticsAll, normalizeHost, SARow, SABody, saRequest, saEndpoint } from "@/lib/google";
+import { Recorder, gscPerformanceUrl, GSC_EXPLORER } from "@/lib/provenance";
 import { ranges, parseDays } from "@/lib/dates";
 import { fail } from "@/lib/api";
 
@@ -37,14 +39,50 @@ export async function GET(req: NextRequest) {
     const { current, previous } = ranges(days, "gsc");
     const brand = (req.nextUrl.searchParams.get("brand") || normalizeHost(siteUrl).split(".")[0]).toLowerCase();
 
+    const rec = new Recorder();
+    const system = "Google Search Console API (Search Analytics)";
+    const explorer = { explorerUrl: GSC_EXPLORER, explorerLabel: "Rerun this request in Google's API Explorer" };
+
+    // One call: records the exact request, then runs it
+    const one = (id: string, label: string, body: SABody, breakdown?: "query" | "page" | "date", how?: string) =>
+      rec.call(
+        {
+          id, label, system, endpoint: saEndpoint(siteUrl), request: saRequest(body),
+          range: { startDate: body.startDate, endDate: body.endDate },
+          verifyUrl: gscPerformanceUrl(siteUrl, { startDate: body.startDate, endDate: body.endDate }, breakdown),
+          verifyLabel: "Open the same report in Search Console",
+          verifyHow: how ?? `Search Console → Performance → Search results. Set the date range to ${body.startDate} – ${body.endDate} (custom) with search type Web.`,
+          ...explorer,
+        },
+        () => searchAnalytics(token, siteUrl, body),
+        (rows) => rows
+      );
+    // Paged call (25,000 rows per request)
+    const all = (id: string, label: string, body: SABody & { dimensions: string[] }, breakdown: "query" | "page") =>
+      rec.call(
+        {
+          id, label, system, endpoint: saEndpoint(siteUrl),
+          request: { ...saRequest({ ...body, rowLimit: 25000, startRow: 0 }), _note: "Repeated with startRow 25000, 50000… until fewer than 25,000 rows come back." },
+          range: { startDate: body.startDate, endDate: body.endDate },
+          verifyUrl: gscPerformanceUrl(siteUrl, body, breakdown),
+          verifyLabel: "Open the same report in Search Console",
+          verifyHow: `Search Console → Performance → Search results → ${breakdown === "page" ? "Pages" : "Queries"} tab, date range ${body.startDate} – ${body.endDate}. Search Console's interface shows at most 1,000 rows; the API returns up to 50,000, so row counts can be higher here.`,
+          ...explorer,
+        },
+        () => searchAnalyticsAll(token, siteUrl, body),
+        (rows) => rows
+      );
+
     const [totCur, totPrev, trend, pagesCur, pagesPrev, qCur, qPrev] = await Promise.all([
-      searchAnalytics(token, siteUrl, { ...current }),
-      searchAnalytics(token, siteUrl, { ...previous }),
-      searchAnalytics(token, siteUrl, { ...current, dimensions: ["date"], rowLimit: 500 }),
-      searchAnalyticsAll(token, siteUrl, { ...current, dimensions: ["page"] }),
-      searchAnalyticsAll(token, siteUrl, { ...previous, dimensions: ["page"] }),
-      searchAnalyticsAll(token, siteUrl, { ...current, dimensions: ["query"] }),
-      searchAnalyticsAll(token, siteUrl, { ...previous, dimensions: ["query"] }),
+      one("gsc.totals.current", `Site totals, ${current.startDate} – ${current.endDate}`, { ...current }, undefined,
+        `Search Console → Performance → Search results. Set the date range to ${current.startDate} – ${current.endDate} (custom), search type Web. The four totals at the top should match.`),
+      one("gsc.totals.previous", `Site totals, ${previous.startDate} – ${previous.endDate}`, { ...previous }, undefined,
+        `Search Console → Performance → Search results. Set the date range to ${previous.startDate} – ${previous.endDate} (custom), search type Web.`),
+      one("gsc.trend", "Clicks, impressions, CTR and position by day", { ...current, dimensions: ["date"], rowLimit: 500 }, "date"),
+      all("gsc.pages.current", `Pages, ${current.startDate} – ${current.endDate}`, { ...current, dimensions: ["page"] }, "page"),
+      all("gsc.pages.previous", `Pages, ${previous.startDate} – ${previous.endDate}`, { ...previous, dimensions: ["page"] }, "page"),
+      all("gsc.queries.current", `Queries, ${current.startDate} – ${current.endDate}`, { ...current, dimensions: ["query"] }, "query"),
+      all("gsc.queries.previous", `Queries, ${previous.startDate} – ${previous.endDate}`, { ...previous, dimensions: ["query"] }, "query"),
     ]);
 
     const t = (rows: SARow[]) =>
@@ -150,7 +188,22 @@ export async function GET(req: NextRequest) {
       `${questions.length} queries are phrased as questions and ${lengths.long} are five words or longer.`,
     ];
 
+    const P = ["gsc.pages.current"], PP = ["gsc.pages.current", "gsc.pages.previous"];
+    const Q = ["gsc.queries.current"], QQ = ["gsc.queries.current", "gsc.queries.previous"];
+    rec.computed("calc.buckets", "Pages by ranking band", "Each page from the Pages report is placed by its average position for the period: 1–10, 11–20, 21–30 or beyond 30. This is the same “Position” value Search Console shows in the Pages tab.", P);
+    rec.computed("calc.losers", "Pages that lost rankings", `Pages present in both periods whose average position got worse by ${dropBy} or more places, and that had at least ${minImpr} impressions in the previous period. Change = position now − position before.`, PP);
+    rec.computed("calc.vanished", "Pages no longer showing", `Pages with at least ${minImpr} impressions in the previous period that do not appear at all in this period's Pages report.`, PP);
+    rec.computed("calc.queryBuckets", "Queries by position", "Each query from the Queries report is placed by its average position: 1–3, 4–10, 11–20, 21–30 or beyond 30.", Q);
+    rec.computed("calc.queryLengths", "Queries by length", "Word count of each query: 1–2, 3–4, or 5 and more words.", Q);
+    rec.computed("calc.branded", "Branded queries", `Queries containing “${brand}” (spaces removed before matching). Share = clicks on those queries ÷ total clicks across all queries returned.`, Q);
+    rec.computed("calc.newLost", "New and lost queries", "New = in this period's Queries report but not the previous one. Lost = in the previous period's report but not this one.", QQ);
+    rec.computed("calc.opportunities", "Queries close to page one", `Queries at average position above 3 and up to 20, with at least ${minImpr} impressions, sorted by impressions.`, Q);
+    rec.computed("calc.movers", "Rising and falling queries", `Queries in both periods with at least ${minImpr} impressions now. Change = position now − position before; negative is an improvement.`, QQ);
+    rec.computed("calc.questions", "Question queries", "Queries starting with how, what, why, when, where, who, which, can, does, do, is, are, should or will.", Q);
+    rec.computed("calc.narrative", "Query summary", "Sentences written from the totals and query lists above; every number in them comes from those sources.", ["gsc.totals.current", "gsc.totals.previous", ...QQ]);
+
     return NextResponse.json({
+      sources: rec.sources,
       range: current,
       previousRange: previous,
       totals: { current: tc, previous: tp },
