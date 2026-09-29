@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { SiteCheck } from "@/lib/types";
 import { loadIndexCache, saveIndexCache, flushIndexCache, clearIndexCache, classify, IndexCache, SiteCell } from "@/lib/indexCache";
-import { inspectBatch, siteBatch, runBatches, providerInfo, InspectionRec } from "@/lib/checks";
+import { inspectBatch, siteBatch, runBatches, providerInfo, InspectionRec, ProviderInfo } from "@/lib/checks";
 import { DataTable, Kpis, Section, SubTabs, Bars, PanelTitle, num } from "./ui";
 
 type V = "not" | "indexed" | "unchecked" | "disagree" | "errors";
@@ -35,7 +35,7 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
   const [includeSeen, setIncludeSeen] = useState(true);
   const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
   const [view, setView] = useState<V>("not");
-  const [provider, setProvider] = useState<{ provider: string | null; archives: boolean } | null>(null);
+  const [provider, setProvider] = useState<ProviderInfo | null>(null);
   const stop = useRef(false);
   const cacheRef = useRef<IndexCache | null>(null);
 
@@ -118,10 +118,18 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
         update({ ...c, site: s });
         setScan({ what: "site: search", done, total: urls.length });
       },
-      () => stop.current
+      () => stop.current,
+      provider?.direct ? 10 : 20
     );
     flushIndexCache(site);
-    if (r.quotaExceeded) setMsg({ text: `Your ${provider?.provider || "search provider"} credits are used up. Results so far are saved.`, error: true });
+    if (r.quotaExceeded) {
+      setMsg({
+        text: r.reason
+          ? `site: search stopped: ${r.reason} Results so far are saved; the pages not reached stay in the list for the next run.`
+          : `Your ${provider?.provider || "search provider"} credits are used up. Results so far are saved.`,
+        error: true,
+      });
+    }
     else if (r.error) setMsg({ text: r.error, error: true });
     setScan(null);
   };
@@ -146,6 +154,16 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
     });
   };
   const viewName = { not: "not indexed", indexed: "indexed", unchecked: "not checked", disagree: "disagreeing", errors: "" }[view];
+  const runSiteSearch = () => {
+    const urls = cap(viewUrls());
+    if (urls.length) return searchSite(urls);
+    setMsg({
+      text: view === "not" && !result?.notIndexed.length
+        ? "No pages are marked not indexed yet. Click “Inspect in Search Console” first, or open the “Not checked” list below and run site: search on that."
+        : `Nothing to search: every page in the “${viewName}” list was already searched today, or the list is empty.`,
+      error: true,
+    });
+  };
 
   const reasons = useMemo(() => {
     const m = new Map<string, number>();
@@ -186,7 +204,7 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
           <button className="btn" onClick={recheckNot} disabled={!result?.notIndexed.length || !!scan}>Re-inspect unindexed</button>
           <button
             className="btn"
-            onClick={() => searchSite(cap(viewUrls()))}
+            onClick={runSiteSearch}
             disabled={!provider?.provider || !result || !!scan || view === "errors"}
             title={provider?.provider ? `Runs site:<url> through ${provider.provider}` : "Add SERPAPI_KEY or SERPER_API_KEY to enable"}
           >
@@ -200,6 +218,11 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
         {provider && !provider.provider && (
           <p className="muted" style={{ marginBottom: 0 }}>
             Pages are checked with URL Inspection only. site: search is optional and not set up; to add it later, set <code>SERPER_API_KEY</code> or <code>SERPAPI_KEY</code> in Vercel.
+          </p>
+        )}
+        {provider?.direct && (
+          <p className="muted" style={{ marginBottom: 0 }}>
+            site: search runs without an API key by asking google.com directly, one page at a time. Google often blocks this from Vercel&apos;s servers; when it does, the run stops and says why. “Repeat on Google” on each row always works in your own browser.
           </p>
         )}
         {scan && (
