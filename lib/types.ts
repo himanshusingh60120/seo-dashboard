@@ -11,6 +11,7 @@ export type GscData = {
   sources: Sources;
   range: { startDate: string; endDate: string };
   previousRange: { startDate: string; endDate: string };
+  compare?: "previous" | "yoy";
   totals: { current: Totals; previous: Totals };
   trend: (Totals & { date: string })[];
   pageCount: number;
