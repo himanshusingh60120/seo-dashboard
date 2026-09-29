@@ -71,6 +71,8 @@ button, select, input { font: inherit; color: inherit; }
 
 /* ---------- Layout ---------- */
 main { max-width: 1320px; margin: 0 auto; padding: 24px; display: grid; gap: 28px; }
+/* Grid children default to min-width: auto, which lets a wide table stretch the page on phones instead of scrolling in its own box */
+main > *, .grid-2 > * { min-width: 0; }
 .section h2 { font-size: 20px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
 .section > p.lede { margin: 0 0 14px; color: var(--ink-2); max-width: 72ch; font-size: 14px; }
 .panel { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 16px 18px; }
@@ -191,3 +193,27 @@ tr:hover td { background: #f8fafb; }
 .ev + .ev { margin-top: 4px; }
 .ev a { white-space: nowrap; }
 .pill.warn { color: var(--warn); border-color: #ecd6ab; background: #fdf7ec; }
+
+/* ---------- Query growth ---------- */
+.bridge { display: grid; gap: 6px; }
+.bridge-row { display: grid; grid-template-columns: 170px 1fr 90px; gap: 10px; align-items: center; font-size: 13px; }
+.bridge-row .num { text-align: right; }
+.bridge-row.net { border-top: 1px solid var(--rule); padding-top: 8px; margin-top: 2px; font-weight: 600; }
+.dv { display: grid; grid-template-columns: 1fr 1fr; height: 14px; }
+.dv > div { display: flex; }
+.dv-l { justify-content: flex-end; border-right: 1px solid var(--ink-3); }
+.dv i { display: block; height: 100%; min-width: 2px; }
+.dv-l i { border-radius: 3px 0 0 3px; }
+.dv-r i { border-radius: 0 3px 3px 0; }
+.legend { display: flex; gap: 14px; font-size: 12px; color: var(--ink-3); margin-bottom: 10px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.pairs { display: grid; gap: 8px; }
+.pair-row { display: grid; grid-template-columns: 80px 1fr 130px; gap: 10px; align-items: center; font-size: 13px; }
+.pair-row .num { text-align: right; }
+.pair-bars { display: grid; gap: 2px; }
+.pair-bars i { display: block; height: 7px; border-radius: 0 2px 2px 0; min-width: 1px; }
+.seg-table th, .seg-table td { white-space: nowrap; }
+@media (max-width: 520px) {
+  .bridge-row { grid-template-columns: 110px 1fr 70px; }
+  .pair-row { grid-template-columns: 64px 1fr 110px; }
+}
