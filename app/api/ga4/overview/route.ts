@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getGoogleAccessToken } from "@/lib/token";
 import { runReport, runRealtime, ga4Endpoint, GaReport } from "@/lib/google";
 import { Recorder, ga4HomeUrl, GA4_EXPLORER } from "@/lib/provenance";
-import { ranges, parseDays } from "@/lib/dates";
+import { ranges, parseDays, parseCompare } from "@/lib/dates";
 import { fail } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
@@ -17,7 +17,7 @@ export async function GET(req: NextRequest) {
     const id = req.nextUrl.searchParams.get("property");
     if (!id || !/^\d+$/.test(id)) return NextResponse.json({ error: "Missing property" }, { status: 400 });
     const days = parseDays(req.nextUrl.searchParams.get("days"));
-    const { current, previous } = ranges(days, "ga4");
+    const { current, previous } = ranges(days, "ga4", parseCompare(req.nextUrl.searchParams.get("compare"), days));
     const m = (names: string[]) => names.map((name) => ({ name }));
     const byDesc = (metric: string) => [{ metric: { metricName: metric }, desc: true }];
 
