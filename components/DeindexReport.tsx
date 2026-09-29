@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SiteCheck, Source } from "@/lib/types";
 import { loadIndexCache, saveIndexCache, flushIndexCache, IndexCache } from "@/lib/indexCache";
-import { inspectBatch, siteBatch, runBatches, providerInfo, localDate, InspectionRec } from "@/lib/checks";
+import { inspectBatch, siteBatch, runBatches, providerInfo, localDate, InspectionRec, ProviderInfo } from "@/lib/checks";
 import {
   Snapshot, UrlCheck, Method, DeindexRow, compare, overall, listSnapshots, putSnapshot, deleteSnapshot,
   importSnapshots, snapshotId, inspectionStatus, siteStatus,
@@ -60,7 +60,7 @@ export default function DeindexReport({ site, onChange }: { site: string; onChan
   const parentSources = useSources();
   const [snaps, setSnaps] = useState<Snapshot[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [provider, setProvider] = useState<{ provider: string | null; archives: boolean } | null>(null);
+  const [provider, setProvider] = useState<ProviderInfo | null>(null);
   const [methods, setMethods] = useState<Method[]>(["inspection", "site"]);
   // 0 = every known page
   const [limit, setLimit] = useState(0);
@@ -93,7 +93,8 @@ export default function DeindexReport({ site, onChange }: { site: string; onChan
     setMsg(null);
     refresh();
   }, [refresh]);
-  useEffect(() => { providerInfo().then((p) => { setProvider(p); if (!p.provider) setMethods(["inspection"]); }); }, []);
+  // The no-key direct search is opt-in here: Google often blocks it, which would interrupt every daily check
+  useEffect(() => { providerInfo().then((p) => { setProvider(p); if (!p.provider || p.direct) setMethods(["inspection"]); }); }, []);
 
   const today = localDate();
   const todaySnap = snaps.find((s) => s.date === today) || null;
@@ -210,8 +211,8 @@ export default function DeindexReport({ site, onChange }: { site: string; onChan
         runBatches<SiteCheck>(todoS, (b) => siteBatch(site, b), async (r, done) => {
           await merge("site", r);
           setProgress((p) => ({ ...p, site: [done, todoS.length] }));
-        }, () => stop.current).then((r) => {
-          if (r.quotaExceeded) notes.push(`Your ${provider?.provider || "search provider"} credits are used up.`);
+        }, () => stop.current, provider?.direct ? 10 : 20).then((r) => {
+          if (r.quotaExceeded) notes.push(r.reason ? `site: search stopped: ${r.reason}` : `Your ${provider?.provider || "search provider"} credits are used up.`);
           if (r.error) notes.push(`site: search: ${r.error}`);
         }),
     ]);
