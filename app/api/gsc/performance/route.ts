@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getGoogleAccessToken } from "@/lib/token";
 import { searchAnalytics, searchAnalyticsAll, normalizeHost, SARow, SABody, saRequest, saEndpoint } from "@/lib/google";
 import { Recorder, gscPerformanceUrl, GSC_EXPLORER } from "@/lib/provenance";
-import { ranges, parseDays } from "@/lib/dates";
+import { ranges, parseDays, parseCompare, compareName } from "@/lib/dates";
 import { fail } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
@@ -36,8 +36,9 @@ export async function GET(req: NextRequest) {
     const days = parseDays(req.nextUrl.searchParams.get("days"));
     const minImpr = Number(req.nextUrl.searchParams.get("minImpr") || 20);
     const dropBy = Number(req.nextUrl.searchParams.get("dropBy") || 5);
-    const { current, previous } = ranges(days, "gsc");
-    const brand = (req.nextUrl.searchParams.get("brand") || normalizeHost(siteUrl).split(".")[0]).toLowerCase();
+    const compare = parseCompare(req.nextUrl.searchParams.get("compare"), days);
+    const { current, previous } = ranges(days, "gsc", compare);
+    const brand = (req.nextUrl.searchParams.get("brand") || normalizeHost(siteUrl).split(".")[0].replace(/-/g, "")).toLowerCase();
 
     const rec = new Recorder();
     const system = "Google Search Console API (Search Analytics)";
@@ -176,7 +177,7 @@ export async function GET(req: NextRequest) {
     const pct = (a: number, b: number) => (b ? round(((a - b) / b) * 100) : 0);
     const narrative = [
       `The site appeared for ${queries.length.toLocaleString()} distinct search queries between ${current.startDate} and ${current.endDate}, collecting ${tc.impressions.toLocaleString()} impressions and ${tc.clicks.toLocaleString()} clicks.`,
-      `Impressions are ${pct(tc.impressions, tp.impressions) >= 0 ? "up" : "down"} ${Math.abs(pct(tc.impressions, tp.impressions))}% and clicks ${pct(tc.clicks, tp.clicks) >= 0 ? "up" : "down"} ${Math.abs(pct(tc.clicks, tp.clicks))}% versus the previous ${days} days; average position moved from ${round(tp.position)} to ${round(tc.position)}.`,
+      `Impressions are ${pct(tc.impressions, tp.impressions) >= 0 ? "up" : "down"} ${Math.abs(pct(tc.impressions, tp.impressions))}% and clicks ${pct(tc.clicks, tp.clicks) >= 0 ? "up" : "down"} ${Math.abs(pct(tc.clicks, tp.clicks))}% versus ${compareName(days, compare)} (${previous.startDate} to ${previous.endDate}); average position moved from ${round(tp.position)} to ${round(tc.position)}.`,
       `${qBuckets.top3 + qBuckets.top10} queries rank on page one (${qBuckets.top3} of them in the top 3), ${qBuckets.top20} sit on page two and ${qBuckets.top30} on page three.`,
       branded.queries
         ? `Queries containing “${brand}” account for ${branded.queries} queries and ${qClicks ? round((branded.clicks / qClicks) * 100) : 0}% of query-level clicks.`
@@ -206,6 +207,7 @@ export async function GET(req: NextRequest) {
       sources: rec.sources,
       range: current,
       previousRange: previous,
+      compare,
       totals: { current: tc, previous: tp },
       trend: trend.map((r) => ({ date: r.keys[0], clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, position: r.position })),
       pageCount: pages.length,
