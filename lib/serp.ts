@@ -6,6 +6,9 @@
  *   - SerpApi (SERPAPI_KEY): keeps an archived copy of Google's results page for every
  *     search, which is the strongest evidence. Recommended.
  *   - Serper.dev (SERPER_API_KEY): cheaper, returns the results as JSON only.
+ *   - Direct (no key): used when neither key is set. Requests google.com from the server,
+ *     one URL at a time. Google often blocks this from cloud servers (429, CAPTCHA or a
+ *     "turn on JavaScript" page); the run then stops and says why. SITE_SEARCH_DIRECT=off disables it.
  */
 
 /** The page's own HTTP response, following redirects. Free: no search credit used. */
@@ -59,9 +62,10 @@ export class QuotaError extends Error {}
 const HL = () => process.env.SERP_HL || "en";
 const GL = () => process.env.SERP_GL || "";
 
-export function serpProvider(): { name: "serpapi" | "serper"; label: string; key: string } | null {
+export function serpProvider(): { name: "serpapi" | "serper" | "direct"; label: string; key: string } | null {
   if (process.env.SERPAPI_KEY) return { name: "serpapi", label: "SerpApi", key: process.env.SERPAPI_KEY };
   if (process.env.SERPER_API_KEY) return { name: "serper", label: "Serper.dev", key: process.env.SERPER_API_KEY };
+  if (process.env.SITE_SEARCH_DIRECT !== "off") return { name: "direct", label: "Google (direct, no key)", key: "" };
   return null;
 }
 
@@ -204,11 +208,82 @@ async function viaSerper(url: string, key: string, httpP: Promise<HttpCheck>): P
   return finish(url, query, "Serper.dev", results, await httpP, {});
 }
 
+const BROWSER_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36";
+
+const decodeEntities = (t: string) =>
+  t.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;|&#x27;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+
+/** Organic results (link + title, in page order) from a Google results page: links that wrap an <h3> title. */
+export function parseGoogleHtml(html: string): SiteCheck["results"] {
+  const out: SiteCheck["results"] = [];
+  const seen = new Set<string>();
+  const re = /<a\b[^>]*?\shref="([^"]+)"[^>]*>((?:(?!<\/a>)[\s\S]){0,3000}?<h3[^>]*>([\s\S]*?)<\/h3>)/gi;
+  for (const m of html.matchAll(re)) {
+    let link = decodeEntities(m[1]);
+    if (link.startsWith("/url?")) link = new URLSearchParams(link.slice(5)).get("q") || "";
+    if (!/^https?:\/\//i.test(link)) continue;
+    try {
+      if (/(^|\.)google\./i.test(new URL(link).hostname)) continue;
+    } catch {
+      continue;
+    }
+    if (seen.has(link)) continue;
+    seen.add(link);
+    out.push({ position: out.length + 1, title: decodeEntities(m[3].replace(/<[^>]+>/g, "")).trim(), link });
+  }
+  return out;
+}
+
+/** No key: asks google.com directly. Any sign of blocking throws QuotaError so the run stops instead of retrying. */
+async function viaDirect(url: string, httpP: Promise<HttpCheck>): Promise<SiteCheck> {
+  const query = siteQuery(url);
+  let res: Response;
+  try {
+    res = await fetch(googleSearchUrl(query), {
+      redirect: "manual",
+      cache: "no-store",
+      headers: { "User-Agent": BROWSER_UA, "Accept-Language": `${HL()},en;q=0.8`, Accept: "text/html" },
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (e) {
+    throw new Error(`Google did not respond: ${e instanceof Error ? e.message : "request failed"}`);
+  }
+  const loc = res.headers.get("location") || "";
+  const drain = async () => { try { await res.body?.cancel(); } catch {} };
+  if (res.status === 429 || res.status === 403 || loc.includes("/sorry/")) {
+    await drain();
+    throw new QuotaError(`Google blocked the search from this server (HTTP ${res.status}).`);
+  }
+  if (loc.includes("consent.google")) {
+    await drain();
+    throw new QuotaError("Google showed its cookie-consent page instead of results.");
+  }
+  if (res.status !== 200) {
+    await drain();
+    throw new QuotaError(`Google answered HTTP ${res.status}${loc ? ` (redirect to ${loc})` : ""} instead of results.`);
+  }
+  const html = await res.text();
+  if (/unusual traffic from your computer|id="captcha-form"|g-recaptcha/i.test(html)) {
+    throw new QuotaError("Google showed a CAPTCHA (unusual traffic from this server).");
+  }
+  const results = parseGoogleHtml(html);
+  if (!results.length && !/did not match any documents|No results found for/i.test(html)) {
+    if (/enablejs|turn on javascript|not redirected within a few seconds/i.test(html)) {
+      throw new QuotaError("Google sent its “turn on JavaScript” page instead of results, so they can't be read from the server.");
+    }
+    throw new QuotaError("Couldn't read Google's results page (its layout may have changed).");
+  }
+  return finish(url, query, "Google (direct)", results, await httpP, {});
+}
+
 export async function siteCheck(url: string): Promise<SiteCheck> {
   const p = serpProvider();
   if (!p) throw new Error("No search provider configured. Add SERPAPI_KEY or SERPER_API_KEY to the environment variables.");
-  // The page check (free) and the search (one credit) run at the same time
+  // The page check (free) and the search run at the same time
   const httpP = httpCheck(url);
   httpP.catch(() => {});
-  return p.name === "serpapi" ? viaSerpApi(url, p.key, httpP) : viaSerper(url, p.key, httpP);
+  if (p.name === "serpapi") return viaSerpApi(url, p.key, httpP);
+  if (p.name === "serper") return viaSerper(url, p.key, httpP);
+  return viaDirect(url, httpP);
 }
