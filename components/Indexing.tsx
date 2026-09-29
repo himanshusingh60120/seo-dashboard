@@ -165,6 +165,32 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
     });
   };
 
+  /**
+   * Every URL from the sitemaps, whatever its status: pages never searched first (sitemap order),
+   * then the oldest searches. Pages searched today are skipped, so clicking again after a stop carries on.
+   */
+  const sitemapCount = useMemo(() => (cache ? cache.urls.filter((u) => u.sources.includes("sitemap")).length : 0), [cache]);
+  const sitemapUrls = (): string[] => {
+    if (!cache) return [];
+    const fresh: string[] = [];
+    const older: { url: string; at: number }[] = [];
+    for (const u of cache.urls) {
+      if (!u.sources.includes("sitemap") || (!includeSeen && u.sources.includes("search"))) continue;
+      const s = cache.site?.[u.url];
+      if (!s) fresh.push(u.url);
+      else if (new Date(s.checkedAt).toDateString() !== today) older.push({ url: u.url, at: new Date(s.checkedAt).getTime() });
+    }
+    return [...fresh, ...older.sort((a, b) => a.at - b.at).map((x) => x.url)];
+  };
+  const runSitemapSearch = () => {
+    const urls = cap(sitemapUrls());
+    if (urls.length) return searchSite(urls);
+    setMsg({
+      text: sitemapCount ? "Every sitemap URL was already searched today. Click again tomorrow to re-check them." : "No sitemap URLs loaded yet. Click “Reload URL list” first.",
+      error: true,
+    });
+  };
+
   const reasons = useMemo(() => {
     const m = new Map<string, number>();
     result?.notIndexed.forEach((r) => m.set(r.state, (m.get(r.state) || 0) + 1));
@@ -209,6 +235,14 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
             title={provider?.provider ? `Runs site:<url> through ${provider.provider}` : "Add SERPAPI_KEY or SERPER_API_KEY to enable"}
           >
             Run site: search on {viewName || "this list"}
+          </button>
+          <button
+            className="btn"
+            onClick={runSitemapSearch}
+            disabled={!provider?.provider || !sitemapCount || !!scan}
+            title="Runs site:<url> on every URL from your sitemaps, starting with pages never searched. Uses the “Check up to” limit."
+          >
+            Run site: search on all sitemap URLs{sitemapCount ? ` (${num(sitemapCount)})` : ""}
           </button>
           {scan && <button className="btn" onClick={() => (stop.current = true)}>Stop</button>}
           {cache && !scan && (
