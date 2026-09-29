@@ -3,7 +3,9 @@
 import type { Inspection, SiteCheck } from "./types";
 
 export type InspectionRec = Inspection & { checkedAt: string };
-export type BatchResult<T> = { results: T[]; quotaExceeded?: boolean };
+export type BatchResult<T> = { results: T[]; quotaExceeded?: boolean; stopReason?: string };
+/** Search provider in use; direct = asking google.com without an API key. */
+export type ProviderInfo = { provider: string | null; archives: boolean; direct?: boolean };
 
 async function post<T>(url: string, body: unknown): Promise<BatchResult<T>> {
   const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -15,7 +17,7 @@ async function post<T>(url: string, body: unknown): Promise<BatchResult<T>> {
 export const inspectBatch = (site: string, urls: string[]) => post<InspectionRec>("/api/gsc/inspect", { siteUrl: site, urls });
 export const siteBatch = (site: string, urls: string[]) => post<SiteCheck>("/api/index/site-check", { siteUrl: site, urls });
 
-export async function providerInfo(): Promise<{ provider: string | null; archives: boolean }> {
+export async function providerInfo(): Promise<ProviderInfo> {
   try {
     const res = await fetch("/api/index/site-check", { cache: "no-store" });
     if (!res.ok) return { provider: null, archives: false };
@@ -35,13 +37,13 @@ export async function runBatches<T>(
   onBatch: (results: T[], done: number) => void,
   shouldStop: () => boolean,
   size = 20
-): Promise<{ stopped: boolean; quotaExceeded: boolean; error?: string }> {
+): Promise<{ stopped: boolean; quotaExceeded: boolean; error?: string; reason?: string }> {
   for (let i = 0; i < urls.length; i += size) {
     if (shouldStop()) return { stopped: true, quotaExceeded: false };
     try {
       const data = await call(urls.slice(i, i + size));
       onBatch(data.results, Math.min(i + size, urls.length));
-      if (data.quotaExceeded) return { stopped: true, quotaExceeded: true };
+      if (data.quotaExceeded) return { stopped: true, quotaExceeded: true, reason: data.stopReason };
     } catch (e) {
       return { stopped: true, quotaExceeded: false, error: e instanceof Error ? e.message : "Request failed" };
     }
