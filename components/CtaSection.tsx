@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { BarTable } from './BarTable';
 import BotCheck from './BotCheck';
 import { CTAS, CTA_REGEX } from '@/lib/cta';
@@ -25,17 +25,21 @@ const CTA_SEARCH: Record<string, string> = {
   connect: '/connect',
 };
 
+function dateRangeLabel(days: number) {
+  const start = new Date();
+  start.setDate(start.getDate() - days);
+  const end = new Date();
+  end.setDate(end.getDate() - 1);
+  return { start: start.toLocaleDateString('en-CA'), end: end.toLocaleDateString('en-CA') };
+}
+
 function Proof({ propertyId, days }: { propertyId: string; days: number }) {
   const [copied, setCopied] = useState(false);
   const ga = `https://analytics.google.com/analytics/web/#/p${propertyId}`;
-
-  const start = new Date();
-  start.setDate(start.getDate() - days);
-  const startStr = start.toLocaleDateString('en-CA');
-  const todayStr = new Date().toLocaleDateString('en-CA');
+  const { start, end } = dateRangeLabel(days);
 
   const request = {
-    dateRanges: [{ startDate: `${days}daysAgo`, endDate: 'today' }],
+    dateRanges: [{ startDate: `${days}daysAgo`, endDate: 'yesterday' }],
     dimensions: [{ name: 'pagePath' }],
     metrics: [{ name: 'screenPageViews' }, { name: 'totalUsers' }],
     dimensionFilter: {
@@ -53,8 +57,8 @@ function Proof({ propertyId, days }: { propertyId: string; days: number }) {
     <div className="panel" style={{ marginBottom: 16 }}>
       <h3>Verify in Google Analytics</h3>
       <p className="muted" style={{ marginTop: 0 }}>
-        Sign in to GA4 with the same Google account, set the date range to <strong>{startStr} → {todayStr}</strong>,
-        and the numbers will match this tab.
+        This tab covers <strong>{start} → {end}</strong>, the same as GA4's "Last {days} days" (today is excluded).
+        Sign in to GA4 with the same Google account and pick that range.
       </p>
       <ul className="narrative">
         <li>
@@ -67,7 +71,8 @@ function Proof({ propertyId, days }: { propertyId: string; days: number }) {
               <code>{CTA_SEARCH[c.key]}</code>{i < CTAS.length - 1 ? ', ' : ''}
             </span>
           ))}
-          . The Views column is the CTA click count.
+          . The Views total is the CTA click count. GA4's search matches the word anywhere in the URL, so if its
+          number is higher, check the "not counted" list below.
         </li>
         <li>
           <a href={`${ga}/reports/explorer?r=lifecycle-traffic-acquisition-v2`} target="_blank" rel="noreferrer">
@@ -105,14 +110,8 @@ export default function CtaSection({ propertyId, days }: { propertyId: string; d
       .catch(e => setErr(String(e)));
   }, [propertyId, days]);
 
-  const totals = useMemo(() => {
-    const t: Record<string, number> = { all: 0 };
-    for (const r of data?.pages ?? []) {
-      t[r.cta] = (t[r.cta] ?? 0) + r.screenPageViews;
-      t.all += r.screenPageViews;
-    }
-    return t;
-  }, [data]);
+  const totals: Record<string, { views: number; users: number }> = data?.totals ?? {};
+  const allViews = Object.values(totals).reduce((s, t) => s + t.views, 0);
 
   const users = { key: 'users', label: 'Users', fmt: (v: number) => v.toLocaleString() };
 
@@ -124,15 +123,58 @@ export default function CtaSection({ propertyId, days }: { propertyId: string; d
       {data && (
         <>
           <div className="cta-cards">
-            {[{ key: 'all', label: 'All CTAs' }, ...CTAS].map(c => (
+            <button className={`cta-card ${cta === 'all' ? 'on' : ''}`} onClick={() => setCta('all')}>
+              <span>All CTAs</span>
+              <strong>{allViews.toLocaleString()}</strong>
+            </button>
+            {CTAS.map(c => (
               <button key={c.key} className={`cta-card ${cta === c.key ? 'on' : ''}`} onClick={() => setCta(c.key)}>
                 <span>{c.label}</span>
-                <strong>{(totals[c.key] ?? 0).toLocaleString()}</strong>
+                <strong>{(totals[c.key]?.views ?? 0).toLocaleString()}</strong>
+                <span className="muted">{(totals[c.key]?.users ?? 0).toLocaleString()} users</span>
               </button>
             ))}
           </div>
 
+          {data.otherViews > 0 && (
+            <div className="notice" style={{ marginBottom: 16 }}>
+              GA4 grouped <strong>{data.otherViews.toLocaleString()}</strong> CTA views into "(other)" because the site has
+              too many distinct URLs. The totals on the cards above are exact, but the breakdown tables below are missing
+              those views.
+            </div>
+          )}
+
           <Proof propertyId={propertyId} days={days} />
+
+          {data.nearMisses?.length > 0 && (
+            <div className="panel" style={{ marginBottom: 16 }}>
+              <h3>Pages that look like CTAs but aren't counted</h3>
+              <p className="muted" style={{ marginTop: 0 }}>
+                These URLs contain a CTA word but don't match the CTA patterns. If any of them are real CTA pages,
+                tell me the pattern and I'll include them.
+              </p>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Page path</th>
+                      <th className="num">Views</th>
+                      <th className="num">Users</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.nearMisses.map((r: any) => (
+                      <tr key={r.path}>
+                        <td className="url">{r.path}</td>
+                        <td className="num">{r.views.toLocaleString()}</td>
+                        <td className="num">{r.users.toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           <div className="bt-grid">
             <BarTable title="By channel" rows={sumBy(data.channels, ['sessionDefaultChannelGroup'], cta)} valueKey="views" cols={[users]} />
@@ -144,7 +186,7 @@ export default function CtaSection({ propertyId, days }: { propertyId: string; d
             <BarTable title="By device" rows={sumBy(data.devices, ['deviceCategory'], cta)} valueKey="views" cols={[users]} />
           </div>
           <p className="bt-note">
-            Counts are views of the CTA pages. Users are summed across pages, so a person who opened two CTAs counts twice.
+            Card totals are exact. Users in the tables are summed across pages, so a person who opened two CTAs counts twice.
           </p>
         </>
       )}
