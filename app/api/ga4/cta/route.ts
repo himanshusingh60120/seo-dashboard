@@ -1,11 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { batchReports } from '@/lib/ga4-report';
 import { withGoogleToken, AuthError } from '@/lib/google-token';
-import { CTA_REGEX, ctaOf, reportIdOf, slugOf } from '@/lib/cta';
+import { CTAS, CTA_REGEX, ctaOf, reportIdOf, slugOf } from '@/lib/cta';
 
 export const dynamic = 'force-dynamic';
 
 type Row = Record<string, any>;
+
+// Exact GA4 filters per CTA, used for the headline totals (immune to "(other)" grouping)
+const CTA_FILTERS: Record<string, { matchType: string; value: string }> = {
+  license: { matchType: 'BEGINS_WITH', value: '/license-variant' },
+  sample: { matchType: 'BEGINS_WITH', value: '/request-sample/' },
+  expert: { matchType: 'BEGINS_WITH', value: '/talk-to-expert/' },
+  custom: { matchType: 'BEGINS_WITH', value: '/customization/' },
+  connect: { matchType: 'FULL_REGEXP', value: '/connect/?' },
+};
 
 export async function GET(req: NextRequest) {
   const property = req.nextUrl.searchParams.get('property');
@@ -14,23 +23,47 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'property required' }, { status: 400 });
   }
 
-  const dateRanges = [{ startDate: `${days}daysAgo`, endDate: 'today' }];
-  const dimensionFilter = {
-    filter: {
-      fieldName: 'pagePath',
-      stringFilter: { matchType: 'FULL_REGEXP', value: CTA_REGEX },
-    },
+  // Full days ending yesterday, the same as GA4's "Last N days"
+  const dateRanges = [{ startDate: `${days}daysAgo`, endDate: 'yesterday' }];
+  const metrics = [{ name: 'screenPageViews' }, { name: 'totalUsers' }];
+  const ctaFilter = {
+    filter: { fieldName: 'pagePath', stringFilter: { matchType: 'FULL_REGEXP', value: CTA_REGEX } },
   };
+
   const q = (dims: string[]) => ({
     dateRanges,
-    dimensionFilter,
+    dimensionFilter: ctaFilter,
     limit: 10000,
     dimensions: dims.map(name => ({ name })),
-    metrics: [{ name: 'screenPageViews' }, { name: 'totalUsers' }],
+    metrics,
   });
 
+  const totalQ = (key: string) => ({
+    dateRanges,
+    metrics,
+    dimensionFilter: { filter: { fieldName: 'pagePath', stringFilter: CTA_FILTERS[key] } },
+  });
+
+  // Any page whose URL mentions a CTA word, to catch URLs that don't match the expected pattern
+  const nearMissQ = {
+    dateRanges,
+    limit: 1000,
+    dimensions: [{ name: 'pagePath' }],
+    metrics,
+    dimensionFilter: {
+      filter: {
+        fieldName: 'pagePath',
+        stringFilter: {
+          matchType: 'PARTIAL_REGEXP',
+          value: 'license-variant|request-sample|talk-to-expert|customization|connect',
+        },
+      },
+    },
+    orderBys: [{ metric: { metricName: 'screenPageViews' }, desc: true }],
+  };
+
   try {
-    const [batchA, batchB] = await withGoogleToken(req, token =>
+    const [batchA, batchB, batchC] = await withGoogleToken(req, token =>
       Promise.all([
         batchReports(token, property, [
           q(['pagePathPlusQueryString']),
@@ -42,7 +75,9 @@ export async function GET(req: NextRequest) {
           q(['pagePath', 'pageReferrer']),
           q(['pagePath', 'deviceCategory']),
           q(['pagePath', 'country', 'city']),
+          nearMissQ,
         ]),
+        batchReports(token, property, CTAS.map(c => totalQ(c.key))),
       ])
     );
 
@@ -53,6 +88,25 @@ export async function GET(req: NextRequest) {
     const referrers: Row[] = batchB[0] ?? [];
     const devices: Row[] = batchB[1] ?? [];
     const cities: Row[] = batchB[2] ?? [];
+    const nearMissRows: Row[] = batchB[3] ?? [];
+
+    // Exact headline totals per CTA
+    const totals: Record<string, { views: number; users: number }> = {};
+    CTAS.forEach((c, i) => {
+      const row = (batchC[i] ?? [])[0];
+      totals[c.key] = { views: row?.screenPageViews ?? 0, users: row?.totalUsers ?? 0 };
+    });
+
+    // Views GA4 grouped into "(other)" (too many distinct URLs) — breakdowns can't attribute these
+    const otherViews = pages
+      .filter(r => r.pagePathPlusQueryString === '(other)')
+      .reduce((s, r) => s + (r.screenPageViews || 0), 0);
+
+    // URLs that mention a CTA word but aren't counted as a CTA
+    const nearMisses = nearMissRows
+      .filter(r => r.pagePath !== '(other)' && !ctaOf(String(r.pagePath)))
+      .slice(0, 25)
+      .map(r => ({ path: r.pagePath, views: r.screenPageViews, users: r.totalUsers }));
 
     // report id -> readable slug (license pages only carry ?id=)
     const slugById = new Map<string, string>();
@@ -85,6 +139,9 @@ export async function GET(req: NextRequest) {
     };
 
     return NextResponse.json({
+      totals,
+      otherViews,
+      nearMisses,
       pages: tag(pages, 'pagePathPlusQueryString').map((r: Row) => {
         const id = reportIdOf(String(r.path));
         return {
