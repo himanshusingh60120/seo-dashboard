@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getToken } from 'next-auth/jwt';
 import { batchReports } from '@/lib/ga4-report';
+import { withGoogleToken, AuthError } from '@/lib/google-token';
 import { CTA_REGEX, ctaOf, reportIdOf, slugOf } from '@/lib/cta';
 
 export const dynamic = 'force-dynamic';
@@ -8,13 +8,6 @@ export const dynamic = 'force-dynamic';
 type Row = Record<string, any>;
 
 export async function GET(req: NextRequest) {
-  // Google access token from the encrypted NextAuth session cookie
-  const jwt: any = await getToken({ req, secret: process.env.NEXTAUTH_SECRET });
-  const token: string | undefined = jwt?.accessToken ?? jwt?.access_token;
-  if (!token) {
-    return NextResponse.json({ error: 'Not signed in' }, { status: 401 });
-  }
-
   const property = req.nextUrl.searchParams.get('property');
   const days = Number(req.nextUrl.searchParams.get('days') ?? 28);
   if (!property) {
@@ -37,19 +30,21 @@ export async function GET(req: NextRequest) {
   });
 
   try {
-    const [batchA, batchB] = await Promise.all([
-      batchReports(token, property, [
-        q(['pagePathPlusQueryString']),
-        q(['pagePath', 'sessionDefaultChannelGroup']),
-        q(['pagePath', 'sessionSource', 'sessionMedium']),
-        q(['pagePath', 'country', 'region']),
-      ]),
-      batchReports(token, property, [
-        q(['pagePath', 'pageReferrer']),
-        q(['pagePath', 'deviceCategory']),
-        q(['pagePath', 'country', 'city']),
-      ]),
-    ]);
+    const [batchA, batchB] = await withGoogleToken(req, token =>
+      Promise.all([
+        batchReports(token, property, [
+          q(['pagePathPlusQueryString']),
+          q(['pagePath', 'sessionDefaultChannelGroup']),
+          q(['pagePath', 'sessionSource', 'sessionMedium']),
+          q(['pagePath', 'country', 'region']),
+        ]),
+        batchReports(token, property, [
+          q(['pagePath', 'pageReferrer']),
+          q(['pagePath', 'deviceCategory']),
+          q(['pagePath', 'country', 'city']),
+        ]),
+      ])
+    );
 
     const pages: Row[] = batchA[0] ?? [];
     const channels: Row[] = batchA[1] ?? [];
@@ -108,6 +103,7 @@ export async function GET(req: NextRequest) {
       cities: tag(cities),
     });
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 });
+    const status = e instanceof AuthError ? 401 : 500;
+    return NextResponse.json({ error: e?.message ?? String(e) }, { status });
   }
 }
