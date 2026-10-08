@@ -14,8 +14,10 @@ import Queries from "./Queries";
 import QueryGrowth from "./QueryGrowth";
 import { yoyAllowed, type Compare } from "@/lib/dates";
 import Audience from "./Audience";
+import CtaSection from "./CtaSection";
+import ChannelDrilldown from "./ChannelDrilldown";
 
-type Tab = "overview" | "rankings" | "indexing" | "deindexed" | "queries" | "growth" | "audience";
+type Tab = "overview" | "rankings" | "indexing" | "deindexed" | "queries" | "growth" | "audience" | "cta";
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "rankings", label: "Rankings" },
@@ -24,6 +26,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "queries", label: "Queries" },
   { id: "growth", label: "Query growth" },
   { id: "audience", label: "Traffic & geography" },
+  { id: "cta", label: "CTAs" },
 ];
 const REFRESH_MS = 5 * 60 * 1000;
 
@@ -152,6 +155,10 @@ export default function Dashboard() {
     return () => clearInterval(t);
   }, [live, load]);
 
+  const noGa4Notice = (
+    <div className="notice">Pick a GA4 property in the top bar to see this data.</div>
+  );
+
   return (
     <>
       <header className="topbar">
@@ -225,7 +232,7 @@ export default function Dashboard() {
             {gsc && " · Every figure has a Source button showing the Google API call behind it."}
           </p>
         )}
-        {!gsc && !error && <div className="notice">Loading data for {site || "your properties"}…</div>}
+        {!gsc && !error && tab !== "cta" && <div className="notice">Loading data for {site || "your properties"}…</div>}
 
         {gsc && tab === "overview" && <Overview gsc={gsc} ga={ga} gaError={gaError} hasGa4={!!ga4} site={site} />}
         {gsc && tab === "rankings" && <Rankings gsc={gsc} />}
@@ -233,7 +240,33 @@ export default function Dashboard() {
         {site && tab === "deindexed" && <DeindexReport site={site} onChange={bumpIndex} />}
         {gsc && tab === "queries" && <Queries gsc={gsc} />}
         {site && tab === "growth" && <QueryGrowth site={site} days={days} compare={compare} />}
-        {tab === "audience" && <Audience ga={ga} gaError={gaError} hasGa4={!!ga4} loading={loading} />}
+
+        {tab === "audience" && (
+          <>
+            <Audience ga={ga} gaError={gaError} hasGa4={!!ga4} loading={loading} />
+            <section className="section">
+              <h2>Channel drill-down</h2>
+              <p className="lede">
+                Click a channel to see exactly where its traffic came from: source and medium, landing pages,
+                countries, devices and campaigns. Rows with many sessions but almost no engagement are usually
+                bots or tracking problems.
+              </p>
+              {ga4 ? <ChannelDrilldown key={`ch-${ga4}-${days}`} propertyId={ga4} days={days} /> : noGa4Notice}
+            </section>
+          </>
+        )}
+
+        {tab === "cta" && (
+          <section className="section">
+            <h2>CTA clicks</h2>
+            <p className="lede">
+              Visits to the Buy / License, Request sample, Talk to expert, Customization and Connect pages.
+              Click a CTA to filter every table below to it: which channel and source the visitor came from,
+              their country, region and city, which report they were interested in, and the page they clicked from.
+            </p>
+            {ga4 ? <CtaSection key={`cta-${ga4}-${days}`} propertyId={ga4} days={days} /> : noGa4Notice}
+          </section>
+        )}
       </main>
       </SourcesProvider>
     </>
