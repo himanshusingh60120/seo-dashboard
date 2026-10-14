@@ -1,57 +1,30 @@
-import type { NextRequest } from 'next/server';
-import { getToken } from 'next-auth/jwt';
+// lib/google-token.ts
+// Used by the GA4 bots/CTA/channels routes. Now shares lib/token.ts, so the allowlist is re-checked on every call.
+import type { NextRequest } from "next/server";
+import { getGoogleAccessToken, HttpError } from "./token";
 
-export class AuthError extends Error {}
-
-async function readTokens(req: NextRequest) {
-  const jwt: any = await getToken({ req, secret: process.env.NEXTAUTH_SECRET });
-  if (!jwt) throw new AuthError('Not signed in');
-  return {
-    accessToken: (jwt.accessToken ?? jwt.access_token ?? jwt.account?.access_token) as string | undefined,
-    refreshToken: (jwt.refreshToken ?? jwt.refresh_token ?? jwt.account?.refresh_token) as string | undefined,
-  };
-}
-
-async function refreshAccessToken(refreshToken: string): Promise<string> {
-  const res = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: process.env.GOOGLE_CLIENT_ID ?? '',
-      client_secret: process.env.GOOGLE_CLIENT_SECRET ?? '',
-      grant_type: 'refresh_token',
-      refresh_token: refreshToken,
-    }),
-    cache: 'no-store',
-  });
-  const json: any = await res.json().catch(() => ({}));
-  if (!res.ok || !json.access_token) {
-    throw new AuthError(
-      `Couldn't renew Google sign-in (${json.error_description || json.error || res.status}). Sign out and sign in again.`
-    );
+export class AuthError extends HttpError {
+  constructor(message: string) {
+    super(401, message);
   }
-  return json.access_token as string;
 }
 
-/**
- * Runs `run` with a Google access token. If Google rejects the token as expired (401),
- * it gets a fresh one using the refresh token and tries once more.
- */
+const isAuthFailure = (e: unknown) => /\b401\b|UNAUTHENTICATED|invalid authentication/i.test(String((e as any)?.message ?? ""));
+
 export async function withGoogleToken<T>(req: NextRequest, run: (token: string) => Promise<T>): Promise<T> {
-  const { accessToken, refreshToken } = await readTokens(req);
-
-  if (accessToken) {
+  const get = async (forceRefresh = false) => {
     try {
-      return await run(accessToken);
-    } catch (e: any) {
-      const expired = /GA4 401/.test(String(e?.message ?? ''));
-      if (!expired || !refreshToken) {
-        if (expired) throw new AuthError('Google sign-in expired. Sign out and sign in again.');
-        throw e;
-      }
+      return await getGoogleAccessToken(req, { forceRefresh });
+    } catch (e) {
+      if (e instanceof HttpError && (e.status === 401 || e.status === 403)) throw new AuthError(e.message);
+      throw e;
     }
+  };
+  const token = await get();
+  try {
+    return await run(token);
+  } catch (e) {
+    if (!isAuthFailure(e)) throw e;
+    return run(await get(true));
   }
-
-  if (!refreshToken) throw new AuthError('Google sign-in expired. Sign out and sign in again.');
-  return run(await refreshAccessToken(refreshToken));
 }
