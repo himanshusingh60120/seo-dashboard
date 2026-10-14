@@ -1,9 +1,13 @@
+// app/api/ga4/cta/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { batchReports } from '@/lib/ga4-report';
 import { withGoogleToken, AuthError } from '@/lib/google-token';
 import { CTAS, CTA_REGEX, ctaOf, reportIdOf, slugOf } from '@/lib/cta';
+import { ga4Window } from '@/lib/google';
+import { parseDays } from '@/lib/dates';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 type Row = Record<string, any>;
 
@@ -18,13 +22,14 @@ const CTA_FILTERS: Record<string, { matchType: string; value: string }> = {
 
 export async function GET(req: NextRequest) {
   const property = req.nextUrl.searchParams.get('property');
-  const days = Number(req.nextUrl.searchParams.get('days') ?? 28);
-  if (!property) {
+  const days = parseDays(req.nextUrl.searchParams.get('days'));
+  if (!property || !/^\d+$/.test(property)) {
     return NextResponse.json({ error: 'property required' }, { status: 400 });
   }
 
-  // Full days ending yesterday, the same as GA4's "Last N days"
-  const dateRanges = [{ startDate: `${days}daysAgo`, endDate: 'yesterday' }];
+  // Filled in once the token is available: full days ending yesterday in the property's time zone,
+  // the same as GA4's "Last N days". Every query below shares this array.
+  const dateRanges: { startDate: string; endDate: string }[] = [];
   const metrics = [{ name: 'screenPageViews' }, { name: 'totalUsers' }];
   const ctaFilter = {
     filter: { fieldName: 'pagePath', stringFilter: { matchType: 'FULL_REGEXP', value: CTA_REGEX } },
@@ -63,8 +68,10 @@ export async function GET(req: NextRequest) {
   };
 
   try {
-    const [batchA, batchB, batchC] = await withGoogleToken(req, token =>
-      Promise.all([
+    const [batchA, batchB, batchC] = await withGoogleToken(req, async token => {
+      // Same window as every other GA4 view: full days ending yesterday, property time zone.
+      dateRanges.splice(0, dateRanges.length, (await ga4Window(token, property, days)).current);
+      return Promise.all([
         batchReports(token, property, [
           q(['pagePathPlusQueryString']),
           q(['pagePath', 'sessionDefaultChannelGroup']),
@@ -78,8 +85,8 @@ export async function GET(req: NextRequest) {
           nearMissQ,
         ]),
         batchReports(token, property, CTAS.map(c => totalQ(c.key))),
-      ])
-    );
+      ]);
+    });
 
     const pages: Row[] = batchA[0] ?? [];
     const channels: Row[] = batchA[1] ?? [];
@@ -139,6 +146,7 @@ export async function GET(req: NextRequest) {
     };
 
     return NextResponse.json({
+      window: dateRanges[0],
       totals,
       otherViews,
       nearMisses,
