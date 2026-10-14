@@ -1,25 +1,12 @@
 "use client";
-// app/site-check/page.tsx  ->  /site-check  (sign-in required via middleware)
-
+// app/site-check/page.tsx -> /site-check (sign-in required via middleware)
+// Checks each page's own response: status code, redirect chain, noindex, canonical and robots.txt (Googlebot's view).
+// Free: no search API. Only URLs on your own Search Console properties can be checked.
 import { useRef, useState } from "react";
 import Link from "next/link";
 import { DataTable, Kpis, Section, shortUrl, num, type Col } from "@/components/ui";
 import { loadIndexCache, classify } from "@/lib/indexCache";
-import type { PageCheckRow, GoogleResult } from "@/app/api/site-check/route";
-
-const GOOGLE: Record<GoogleResult, { label: string; tone: string }> = {
-  found: { label: "In results", tone: "ok" },
-  not_found: { label: "No results", tone: "no" },
-  other_urls_only: { label: "Other URLs only", tone: "warn" },
-  blocked: { label: "Blocked by Google", tone: "no" },
-  js_required: { label: "Google wants JavaScript", tone: "no" },
-  consent_page: { label: "Consent page", tone: "warn" },
-  redirected: { label: "Redirected", tone: "warn" },
-  unknown: { label: "Unclear", tone: "warn" },
-  error: { label: "Request failed", tone: "no" },
-  skipped: { label: "Skipped", tone: "info" },
-  off: { label: "Not run", tone: "info" },
-};
+import type { PageCheckRow } from "@/app/api/site-check/route";
 
 const statusTone = (s: number) => (s === 200 ? "ok" : s >= 300 && s < 400 ? "warn" : "no");
 const ext = (href: string, text: string) => <a href={href} target="_blank" rel="noreferrer">{text}</a>;
@@ -34,7 +21,8 @@ const cols: Col<PageCheckRow>[] = [
   {
     key: "finalUrl",
     label: "Ends at",
-    render: (r) => (!r.finalUrl ? <span className="muted">–</span> : r.finalUrl === r.url ? <span className="muted">same</span> : ext(r.finalUrl, shortUrl(r.finalUrl))),
+    render: (r) =>
+      !r.finalUrl ? <span className="muted">–</span> : r.finalUrl === r.url ? <span className="muted">same</span> : ext(r.finalUrl, shortUrl(r.finalUrl)),
   },
   {
     key: "noindex",
@@ -50,29 +38,21 @@ const cols: Col<PageCheckRow>[] = [
       : <span className="muted">self</span>,
   },
   {
-    key: "googleResult",
-    label: "Google site:",
-    render: (r) => (
-      <span style={{ whiteSpace: "nowrap" }}>
-        <span className={`pill ${GOOGLE[r.googleResult].tone}`}>
-          {GOOGLE[r.googleResult].label}{r.googleHttp ? ` · ${r.googleHttp}` : ""}
-        </span>{" "}
-        {ext(r.googleUrl, "open")}
-      </span>
-    ),
+    key: "robotsBlocked",
+    label: "robots.txt",
+    render: (r) => (r.robotsBlocked ? <span className="pill no">blocked</span> : <span className="muted">{r.pageStatus ? "allowed" : "–"}</span>),
   },
   { key: "error", label: "Note", render: (r) => <span className="muted">{r.error}</span> },
 ];
 
 const failedRow = (url: string, error: string): PageCheckRow => ({
-  url, pageStatus: 0, chain: "", finalUrl: "", noindex: "", canonical: "", canonicalElsewhere: false,
+  url, pageStatus: 0, chain: "", finalUrl: "", noindex: "", canonical: "", canonicalElsewhere: false, robotsBlocked: false,
   googleHttp: null, googleResult: "off", googleUrl: `https://www.google.com/search?q=${encodeURIComponent(`site:${url}`)}`,
   error, checkedAt: new Date().toISOString(),
 });
 
 export default function SiteCheckPage() {
   const [input, setInput] = useState("");
-  const [google, setGoogle] = useState(true);
   const [rows, setRows] = useState<PageCheckRow[]>([]);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
@@ -105,29 +85,23 @@ export default function SiteCheckPage() {
     setNotice("");
     setError("");
     setProgress({ done: 0, total: urls.length });
-
-    let useGoogle = google;
     let done = 0;
     while (done < urls.length && !stop.current) {
-      const batch = urls.slice(done, done + (useGoogle ? 10 : 20));
+      const batch = urls.slice(done, done + 20);
       try {
         const res = await fetch("/api/site-check", {
           method: "POST",
           cache: "no-store",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ urls: batch, google: useGoogle }),
+          body: JSON.stringify({ urls: batch }),
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (res.status === 401) {
           setError("Your session expired. Reload the page and sign in again.");
           break;
         }
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
         setRows((prev) => [...prev, ...(data.results as PageCheckRow[])]);
-        if (data.googleBlocked && useGoogle) {
-          useGoogle = false;
-          setNotice('Google blocked the request from the server, so the Google check is off for the rest of this run. Page checks carry on. Use "open" on any row to run the site: search in your own browser.');
-        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Request failed";
         setRows((prev) => [...prev, ...batch.map((u) => failedRow(u, `Check failed: ${msg}`))]);
@@ -143,10 +117,9 @@ export default function SiteCheckPage() {
   return (
     <main>
       <p style={{ margin: 0 }}><Link href="/">← Back to dashboard</Link></p>
-
       <Section
-        title="Page status & site: check"
-        lede="Checks each page's own response: status code, redirects, noindex and canonical. No API key needed. The optional Google site: check asks google.com directly; Google often blocks requests from Vercel's servers, and when it does, use the open link on each row to run the search in your own browser."
+        title="Page status check"
+        lede="Checks each page's own response: status code, redirects, noindex (meta robots or X-Robots-Tag), canonical, and whether robots.txt blocks Googlebot. Free, no API key needed. Only URLs on your own Search Console properties can be checked. For Google's index status, use the Indexing tab (URL Inspection)."
       >
         <div className="panel" style={{ display: "grid", gap: 12 }}>
           <textarea
@@ -161,10 +134,6 @@ export default function SiteCheckPage() {
             <button className="btn primary" onClick={runCheck} disabled={busy}>{busy ? "Checking…" : "Run check"}</button>
             {busy && <button className="btn" onClick={() => (stop.current = true)}>Stop</button>}
             <button className="btn" onClick={loadNotIndexed} disabled={busy}>Load not-indexed from Indexing tab</button>
-            <label className="muted" style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              <input type="checkbox" checked={google} onChange={(e) => setGoogle(e.target.checked)} disabled={busy} />
-              Also try Google site: check
-            </label>
             {progress.total > 0 && <span className="muted">Checked {num(progress.done)} of {num(progress.total)}</span>}
           </div>
         </div>
@@ -182,7 +151,7 @@ export default function SiteCheckPage() {
               { label: "Errors (4xx/5xx/none)", value: count((r) => r.pageStatus === 0 || r.pageStatus >= 400) },
               { label: "noindex", value: count((r) => r.noindex === "yes") },
               { label: "Canonical elsewhere", value: count((r) => r.canonicalElsewhere) },
-              { label: "Google: in results", value: count((r) => r.googleResult === "found") },
+              { label: "Blocked by robots.txt", value: count((r) => r.robotsBlocked) },
             ]}
           />
           <DataTable rows={rows} cols={cols} csvName="site-check.csv" pageSize={50} empty="No results yet." />
