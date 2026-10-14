@@ -1,7 +1,8 @@
 // lib/types.ts
 import type { Sources } from "./provenance";
+
 export type { Source, Sources } from "./provenance";
-export type { SiteCheck } from "./serp";
+export type { InspectionResult as Inspection } from "./google";
 
 export type Totals = { clicks: number; impressions: number; ctr: number; position: number };
 export type PageRow = Totals & { key: string; prevPosition: number | null; prevClicks: number; bucket: string; change?: number };
@@ -12,6 +13,11 @@ export type GscData = {
   range: { startDate: string; endDate: string };
   previousRange: { startDate: string; endDate: string };
   compare?: "previous" | "yoy";
+  searchType?: string;
+  /** Latest day with final Search Console data. */
+  dataThrough?: string;
+  /** True when the API's 50,000-row limit was reached. */
+  capped?: { pages: boolean; queries: boolean };
   totals: { current: Totals; previous: Totals };
   trend: (Totals & { date: string })[];
   pageCount: number;
@@ -49,6 +55,7 @@ export type Ga4Totals = {
 export type Ga4Data = {
   sources: Sources;
   range: { startDate: string; endDate: string };
+  timeZone?: string;
   totals: { current: Ga4Totals; previous: Ga4Totals };
   organicTotals: { sessions: number; users: number };
   trend: { date: string; users: number; sessions: number; views: number; organicSessions: number }[];
@@ -62,13 +69,4 @@ export type Ga4Data = {
 export type Properties = {
   gsc: { siteUrl: string; host: string; permission: string; ga4Id: string | null }[];
   ga4: { id: string; name: string; account: string; hosts: string[] }[];
-};
-
-export type Inspection = {
-  url: string; verdict: string; coverageState: string; indexingState: string;
-  lastCrawlTime: string; googleCanonical: string; link: string;
-  /** When the check ran (ISO). */
-  checkedAt?: string;
-  /** Google's full indexStatusResult. */
-  raw?: Record<string, unknown>;
 };
