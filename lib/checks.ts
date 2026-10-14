@@ -1,54 +1,84 @@
 // lib/checks.ts
 "use client";
-import type { Inspection, SiteCheck } from "./types";
+// The one place the browser runs URL Inspection: calls the API, saves results, records status changes,
+// and counts quota. The Indexing tab, the Live index monitor and the GSC audit all go through here.
+import {
+  appendEvents, applyInspections, loadIndexCache, saveIndexCache,
+  type IndexCache, type IndexEvent, type InspectionRec,
+} from "./indexCache";
 
-export type InspectionRec = Inspection & { checkedAt: string };
-export type BatchResult<T> = { results: T[]; quotaExceeded?: boolean; stopReason?: string };
-/** Search provider in use; direct = asking google.com without an API key. */
-export type ProviderInfo = { provider: string | null; archives: boolean; direct?: boolean };
+export const DAILY_INSPECTION_LIMIT = 2000;
 
-async function post<T>(url: string, body: unknown): Promise<BatchResult<T>> {
-  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+/** Google's daily quotas reset at midnight Pacific time. */
+const ptDay = () => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" }).format(new Date());
+const qKey = (site: string) => `dash:quota:${site}:${ptDay()}`;
+
+export function quotaUsed(site: string) {
+  try {
+    return Number(localStorage.getItem(qKey(site)) || 0);
+  } catch {
+    return 0;
+  }
+}
+function setQuota(site: string, n: number) {
+  try {
+    localStorage.setItem(qKey(site), String(Math.min(n, DAILY_INSPECTION_LIMIT)));
+  } catch {}
+}
+export const quotaLeft = (site: string) => Math.max(0, DAILY_INSPECTION_LIMIT - quotaUsed(site));
+
+export type InspectOutcome = {
+  results: InspectionRec[];
+  events: IndexEvent[];
+  quotaExceeded: boolean;
+  rateLimited: boolean;
+  skipped: string[];
+  cache: IndexCache;
+};
+
+export async function inspectAndStore(site: string, urls: string[]): Promise<InspectOutcome> {
+  const res = await fetch("/api/gsc/inspect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ siteUrl: site, urls: urls.slice(0, 20) }),
+  });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
-  return data;
+  const results: InspectionRec[] = data.results || [];
+  setQuota(site, data.quotaExceeded ? DAILY_INSPECTION_LIMIT : quotaUsed(site) + results.length);
+  const base = (await loadIndexCache(site)) || { urls: [], sitemaps: [], inspected: {}, listedAt: "" };
+  const { cache, events } = applyInspections(base, results);
+  saveIndexCache(site, cache);
+  await appendEvents(site, events);
+  return { results, events, quotaExceeded: !!data.quotaExceeded, rateLimited: !!data.rateLimited, skipped: data.skipped || [], cache };
 }
 
-export const inspectBatch = (site: string, urls: string[]) => post<InspectionRec>("/api/gsc/inspect", { siteUrl: site, urls });
-export const siteBatch = (site: string, urls: string[]) => post<SiteCheck>("/api/index/site-check", { siteUrl: site, urls });
+export type SitemapStatus = {
+  path: string; errors: number; warnings: number; isPending: boolean;
+  lastDownloaded: string; lastSubmitted: string; readByDashboard: number | null;
+};
 
-export async function providerInfo(): Promise<ProviderInfo> {
-  try {
-    const res = await fetch("/api/index/site-check", { cache: "no-store" });
-    if (!res.ok) return { provider: null, archives: false };
-    return await res.json();
-  } catch {
-    return { provider: null, archives: false };
-  }
-}
-
-/**
- * Sends URLs to a check endpoint 20 at a time and reports each batch as it lands.
- * Stops on quota exhaustion, an error, or when shouldStop() returns true.
- */
-export async function runBatches<T>(
-  urls: string[],
-  call: (batch: string[]) => Promise<BatchResult<T>>,
-  onBatch: (results: T[], done: number) => void,
-  shouldStop: () => boolean,
-  size = 20
-): Promise<{ stopped: boolean; quotaExceeded: boolean; error?: string; reason?: string }> {
-  for (let i = 0; i < urls.length; i += size) {
-    if (shouldStop()) return { stopped: true, quotaExceeded: false };
-    try {
-      const data = await call(urls.slice(i, i + size));
-      onBatch(data.results, Math.min(i + size, urls.length));
-      if (data.quotaExceeded) return { stopped: true, quotaExceeded: true, reason: data.stopReason };
-    } catch (e) {
-      return { stopped: true, quotaExceeded: false, error: e instanceof Error ? e.message : "Request failed" };
-    }
-  }
-  return { stopped: false, quotaExceeded: false };
+/** Reads sitemaps + recent search pages on the server and saves the URL list (keeping earlier inspections). */
+export async function loadUrlList(site: string) {
+  const res = await fetch(`/api/gsc/sitemap-urls?site=${encodeURIComponent(site)}`, { cache: "no-store" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  const prev = await loadIndexCache(site);
+  const cache: IndexCache = {
+    urls: data.urls || [],
+    sitemaps: data.sitemaps || [],
+    inspected: prev?.inspected || {},
+    listedAt: new Date().toISOString(),
+  };
+  saveIndexCache(site, cache, true);
+  const fromMaps = cache.urls.filter((u) => u.sources.includes("sitemap")).length;
+  const errors: { sitemap: string; error: string }[] = data.errors || [];
+  const message =
+    `Found ${cache.urls.length.toLocaleString()} URLs: ${fromMaps.toLocaleString()} from ${cache.sitemaps.length} sitemap file(s), ` +
+    `the rest from search results (last 90 days).` +
+    (errors.length ? ` ${errors.length} sitemap problem(s): ${errors.slice(0, 5).map((e) => `${e.sitemap} (${e.error})`).join(", ")}.` : "") +
+    (data.outsideProperty ? ` ${Number(data.outsideProperty).toLocaleString()} URL(s) outside this property were skipped.` : "");
+  return { cache, message, errors, sitemapStatus: (data.sitemapStatus || []) as SitemapStatus[] };
 }
 
 export const localDate = (d = new Date()) =>
