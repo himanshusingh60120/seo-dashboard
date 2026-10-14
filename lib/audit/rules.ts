@@ -45,9 +45,10 @@ function collector() {
       b.ev.push(ev);
       m.set(t, b);
     },
-    groups(source: string, sortKey?: string) {
+    groups(source: string, sortKey?: string): IssueGroup[] {
+      const key = sortKey;
       return Array.from(m.entries()).map(([t, b]) => {
-        if (sortKey) b.ev.sort((x, y) => Number(y[sortKey] ?? 0) - Number(x[sortKey] ?? 0));
+        if (key) b.ev.sort((x, y) => Number(y[key] ?? 0) - Number(x[key] ?? 0));
         return makeGroup(t, b.ev.map((e) => String(e.url)), b.ev, source);
       });
     },
@@ -78,7 +79,9 @@ export function inspectionTypes(r: Inspection, inSitemap: boolean, clicks: numbe
   const p = primary();
   if (p) out.push(p);
   if (r.richIssues?.some((i) => i.severity === "ERROR")) out.push("rich_result_errors");
-  if ((r.verdict === "PASS" || r.verdict === "PARTIAL") && inSitemap && r.lastCrawlTime && Date.now() - Date.parse(r.lastCrawlTime) > 90 * 864e5) out.push("stale_crawl");
+  if ((r.verdict === "PASS" || r.verdict === "PARTIAL") && inSitemap && r.lastCrawlTime && Date.now() - Date.parse(r.lastCrawlTime) > 90 * 864e5) {
+    out.push("stale_crawl");
+  }
   return out;
 }
 
@@ -88,16 +91,30 @@ export function inspectionIssues(results: Inspection[], sitemap: Set<string>, cl
     const inSm = sitemap.has(r.url);
     const cl = clicks.get(r.url) || 0;
     const ev: Ev = {
-      url: r.url, coverage: r.coverageState, fetch: r.pageFetchState || null, robots_txt: r.robotsTxtState || null,
-      indexing: r.indexingState || null, last_crawl: r.lastCrawlTime ? r.lastCrawlTime.slice(0, 10) : null,
-      user_canonical: r.userCanonical || null, google_canonical: r.googleCanonical || null,
-      in_sitemap: inSm ? "yes" : "no", clicks: cl, inspected: r.checkedAt.slice(0, 10),
+      url: r.url,
+      coverage: r.coverageState,
+      fetch: r.pageFetchState || null,
+      robots_txt: r.robotsTxtState || null,
+      indexing: r.indexingState || null,
+      last_crawl: r.lastCrawlTime ? r.lastCrawlTime.slice(0, 10) : null,
+      user_canonical: r.userCanonical || null,
+      google_canonical: r.googleCanonical || null,
+      in_sitemap: inSm ? "yes" : "no",
+      clicks: cl,
+      inspected: r.checkedAt.slice(0, 10),
     };
     for (const t of inspectionTypes(r, inSm, cl)) {
-      const rich = t === "rich_result_errors"
-        ? { rich_errors: r.richIssues.filter((i) => i.severity === "ERROR").slice(0, 2).map((i) => `${i.type}: ${i.message}`).join(" | ") }
-        : {};
-      c.add(t, r.url, { ...ev, ...rich });
+      const extra: Ev =
+        t === "rich_result_errors"
+          ? {
+              rich_errors: (r.richIssues || [])
+                .filter((i) => i.severity === "ERROR")
+                .slice(0, 2)
+                .map((i) => `${i.type}: ${i.message}`)
+                .join(" | "),
+            }
+          : {};
+      c.add(t, r.url, { ...ev, ...extra });
     }
   }
   return c.groups("Google URL Inspection API", "clicks");
@@ -107,10 +124,17 @@ export function httpIssues(rows: HttpRow[], sitemap: Set<string>, clicks: Map<st
   const c = collector();
   for (const r of rows) {
     const inSm = sitemap.has(r.url);
-    const matters = inSm || (clicks.get(r.url) || 0) > 0;
+    const cl = clicks.get(r.url) || 0;
+    const matters = inSm || cl > 0;
     const ev: Ev = {
-      url: r.url, status: r.status || null, chain: r.chain || null, final_url: r.finalUrl !== r.url ? r.finalUrl : null,
-      canonical: r.canonical || null, in_sitemap: inSm ? "yes" : "no", clicks: clicks.get(r.url) || 0, note: r.error || null,
+      url: r.url,
+      status: r.status || null,
+      chain: r.chain || null,
+      final_url: r.finalUrl !== r.url ? r.finalUrl : null,
+      canonical: r.canonical || null,
+      in_sitemap: inSm ? "yes" : "no",
+      clicks: cl,
+      note: r.error || null,
     };
     if (r.loop) c.add("redirect_error", r.url, ev);
     else if (r.inconclusive || !r.status) {
