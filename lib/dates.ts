@@ -1,53 +1,60 @@
-const iso = (d: Date) => d.toISOString().slice(0, 10);
-
-function addDays(d: Date, n: number) {
-  const c = new Date(d);
-  c.setUTCDate(c.getUTCDate() + n);
-  return c;
-}
-
-function minusYear(d: Date) {
-  const c = new Date(d);
-  c.setUTCFullYear(c.getUTCFullYear() - 1);
-  return c;
-}
-
-/** What the current period is compared with. */
+// lib/dates.ts
 export type Compare = "previous" | "yoy";
+export type Range = { startDate: string; endDate: string };
 
-/** Search Console keeps 16 months, so year-over-year only fits periods up to 3 months. */
+export const WINDOWS = [7, 15, 30] as const;
+export const DEFAULT_DAYS = 30;
 export const YOY_MAX_DAYS = 90;
+/** 52 weeks back, so weekdays line up. */
+export const YOY_SHIFT_DAYS = 364;
+/** Search Console dates are Pacific Time. */
+export const GSC_TZ = "America/Los_Angeles";
+
 export const yoyAllowed = (days: number) => days <= YOY_MAX_DAYS;
 
-/**
- * Search Console data lags ~2-3 days, so GSC ranges end 3 days ago.
- * GA4 ranges end today.
- * "previous": the same number of days immediately before.
- * "yoy": the same dates one year earlier.
- */
-export function ranges(days: number, source: "gsc" | "ga4", compare: Compare = "previous") {
-  const end = addDays(new Date(), source === "gsc" ? -3 : 0);
-  const start = addDays(end, -(days - 1));
-  const prevEnd = compare === "yoy" ? minusYear(end) : addDays(start, -1);
-  const prevStart = compare === "yoy" ? minusYear(start) : addDays(prevEnd, -(days - 1));
-  return {
-    current: { startDate: iso(start), endDate: iso(end) },
-    previous: { startDate: iso(prevStart), endDate: iso(prevEnd) },
-  };
-}
-
-export function parseDays(v: string | null) {
+export function parseDays(v: string | null | undefined) {
   const n = Number(v);
-  return [7, 28, 90, 180].includes(n) ? n : 28;
+  return (WINDOWS as readonly number[]).includes(n) ? n : DEFAULT_DAYS;
 }
 
-/** Falls back to "previous" when year-over-year would reach past Search Console's 16 months. */
-export function parseCompare(v: string | null, days: number): Compare {
+export function parseCompare(v: string | null | undefined, days: number): Compare {
   return v === "yoy" && yoyAllowed(days) ? "yoy" : "previous";
 }
 
-export const periodName = (days: number) =>
-  ({ 7: "last 7 days", 28: "last 28 days", 90: "last 3 months", 180: "last 6 months" } as Record<number, string>)[days] || `last ${days} days`;
+/** Today's calendar date (YYYY-MM-DD) in a time zone. */
+export function todayIn(tz: string, now = new Date()) {
+  try {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  } catch {
+    return now.toISOString().slice(0, 10);
+  }
+}
 
+export function addDays(iso: string, n: number) {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/** `days` full days ending on `end`, plus a comparison window of the same length. */
+export function windowEnding(end: string, days: number, compare: Compare = "previous"): { current: Range; previous: Range } {
+  const start = addDays(end, -(days - 1));
+  const previous =
+    compare === "yoy"
+      ? { startDate: addDays(start, -YOY_SHIFT_DAYS), endDate: addDays(end, -YOY_SHIFT_DAYS) }
+      : { startDate: addDays(start, -days), endDate: addDays(start, -1) };
+  return { current: { startDate: start, endDate: end }, previous };
+}
+
+/** Only used when the latest final day can't be looked up. */
+export const gscFallbackEnd = () => addDays(todayIn(GSC_TZ), -3);
+
+export const periodName = (days: number) => `last ${days} days`;
 export const compareName = (days: number, compare: Compare) =>
-  compare === "yoy" ? "the same period last year" : `the previous ${periodName(days).replace(/^last /, "")}`;
+  compare === "yoy" ? "the same days a year earlier (52 weeks back)" : `the previous ${days} days`;
+
+/** @deprecated Kept for older imports. Use gscWindow / ga4Window from lib/google.ts. */
+export function ranges(days: number, source: "gsc" | "ga4", compare: Compare = "previous") {
+  const end = source === "gsc" ? gscFallbackEnd() : addDays(todayIn("UTC"), -1);
+  return windowEnding(end, days, compare);
+}
