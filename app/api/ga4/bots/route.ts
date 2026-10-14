@@ -1,9 +1,13 @@
+// app/api/ga4/bots/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { batchReports } from '@/lib/ga4-report';
 import { withGoogleToken, AuthError } from '@/lib/google-token';
 import { CTA_REGEX } from '@/lib/cta';
+import { ga4Window } from '@/lib/google';
+import { parseDays } from '@/lib/dates';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 type Row = Record<string, any>;
 type Kind = 'location' | 'source' | 'tech' | 'language';
@@ -13,6 +17,7 @@ const DATA_CENTRE_CITIES = new Set([
   'Ashburn', 'Boardman', 'Council Bluffs', 'The Dalles', 'Moses Lake',
   'Quincy', 'Prineville', 'Forest City', 'Lenoir', 'Lanzhou',
 ]);
+
 // Default window sizes of headless browsers / scrapers
 const HEADLESS_SCREENS = new Set(['800x600', '0x0', '(not set)']);
 
@@ -55,14 +60,16 @@ const flagged = (rows: ReturnType<typeof assess>[]) =>
 
 export async function GET(req: NextRequest) {
   const property = req.nextUrl.searchParams.get('property');
-  const days = Number(req.nextUrl.searchParams.get('days') ?? 28);
+  const days = parseDays(req.nextUrl.searchParams.get('days'));
   const scope = req.nextUrl.searchParams.get('scope') === 'cta' ? 'cta' : 'site';
-  if (!property) {
+
+  if (!property || !/^\d+$/.test(property)) {
     return NextResponse.json({ error: 'property required' }, { status: 400 });
   }
 
   const base: Row = {
-    dateRanges: [{ startDate: `${days}daysAgo`, endDate: 'today' }],
+    // Filled in once the token is available: full days ending yesterday, property time zone
+    dateRanges: [] as { startDate: string; endDate: string }[],
     limit: 10000,
     metrics: METRICS.map(name => ({ name })),
   };
@@ -71,18 +78,21 @@ export async function GET(req: NextRequest) {
       filter: { fieldName: 'pagePath', stringFilter: { matchType: 'FULL_REGEXP', value: CTA_REGEX } },
     };
   }
+
   const q = (dims: string[]) => ({ ...base, dimensions: dims.map(name => ({ name })) });
 
   try {
-    const reports = await withGoogleToken(req, token =>
-      batchReports(token, property, [
+    const reports = await withGoogleToken(req, async token => {
+      // Same window as every other GA4 view: full days ending yesterday, property time zone.
+      base.dateRanges = [(await ga4Window(token, property, days)).current];
+      return batchReports(token, property, [
         q(['country', 'city']),
         q(['sessionSource', 'sessionMedium']),
         q(['browser', 'operatingSystem', 'screenResolution']),
         q(['language']),
         q(['dateHour']),
-      ])
-    );
+      ]);
+    });
 
     const locations: Row[] = reports[0] ?? [];
     const sources: Row[] = reports[1] ?? [];
@@ -130,6 +140,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       scope,
+      window: base.dateRanges[0],
       totals: {
         sessions: totalSessions,
         suspiciousSessions,
