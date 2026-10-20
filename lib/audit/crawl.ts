@@ -42,15 +42,17 @@ export type CrawlReport = {
 };
 
 const DAY = 864e5;
-const SOURCES_KEPT = 20;
-export { SOURCES_KEPT };
+export const SOURCES_KEPT = 20;
 
 export const is404 = (r: Inspection) =>
   r.pageFetchState === "NOT_FOUND" || r.pageFetchState === "SOFT_404" || /not found \(404\)|soft 404/i.test(r.coverageState || "");
 
 const isBroken = (p: CrawlPage) => p.loop || (p.status >= 400 && !p.inconclusive);
 
-/** Crawl order: pages Google says link to 404 URLs first, then the homepage, top pages and sitemap URLs. */
+/**
+ * refs: pages Google says link to 404 URLs (fetched first).
+ * seeds: homepage, top pages and sitemap URLs, read after every newly discovered link has been checked.
+ */
 export function planCrawl(siteUrl: string, inspections: Inspection[], topPages: string[], sitemapUrls: string[]) {
   const inProp = (u: string) => urlInProperty(siteUrl, u);
   const wantByRef = new Map<string, Set<string>>();
@@ -64,11 +66,13 @@ export function planCrawl(siteUrl: string, inspections: Inspection[], topPages: 
       wantByRef.set(k, s);
     });
   });
+  const refs = Array.from(wantByRef.keys());
+  const refSet = new Set(refs);
   const home = siteUrl.startsWith("sc-domain:") ? `https://${siteUrl.slice(10)}/` : siteUrl;
-  const seeds = Array.from(
-    new Set([...Array.from(wantByRef.keys()), normalizeUrl(home), ...topPages.map(normalizeUrl), ...sitemapUrls.map(normalizeUrl)])
-  ).filter(inProp);
-  return { seeds, wantByRef };
+  const seeds = Array.from(new Set([normalizeUrl(home), ...topPages.map(normalizeUrl), ...sitemapUrls.map(normalizeUrl)])).filter(
+    (u) => inProp(u) && !refSet.has(u)
+  );
+  return { refs, seeds, wantByRef };
 }
 
 export function crawlResults(o: {
@@ -222,7 +226,16 @@ export function mergeHistory(prev: CrawlHistory | null, inspections: Inspection[
   return out;
 }
 
-export type ActivityRow = { url: string; last_crawl: string; days_ago: number | null; crawls_seen: number; crawled_as: string; coverage: string };
+export type ActivityRow = {
+  url: string;
+  last_crawl: string;
+  inspected: string;
+  /** Age of Google's last crawl on the day the URL was inspected (Google only reports the latest crawl as of that check). */
+  days_old_when_inspected: number | null;
+  crawls_seen: number;
+  crawled_as: string;
+  coverage: string;
+};
 export type Activity = {
   inspected: number;
   never: number;
@@ -236,6 +249,8 @@ export type Activity = {
   recrawled: number;
   firstCrawl: number;
   since: string;
+  inspectedFrom: string;
+  inspectedTo: string;
   rows: ActivityRow[];
 };
 
@@ -243,7 +258,7 @@ export function crawlActivity(inspections: Inspection[], h: CrawlHistory): Activ
   const now = Date.now();
   const a: Activity = {
     inspected: inspections.length, never: 0, d1: 0, d7: 0, d30: 0, d90: 0, older: 0,
-    mobile: 0, desktop: 0, recrawled: 0, firstCrawl: 0, since: "", rows: [],
+    mobile: 0, desktop: 0, recrawled: 0, firstCrawl: 0, since: "", inspectedFrom: "", inspectedTo: "", rows: [],
   };
   let since = "";
   Object.keys(h).forEach((u) => {
@@ -258,10 +273,14 @@ export function crawlActivity(inspections: Inspection[], h: CrawlHistory): Activ
     if (e && e.neverAt && e.times.length) a.firstCrawl++;
     if (r.crawledAs === "MOBILE") a.mobile++;
     else if (r.crawledAs === "DESKTOP") a.desktop++;
+    const checked = (r.checkedAt || "").slice(0, 10);
+    if (checked && (!a.inspectedFrom || checked < a.inspectedFrom)) a.inspectedFrom = checked;
+    if (checked && checked > a.inspectedTo) a.inspectedTo = checked;
+    const at = Date.parse(r.checkedAt) || now;
     let days: number | null = null;
     if (!r.lastCrawlTime) a.never++;
     else {
-      days = Math.max(0, Math.floor((now - Date.parse(r.lastCrawlTime)) / DAY));
+      days = Math.max(0, Math.floor((at - Date.parse(r.lastCrawlTime)) / DAY));
       if (days < 1) a.d1++;
       else if (days < 7) a.d7++;
       else if (days < 30) a.d30++;
@@ -271,9 +290,10 @@ export function crawlActivity(inspections: Inspection[], h: CrawlHistory): Activ
     a.rows.push({
       url: r.url,
       last_crawl: r.lastCrawlTime ? r.lastCrawlTime.slice(0, 16).replace("T", " ") : "never",
-      days_ago: days,
+      inspected: checked,
+      days_old_when_inspected: days,
       crawls_seen: seen,
-      crawled_as: r.crawledAs ? r.crawledAs.toLowerCase() : "",
+      crawled_as: r.crawledAs === "MOBILE" || r.crawledAs === "DESKTOP" ? r.crawledAs.toLowerCase() : "",
       coverage: r.coverageState,
     });
   });
