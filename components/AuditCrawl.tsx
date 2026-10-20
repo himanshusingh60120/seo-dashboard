@@ -21,6 +21,9 @@ export default function AuditCrawl({ report, activity }: { report: CrawlReport |
   }
   if (activity) tabs.push({ id: "activity", label: `Googlebot crawl activity (${num(activity.inspected)})` });
   const current = tabs.some((t) => t.id === view) ? view : tabs[0].id;
+  const span = activity && activity.inspectedFrom
+    ? activity.inspectedFrom === activity.inspectedTo ? activity.inspectedFrom : `${activity.inspectedFrom} to ${activity.inspectedTo}`
+    : "";
 
   return (
     <div className="panel" style={{ marginTop: 16 }}>
@@ -76,7 +79,7 @@ export default function AuditCrawl({ report, activity }: { report: CrawlReport |
               initialSort="still_linked"
               initialDesc={false}
               csvName="404-sources.csv"
-              empty="No 404 URLs among the inspected pages. The audit inspects sitemap, top and dropped pages; broken internal links are in the first table."
+              empty="No 404 URLs among the inspected pages yet. Inspect more URLs (old URLs are checked first); broken internal links are in the first table."
             />
           </>
         )}
@@ -100,15 +103,15 @@ export default function AuditCrawl({ report, activity }: { report: CrawlReport |
         {current === "activity" && activity && (
           <>
             <p className="muted" style={{ marginTop: 0 }}>
-              From Google’s URL Inspection API: when Googlebot last crawled each inspected URL. Google doesn’t offer the Crawl stats report
-              (total requests, response and purpose breakdown) through any API, so those totals can’t be pulled automatically. “Crawls seen”
-              counts the different last-crawl dates this dashboard has recorded{activity.since ? ` since ${activity.since}` : ""}; Google only
-              reports the latest crawl, so the real number of visits can be higher. Run the audit regularly to build this history.
+              From Google’s URL Inspection API. Google only returns the latest crawl as of each check, so ages are measured on the day each URL
+              was inspected{span ? ` (${span})` : ""}; inspect again to refresh them. Google doesn’t offer the Crawl stats report (total requests,
+              response and purpose breakdown) through any API. “Crawls seen” counts the different last-crawl dates recorded
+              {activity.since ? ` since ${activity.since}` : ""}, so it grows with every run.
             </p>
             <Kpis
               items={[
-                { label: "URLs with Google data", value: num(activity.inspected) },
-                { label: "Never crawled", value: num(activity.never), sub: "Google knows the URL but has no successful crawl" },
+                { label: "URLs with Google data", value: num(activity.inspected), sub: span ? `inspected ${span}` : undefined },
+                { label: "Never crawled", value: num(activity.never), sub: "Google knows the URL, no successful crawl" },
                 { label: "Recrawled", value: num(activity.recrawled), sub: "2+ different crawl dates seen" },
                 { label: "First crawl seen", value: num(activity.firstCrawl), sub: "were never crawled, now crawled" },
                 { label: "Smartphone / desktop", value: `${num(activity.mobile)} / ${num(activity.desktop)}`, sub: "crawler used" },
@@ -117,11 +120,11 @@ export default function AuditCrawl({ report, activity }: { report: CrawlReport |
             <div style={{ marginTop: 12 }}>
               <Bars
                 items={[
-                  { label: "Crawled in the last 24 h", value: activity.d1 },
-                  { label: "1–7 days ago", value: activity.d7 },
-                  { label: "7–30 days ago", value: activity.d30 },
-                  { label: "30–90 days ago", value: activity.d90 },
-                  { label: "90+ days ago", value: activity.older },
+                  { label: "Crawled under 1 day before the check", value: activity.d1 },
+                  { label: "1–7 days before", value: activity.d7 },
+                  { label: "7–30 days before", value: activity.d30 },
+                  { label: "30–90 days before", value: activity.d90 },
+                  { label: "90+ days before", value: activity.older },
                   { label: "Never crawled", value: activity.never },
                 ]}
               />
@@ -131,12 +134,13 @@ export default function AuditCrawl({ report, activity }: { report: CrawlReport |
               cols={[
                 { key: "url", label: "URL", url: true },
                 { key: "last_crawl", label: "Google last crawled (UTC)" },
-                { key: "days_ago", label: "Days ago", num: true },
+                { key: "inspected", label: "Inspected" },
+                { key: "days_old_when_inspected", label: "Days old at check", num: true },
                 { key: "crawls_seen", label: "Crawls seen", num: true },
                 { key: "crawled_as", label: "Crawler" },
                 { key: "coverage", label: "Google status" },
               ]}
-              initialSort="days_ago"
+              initialSort="days_old_when_inspected"
               initialDesc={false}
               csvName="googlebot-crawl-activity.csv"
             />
