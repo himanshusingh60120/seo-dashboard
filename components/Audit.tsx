@@ -3,7 +3,7 @@
 // GSC audit (AI). Only the audit account (AUDIT_EMAILS, default hsingh@kingsresearch.com) sees this tab,
 // and every API route behind it checks the account again. Issues and counts come from Google's data and
 // the dashboard's own checks; GPT writes fixes; code + Jev (or a second GPT pass) double-check them.
-// The deep crawl and the crawl-activity figures are fetched by the tool itself; nothing has to be exported.
+// Every evidence row carries verify_link (Google's own page for it) and how_to_verify.
 import { useEffect, useRef, useState } from "react";
 import { Kpis, Section, num } from "./ui";
 import AuditCrawl from "./AuditCrawl";
@@ -17,6 +17,7 @@ import {
   crawlActivity, crawlResults, mergeHistory, planCrawl, SOURCES_KEPT,
   type Activity, type CrawlHistory, type CrawlPage, type CrawlReport, type CrawlRow, type Inlink,
 } from "@/lib/audit/crawl";
+import { stripVerify, withVerifyLinks } from "@/lib/audit/verify";
 import { normalizeUrl } from "@/lib/url";
 import { auditReportHtml, downloadFile, downloadJson, fileSafe } from "@/lib/evidence";
 
@@ -37,7 +38,7 @@ const STEPS = [
   "URL list (sitemaps + search pages)",
   "Search Console performance & Sitemaps report",
   "Live page checks (status, redirects, noindex, canonical, robots.txt)",
-  "URL Inspection (Google's index status)",
+  "URL Inspection (Google's index status; old URLs outside your sitemap first)",
   "Googlebot crawl activity (last-crawl dates from URL Inspection)",
   "Deep crawl (internal links, 404 sources, links to redirects)",
   "Fixes: GPT writes, code + Jev double-check",
@@ -46,6 +47,7 @@ const FRESH_DAYS = 7;
 const DAY = 864e5;
 const CRAWL_BATCH = 8;
 const CRAWL_PARALLEL = 2;
+const MAX_QUEUED = 200_000;
 const TH: React.CSSProperties = { textAlign: "left", padding: 6, borderBottom: "1px solid var(--rule, #d5dbe1)", whiteSpace: "nowrap" };
 const TD: React.CSSProperties = { textAlign: "left", padding: 6, borderBottom: "1px solid var(--rule, #e1e6eb)", verticalAlign: "top", overflowWrap: "anywhere" };
 
@@ -56,7 +58,7 @@ async function post<T>(url: string, body: unknown): Promise<T> {
   return data as T;
 }
 
-const forAi = (g: IssueGroup): IssueGroup => ({ ...g, urls: g.urls.slice(0, 300), evidence: g.evidence.slice(0, 15) });
+const forAi = (g: IssueGroup): IssueGroup => stripVerify({ ...g, urls: g.urls.slice(0, 300), evidence: g.evidence.slice(0, 15) });
 
 const failed = (e: unknown): Solution => ({
   status: "error", summary: e instanceof Error ? e.message : "AI request failed", causes: [], steps: [], verify: [], examples: [], checks: [],
@@ -71,9 +73,9 @@ const isFresh = (c: IndexCache, u: string) => {
 export default function Audit({ site }: { site: string }) {
   const [access, setAccess] = useState<Access | null>(null);
   const [days, setDays] = useState<number>(30);
-  const [inspectN, setInspectN] = useState(200);
+  const [inspectN, setInspectN] = useState(1000);
   const [httpN, setHttpN] = useState(1000);
-  const [crawlN, setCrawlN] = useState(2000);
+  const [crawlN, setCrawlN] = useState(5000);
   const [useAi, setUseAi] = useState(true);
   const [steps, setSteps] = useState<Step[]>([]);
   const [groups, setGroups] = useState<IssueGroup[]>([]);
@@ -130,15 +132,19 @@ export default function Audit({ site }: { site: string }) {
     };
     setSteps([...st]);
     let all: IssueGroup[] = [];
-    const show = () => setGroups(sortGroups(all));
+    let inspMap: IndexCache["inspected"] = {};
+    // Shown and downloaded groups carry verification links; `all` (used for the AI step) stays clean.
+    const show = () => setGroups(sortGroups(withVerifyLinks(all, site, inspMap)));
 
     try {
       // 1) URL list (reuses the Indexing tab's list if it's less than a day old)
       upd(0, { state: "run" });
       let cache = await loadIndexCache(site);
       if (!cache?.urls.length || Date.now() - Date.parse(cache.listedAt || "0") > DAY) cache = (await loadUrlList(site)).cache;
+      inspMap = cache.inspected;
       const sitemapSet = new Set(cache.urls.filter((u) => u.sources.includes("sitemap")).map((u) => u.url));
-      upd(0, { state: "done", note: `${num(cache.urls.length)} URLs, ${num(sitemapSet.size)} from sitemaps` });
+      const searchOnly = cache.urls.filter((u) => u.sources.includes("search") && !u.sources.includes("sitemap")).map((u) => u.url);
+      upd(0, { state: "done", note: `${num(cache.urls.length)} URLs: ${num(sitemapSet.size)} from sitemaps, ${num(searchOnly.length)} only from search results` });
 
       // 2) Search Console data for the window + Sitemaps report
       upd(1, { state: "run" });
@@ -166,9 +172,11 @@ export default function Audit({ site }: { site: string }) {
       show();
       upd(2, { state: "done", note: `${num(rows.length)} pages checked` });
 
-      // 4) URL Inspection: reuse results from the last 7 days, spend quota only on the rest
+      // 4) URL Inspection: reuse results from the last 7 days, spend quota only on the rest.
+      //    Order: dropped pages, then URLs Google knows that aren't in your sitemaps (old URLs: where 404s and
+      //    redirects show up), then top pages, then sitemap URLs.
       upd(3, { state: "run" });
-      const want = Array.from(new Set([...col.droppedPages, ...col.topPages, ...Array.from(sitemapSet)]))
+      const want = Array.from(new Set([...col.droppedPages, ...searchOnly, ...col.topPages, ...Array.from(sitemapSet)]))
         .filter((u) => !isFresh(cache!, u))
         .slice(0, Math.min(inspectN, quotaLeft(site)));
       let checked = 0;
@@ -180,10 +188,14 @@ export default function Audit({ site }: { site: string }) {
         if (r.quotaExceeded) break;
         if (r.rateLimited) await new Promise((res) => setTimeout(res, 60_000));
       }
+      inspMap = cache.inspected;
       const recent = Object.values(cache.inspected).filter((r) => r.verdict !== "ERROR" && Date.now() - Date.parse(r.checkedAt) < FRESH_DAYS * DAY);
       all = [...all, ...inspectionIssues(recent, sitemapSet, clicks)];
       show();
-      upd(3, { state: "done", note: `${num(recent.length)} pages with Google results from the last ${FRESH_DAYS} days (${num(checked)} checked now)` });
+      upd(3, {
+        state: "done",
+        note: `${num(recent.length)} of ${num(cache.urls.length)} known URLs have Google results from the last ${FRESH_DAYS} days (${num(checked)} checked now). Page indexing totals in Search Console cover every URL Google knows; this audit covers inspected URLs only.`,
+      });
 
       // Every saved Google result (any age), used for crawl activity and 404 sources
       const inspAll = Object.values(cache.inspected).filter((r) => r.verdict && r.verdict !== "ERROR");
@@ -198,10 +210,12 @@ export default function Audit({ site }: { site: string }) {
       setActivity(act);
       upd(4, {
         state: "done",
-        note: `${num(act.inspected)} URLs with Google's last-crawl date: ${num(act.d1 + act.d7)} crawled in the last 7 days, ${num(act.never)} never crawled, ${num(act.recrawled)} seen recrawled`,
+        note: `${num(act.inspected)} URLs (Google data from ${act.inspectedFrom || "–"}${act.inspectedTo && act.inspectedTo !== act.inspectedFrom ? ` to ${act.inspectedTo}` : ""}): ${num(act.d1 + act.d7)} had been crawled within 7 days of their check, ${num(act.never)} never crawled, ${num(act.recrawled)} seen recrawled since ${act.since || "today"}`,
       });
 
-      // 6) Deep crawl: follow internal links; fetch the pages Google says link to 404s first
+      // 6) Deep crawl. Pages Google says link to 404s go first, then every newly discovered link target that isn't
+      //    already planned (that's where broken and redirecting links are), then homepage, top pages and sitemap
+      //    pages, which are read for their links.
       if (!crawlN || stop.current) {
         upd(5, { state: "skip", note: crawlN ? "stopped" : "turned off" });
       } else {
@@ -212,26 +226,30 @@ export default function Audit({ site }: { site: string }) {
           const inlinks = new Map<string, Inlink>();
           const found = new Set<string>();
           const refChecked = new Set<string>();
-          const queue = plan.seeds.slice(0, crawlN);
-          const queued = new Set(queue);
+          const hi: string[] = plan.refs.slice();
+          const lo: string[] = plan.seeds;
+          const queued = new Set<string>([...hi, ...lo]);
           const retries = new Map<string, number>();
-          let qi = 0;
+          let hiPos = 0;
+          let loPos = 0;
+          const left = () => hi.length - hiPos + (lo.length - loPos);
           const addLink = (from: string, to: string) => {
             const e = inlinks.get(to) || { count: 0, from: [] };
             e.count++;
             if (e.from.length < SOURCES_KEPT && e.from.indexOf(from) < 0) e.from.push(from);
             inlinks.set(to, e);
-            if (!queued.has(to) && queued.size < crawlN) {
+            if (!queued.has(to) && queued.size < MAX_QUEUED) {
               queued.add(to);
-              queue.push(to);
+              hi.push(to);
             }
           };
-          const take = () => {
-            const b = queue.slice(qi, qi + CRAWL_BATCH);
-            qi += b.length;
+          const take = (): string[] => {
+            const b: string[] = [];
+            while (b.length < CRAWL_BATCH && hiPos < hi.length) b.push(hi[hiPos++]);
+            while (b.length < CRAWL_BATCH && loPos < lo.length) b.push(lo[loPos++]);
             return b;
           };
-          while (qi < queue.length && !stop.current) {
+          while (left() > 0 && pages.size < crawlN && !stop.current) {
             const batches: string[][] = [];
             for (let p = 0; p < CRAWL_PARALLEL; p++) {
               const b = take();
@@ -243,7 +261,7 @@ export default function Audit({ site }: { site: string }) {
                 if (row.skipped) {
                   const n = (retries.get(row.url) || 0) + 1;
                   retries.set(row.url, n);
-                  if (n < 3) queue.push(row.url);
+                  if (n < 3) hi.push(row.url);
                   continue;
                 }
                 const page: CrawlPage = {
@@ -266,18 +284,18 @@ export default function Audit({ site }: { site: string }) {
                 row.links.forEach((l) => addLink(src, l));
               }
             }
-            upd(5, { note: `${num(pages.size)} pages fetched, ${num(Math.max(0, queue.length - qi))} queued (limit ${num(crawlN)})` });
+            upd(5, { note: `${num(pages.size)} pages fetched, ${num(left())} queued (limit ${num(crawlN)})` });
           }
           const out = crawlResults({
             siteUrl: site, pages, inlinks, inspections: inspAll, found, refChecked,
-            sitemap: sitemapSet, limit: crawlN, queuedLeft: Math.max(0, queue.length - qi),
+            sitemap: sitemapSet, limit: crawlN, queuedLeft: left(),
           });
           setCrawl(out.report);
           all = [...all, ...out.groups];
           show();
           upd(5, {
             state: "done",
-            note: `${num(out.report.fetched)} pages: ${num(out.report.brokenRows.length)} broken-link sources, ${num(out.report.redirectRows.length)} links to redirects, ${num(out.report.sourceRows.length)} Google 404 source rows`,
+            note: `${num(out.report.fetched)} pages: ${num(out.report.brokenRows.length)} broken-link sources, ${num(out.report.redirectRows.length)} links to redirects, ${num(out.report.sourceRows.length)} Google 404 source rows${out.report.queuedLeft ? `; ${num(out.report.queuedLeft)} more URLs found but not fetched (limit)` : ""}`,
           });
         } catch (e) {
           upd(5, { state: "error", note: e instanceof Error ? e.message : "Crawl failed" });
@@ -334,7 +352,7 @@ export default function Audit({ site }: { site: string }) {
   return (
     <Section
       title="GSC audit (AI)"
-      lede="Finds the issues Google reports for this property and gives a fix for each group. Issues and counts come only from Google's APIs (Search Analytics, Sitemaps, URL Inspection) and this dashboard's own live page checks and deep crawl — never from the AI. GPT writes the fix; code checks it uses only URLs and numbers from the data and gives no unsafe advice; Jev (or a second GPT pass) checks it's grounded, on-topic, safe and actionable. Anything that fails is marked “needs human review”."
+      lede="Finds the issues Google reports for this property and gives a fix for each group. Issues and counts come only from Google's APIs (Search Analytics, Sitemaps, URL Inspection) and this dashboard's own live page checks and deep crawl — never from the AI. Every evidence row has a verify_link (Google's own page for that row) and how_to_verify. GPT writes the fix; code checks it uses only URLs and numbers from the data and gives no unsafe advice; Jev (or a second GPT pass) checks it's grounded, on-topic, safe and actionable. Anything that fails is marked “needs human review”."
     >
       <div className="panel">
         <div className="row">
@@ -349,7 +367,7 @@ export default function Audit({ site }: { site: string }) {
           <label className="control">
             New URL Inspections
             <select value={inspectN} onChange={(e) => setInspectN(Number(e.target.value))} disabled={running}>
-              {[0, 100, 200, 500, 1000].map((n) => (
+              {[0, 100, 200, 500, 1000, 2000].map((n) => (
                 <option key={n} value={n}>{n ? num(n) : "None (reuse saved results)"}</option>
               ))}
             </select>
@@ -397,7 +415,8 @@ export default function Audit({ site }: { site: string }) {
         </div>
         <p className="muted" style={{ marginBottom: 0 }}>
           URL Inspection left today: {num(quotaLeft(site))} of {num(DAILY_INSPECTION_LIMIT)} (shared with the Indexing tab and the Live index monitor).
-          Live page checks, the deep crawl and Search Console data are free; only the AI step costs money. The deep crawl fetches about 16 pages per round, so 2,000 pages take a few minutes.
+          Only inspected URLs get Google’s status, so run the audit daily with new inspections until every URL is covered.
+          Live page checks, the deep crawl and Search Console data are free; only the AI step costs money.
         </p>
         {steps.length > 0 && (
           <ol className="muted" style={{ marginBottom: 0 }}>
@@ -494,7 +513,9 @@ function IssueCard({ g, sol }: { g: IssueGroup; sol?: Solution }) {
       )}
       {cols.length > 0 && (
         <>
-          <h4>Evidence (first {g.evidence.length} of {num(g.count)})</h4>
+          <h4>
+            Evidence (first {num(g.evidence.length)} rows{unit !== "" ? ` · ${num(g.count)} ${unit} affected` : ""})
+          </h4>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
               <thead>
