@@ -3,14 +3,21 @@
 // GSC audit (AI). Only the audit account (AUDIT_EMAILS, default hsingh@kingsresearch.com) sees this tab,
 // and every API route behind it checks the account again. Issues and counts come from Google's data and
 // the dashboard's own checks; GPT writes fixes; code + Jev (or a second GPT pass) double-check them.
+// The deep crawl and the crawl-activity figures are fetched by the tool itself; nothing has to be exported.
 import { useEffect, useRef, useState } from "react";
 import { Kpis, Section, num } from "./ui";
+import AuditCrawl from "./AuditCrawl";
 import { WINDOWS, type Range } from "@/lib/dates";
 import { kvGet, kvSet } from "@/lib/idb";
 import { loadIndexCache, type IndexCache } from "@/lib/indexCache";
 import { DAILY_INSPECTION_LIMIT, inspectAndStore, loadUrlList, quotaLeft } from "@/lib/checks";
 import { CATALOG, STATUS_LABEL, type IssueGroup, type IssueType, type Severity, type Solution } from "@/lib/audit/catalog";
 import { httpIssues, inspectionIssues, sortGroups, type HttpRow } from "@/lib/audit/rules";
+import {
+  crawlActivity, crawlResults, mergeHistory, planCrawl, SOURCES_KEPT,
+  type Activity, type CrawlHistory, type CrawlPage, type CrawlReport, type CrawlRow, type Inlink,
+} from "@/lib/audit/crawl";
+import { normalizeUrl } from "@/lib/url";
 import { auditReportHtml, downloadFile, downloadJson, fileSafe } from "@/lib/evidence";
 
 type Access = { allowed: boolean; gpt?: boolean; jev?: boolean; gptModel?: string; jevModel?: string; maxGroups?: number };
@@ -31,10 +38,14 @@ const STEPS = [
   "Search Console performance & Sitemaps report",
   "Live page checks (status, redirects, noindex, canonical, robots.txt)",
   "URL Inspection (Google's index status)",
+  "Googlebot crawl activity (last-crawl dates from URL Inspection)",
+  "Deep crawl (internal links, 404 sources, links to redirects)",
   "Fixes: GPT writes, code + Jev double-check",
 ];
 const FRESH_DAYS = 7;
 const DAY = 864e5;
+const CRAWL_BATCH = 8;
+const CRAWL_PARALLEL = 2;
 const TH: React.CSSProperties = { textAlign: "left", padding: 6, borderBottom: "1px solid var(--rule, #d5dbe1)", whiteSpace: "nowrap" };
 const TD: React.CSSProperties = { textAlign: "left", padding: 6, borderBottom: "1px solid var(--rule, #e1e6eb)", verticalAlign: "top", overflowWrap: "anywhere" };
 
@@ -46,10 +57,12 @@ async function post<T>(url: string, body: unknown): Promise<T> {
 }
 
 const forAi = (g: IssueGroup): IssueGroup => ({ ...g, urls: g.urls.slice(0, 300), evidence: g.evidence.slice(0, 15) });
+
 const failed = (e: unknown): Solution => ({
   status: "error", summary: e instanceof Error ? e.message : "AI request failed", causes: [], steps: [], verify: [], examples: [], checks: [],
   usage: { gptIn: 0, gptOut: 0, jevIn: 0, gptCalls: 0, jevCalls: 0 }, models: [], generatedAt: new Date().toISOString(),
 });
+
 const isFresh = (c: IndexCache, u: string) => {
   const r = c.inspected[u];
   return !!r && r.verdict !== "ERROR" && Date.now() - Date.parse(r.checkedAt) < FRESH_DAYS * DAY;
@@ -60,11 +73,14 @@ export default function Audit({ site }: { site: string }) {
   const [days, setDays] = useState<number>(30);
   const [inspectN, setInspectN] = useState(200);
   const [httpN, setHttpN] = useState(1000);
+  const [crawlN, setCrawlN] = useState(2000);
   const [useAi, setUseAi] = useState(true);
   const [steps, setSteps] = useState<Step[]>([]);
   const [groups, setGroups] = useState<IssueGroup[]>([]);
   const [sols, setSols] = useState<Record<string, Solution>>({});
   const [win, setWin] = useState<AuditWindow | null>(null);
+  const [crawl, setCrawl] = useState<CrawlReport | null>(null);
+  const [activity, setActivity] = useState<Activity | null>(null);
   const [spent, setSpent] = useState<Spent>({ gptIn: 0, gptOut: 0, jevIn: 0, aiCalls: 0, cached: 0 });
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
@@ -82,6 +98,8 @@ export default function Audit({ site }: { site: string }) {
     setSols({});
     setSteps([]);
     setWin(null);
+    setCrawl(null);
+    setActivity(null);
     setError("");
   }, [site]);
 
@@ -101,6 +119,8 @@ export default function Audit({ site }: { site: string }) {
     setGroups([]);
     setSols({});
     setWin(null);
+    setCrawl(null);
+    setActivity(null);
     const st: Step[] = STEPS.map((label) => ({ label, state: "todo", note: "" }));
     let cur = 0;
     const upd = (i: number, p: Partial<Step>) => {
@@ -165,11 +185,110 @@ export default function Audit({ site }: { site: string }) {
       show();
       upd(3, { state: "done", note: `${num(recent.length)} pages with Google results from the last ${FRESH_DAYS} days (${num(checked)} checked now)` });
 
-      // 5) Fixes for the most important groups (cached per issue + evidence for 7 days, so re-runs don't pay twice)
-      if (!useAi || !access.gpt) {
-        upd(4, { state: "skip", note: access.gpt ? "turned off: standard fixes shown" : "OPENAI_API_KEY isn't set: standard fixes shown" });
+      // Every saved Google result (any age), used for crawl activity and 404 sources
+      const inspAll = Object.values(cache.inspected).filter((r) => r.verdict && r.verdict !== "ERROR");
+
+      // 5) Googlebot crawl activity: last-crawl dates from URL Inspection, remembered across runs
+      upd(4, { state: "run" });
+      const histKey = `dash:crawlhist:${site}`;
+      const prevHist = (await kvGet<CrawlHistory>(histKey).catch(() => undefined)) || null;
+      const hist = mergeHistory(prevHist, inspAll);
+      await kvSet(histKey, hist).catch(() => {});
+      const act = crawlActivity(inspAll, hist);
+      setActivity(act);
+      upd(4, {
+        state: "done",
+        note: `${num(act.inspected)} URLs with Google's last-crawl date: ${num(act.d1 + act.d7)} crawled in the last 7 days, ${num(act.never)} never crawled, ${num(act.recrawled)} seen recrawled`,
+      });
+
+      // 6) Deep crawl: follow internal links; fetch the pages Google says link to 404s first
+      if (!crawlN || stop.current) {
+        upd(5, { state: "skip", note: crawlN ? "stopped" : "turned off" });
       } else {
-        upd(4, { state: "run" });
+        upd(5, { state: "run" });
+        try {
+          const plan = planCrawl(site, inspAll, col.topPages, Array.from(sitemapSet));
+          const pages = new Map<string, CrawlPage>();
+          const inlinks = new Map<string, Inlink>();
+          const found = new Set<string>();
+          const refChecked = new Set<string>();
+          const queue = plan.seeds.slice(0, crawlN);
+          const queued = new Set(queue);
+          const retries = new Map<string, number>();
+          let qi = 0;
+          const addLink = (from: string, to: string) => {
+            const e = inlinks.get(to) || { count: 0, from: [] };
+            e.count++;
+            if (e.from.length < SOURCES_KEPT && e.from.indexOf(from) < 0) e.from.push(from);
+            inlinks.set(to, e);
+            if (!queued.has(to) && queued.size < crawlN) {
+              queued.add(to);
+              queue.push(to);
+            }
+          };
+          const take = () => {
+            const b = queue.slice(qi, qi + CRAWL_BATCH);
+            qi += b.length;
+            return b;
+          };
+          while (qi < queue.length && !stop.current) {
+            const batches: string[][] = [];
+            for (let p = 0; p < CRAWL_PARALLEL; p++) {
+              const b = take();
+              if (b.length) batches.push(b);
+            }
+            const results = await Promise.all(batches.map((b) => post<{ rows: CrawlRow[] }>("/api/audit/crawl", { siteUrl: site, urls: b })));
+            for (const res of results) {
+              for (const row of res.rows) {
+                if (row.skipped) {
+                  const n = (retries.get(row.url) || 0) + 1;
+                  retries.set(row.url, n);
+                  if (n < 3) queue.push(row.url);
+                  continue;
+                }
+                const page: CrawlPage = {
+                  url: row.url, status: row.status, chain: row.chain, finalUrl: row.finalUrl, redirects: row.redirects,
+                  loop: row.loop, robotsBlocked: row.robotsBlocked, inconclusive: row.inconclusive, error: row.error,
+                };
+                pages.set(row.url, page);
+                const wanted = plan.wantByRef.get(row.url);
+                if (wanted) {
+                  refChecked.add(row.url);
+                  row.links.forEach((l) => {
+                    if (wanted.has(l)) found.add(`${row.url}\n${l}`);
+                  });
+                }
+                const src = normalizeUrl(row.finalUrl || row.url);
+                if (row.redirects > 0 && src !== row.url && row.status === 200 && !pages.has(src)) {
+                  pages.set(src, { ...page, url: src, chain: "200", finalUrl: src, redirects: 0 });
+                  queued.add(src);
+                }
+                row.links.forEach((l) => addLink(src, l));
+              }
+            }
+            upd(5, { note: `${num(pages.size)} pages fetched, ${num(Math.max(0, queue.length - qi))} queued (limit ${num(crawlN)})` });
+          }
+          const out = crawlResults({
+            siteUrl: site, pages, inlinks, inspections: inspAll, found, refChecked,
+            sitemap: sitemapSet, limit: crawlN, queuedLeft: Math.max(0, queue.length - qi),
+          });
+          setCrawl(out.report);
+          all = [...all, ...out.groups];
+          show();
+          upd(5, {
+            state: "done",
+            note: `${num(out.report.fetched)} pages: ${num(out.report.brokenRows.length)} broken-link sources, ${num(out.report.redirectRows.length)} links to redirects, ${num(out.report.sourceRows.length)} Google 404 source rows`,
+          });
+        } catch (e) {
+          upd(5, { state: "error", note: e instanceof Error ? e.message : "Crawl failed" });
+        }
+      }
+
+      // 7) Fixes for the most important groups (cached per issue + evidence for 7 days, so re-runs don't pay twice)
+      if (!useAi || !access.gpt) {
+        upd(6, { state: "skip", note: access.gpt ? "turned off: standard fixes shown" : "OPENAI_API_KEY isn't set: standard fixes shown" });
+      } else {
+        upd(6, { state: "run" });
         const targetsAi = sortGroups(all).slice(0, access.maxGroups || 15);
         const out: Record<string, Solution> = {};
         const s: Spent = { gptIn: 0, gptOut: 0, jevIn: 0, aiCalls: 0, cached: 0 };
@@ -195,9 +314,9 @@ export default function Audit({ site }: { site: string }) {
           }
           setSols({ ...out });
           setSpent({ ...s });
-          upd(4, { note: `${i + 1} of ${targetsAi.length} issue groups` });
+          upd(6, { note: `${i + 1} of ${targetsAi.length} issue groups` });
         }
-        upd(4, { state: "done" });
+        upd(6, { state: "done" });
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Audit failed");
@@ -215,7 +334,7 @@ export default function Audit({ site }: { site: string }) {
   return (
     <Section
       title="GSC audit (AI)"
-      lede="Finds the issues Google reports for this property and gives a fix for each group. Issues and counts come only from Google's APIs (Search Analytics, Sitemaps, URL Inspection) and this dashboard's own live page checks — never from the AI. GPT writes the fix; code checks it uses only URLs and numbers from the data and gives no unsafe advice; Jev (or a second GPT pass) checks it's grounded, on-topic, safe and actionable. Anything that fails is marked “needs human review”."
+      lede="Finds the issues Google reports for this property and gives a fix for each group. Issues and counts come only from Google's APIs (Search Analytics, Sitemaps, URL Inspection) and this dashboard's own live page checks and deep crawl — never from the AI. GPT writes the fix; code checks it uses only URLs and numbers from the data and gives no unsafe advice; Jev (or a second GPT pass) checks it's grounded, on-topic, safe and actionable. Anything that fails is marked “needs human review”."
     >
       <div className="panel">
         <div className="row">
@@ -243,6 +362,14 @@ export default function Audit({ site }: { site: string }) {
               ))}
             </select>
           </label>
+          <label className="control">
+            Deep crawl
+            <select value={crawlN} onChange={(e) => setCrawlN(Number(e.target.value))} disabled={running}>
+              {[0, 500, 2000, 5000, 20000].map((n) => (
+                <option key={n} value={n}>{n ? `${num(n)} pages` : "Off"}</option>
+              ))}
+            </select>
+          </label>
           <label className="muted" style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <input type="checkbox" checked={useAi && !!access.gpt} onChange={(e) => setUseAi(e.target.checked)} disabled={running || !access.gpt} />
             AI fixes ({access.gpt ? access.gptModel : "no OpenAI key"}
@@ -255,7 +382,14 @@ export default function Audit({ site }: { site: string }) {
               <button className="btn" onClick={() => downloadFile(`gsc-audit-${fileSafe(site)}-${stamp}.html`, auditReportHtml({ site, window: win, groups, sols }), "text/html")}>
                 Download report
               </button>
-              <button className="btn" onClick={() => downloadJson(`gsc-audit-${fileSafe(site)}-${stamp}.json`, { site, window: win, generatedAt: new Date().toISOString(), groups, solutions: sols })}>
+              <button
+                className="btn"
+                onClick={() =>
+                  downloadJson(`gsc-audit-${fileSafe(site)}-${stamp}.json`, {
+                    site, window: win, generatedAt: new Date().toISOString(), groups, solutions: sols, crawl, crawlActivity: activity,
+                  })
+                }
+              >
                 Download data
               </button>
             </>
@@ -263,7 +397,7 @@ export default function Audit({ site }: { site: string }) {
         </div>
         <p className="muted" style={{ marginBottom: 0 }}>
           URL Inspection left today: {num(quotaLeft(site))} of {num(DAILY_INSPECTION_LIMIT)} (shared with the Indexing tab and the Live index monitor).
-          Live page checks and Search Console data are free; only the AI step costs money.
+          Live page checks, the deep crawl and Search Console data are free; only the AI step costs money. The deep crawl fetches about 16 pages per round, so 2,000 pages take a few minutes.
         </p>
         {steps.length > 0 && (
           <ol className="muted" style={{ marginBottom: 0 }}>
@@ -298,9 +432,12 @@ export default function Audit({ site }: { site: string }) {
         </div>
       )}
 
+      <AuditCrawl report={crawl} activity={activity} />
+
       {groups.map((g) => (
         <IssueCard key={g.fingerprint} g={g} sol={sols[g.fingerprint]} />
       ))}
+
       {!running && steps.length > 0 && !groups.length && !error && (
         <div className="notice" style={{ marginTop: 16 }}>No issues found with these settings.</div>
       )}
