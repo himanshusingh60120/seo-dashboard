@@ -3,46 +3,46 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { signOut, useSession } from "next-auth/react";
 import type { GscData, Ga4Data, Properties, Sources } from "@/lib/types";
-import { indexScanSource, loadIndexCache, peekIndexCache } from "@/lib/indexCache";
+import { loadIndexCache, peekIndexCache, indexScanSource } from "@/lib/indexCache";
 import { downloadJson, fileSafe } from "@/lib/evidence";
-import { DEFAULT_DAYS, WINDOWS, yoyAllowed, type Compare } from "@/lib/dates";
-import { getMonitor, monitorPrefs } from "@/lib/monitor";
 import { SourcesProvider } from "./ui";
+import DeindexReport from "./DeindexReport";
 import Overview from "./Overview";
 import Rankings from "./Rankings";
 import Indexing from "./Indexing";
-import IndexMonitor from "./IndexMonitor";
 import Queries from "./Queries";
 import QueryGrowth from "./QueryGrowth";
+import { yoyAllowed, type Compare } from "@/lib/dates";
 import Audience from "./Audience";
 import CtaSection from "./CtaSection";
 import ChannelDrilldown from "./ChannelDrilldown";
-import Audit from "./Audit";
+import CrawlAudit from "./CrawlAudit"; // NEW (1/4)
 
-type Tab = "overview" | "rankings" | "indexing" | "monitor" | "queries" | "growth" | "audience" | "cta" | "audit";
+// NEW (2/4): "audit" added to the Tab type
+type Tab = "overview" | "rankings" | "indexing" | "deindexed" | "audit" | "queries" | "growth" | "audience" | "cta";
 
-const BASE_TABS: { id: Tab; label: string }[] = [
+const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "rankings", label: "Rankings" },
   { id: "indexing", label: "Indexing" },
-  { id: "monitor", label: "Live index monitor" },
+  { id: "deindexed", label: "Deindexed pages" },
+  { id: "audit", label: "Crawl audit" }, // NEW (3/4)
   { id: "queries", label: "Queries" },
   { id: "growth", label: "Query growth" },
   { id: "audience", label: "Traffic & geography" },
   { id: "cta", label: "CTAs" },
 ];
-const SEARCH_TYPES: [string, string][] = [["web", "Web"], ["image", "Image"], ["video", "Video"], ["news", "News"]];
-/** Search Console data changes about once a day, so 10 minutes is plenty (only GA4 realtime moves faster). */
-const REFRESH_MS = 10 * 60 * 1000;
+
+const REFRESH_MS = 5 * 60 * 1000;
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { cache: "no-store" });
-  const data = await res.json().catch(() => ({}));
+  const data = await res.json();
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
-  return data as T;
+  return data;
 }
 
-function readPrefs(): Record<string, any> {
+function readPrefs() {
   try {
     return JSON.parse(localStorage.getItem("dash:prefs") || "{}");
   } catch {
@@ -55,11 +55,9 @@ export default function Dashboard() {
   const [props, setProps] = useState<Properties | null>(null);
   const [site, setSite] = useState("");
   const [ga4, setGa4] = useState("");
-  const [days, setDays] = useState<number>(DEFAULT_DAYS);
+  const [days, setDays] = useState(28);
   const [compare, setCompare] = useState<Compare>("previous");
-  const [searchType, setSearchType] = useState("web");
   const [tab, setTab] = useState<Tab>("overview");
-  const [canAudit, setCanAudit] = useState(false);
   const [gsc, setGsc] = useState<GscData | null>(null);
   const [ga, setGa] = useState<Ga4Data | null>(null);
   const [loading, setLoading] = useState(false);
@@ -78,26 +76,10 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gsc, ga, site, indexVersion, tab]);
 
+  // Load the saved index results for this property into memory, then refresh the sources
   useEffect(() => {
     if (site) loadIndexCache(site).then(bumpIndex);
   }, [site, bumpIndex]);
-
-  // Live index monitor: resume it for this property if it was left on; stop it when switching away.
-  useEffect(() => {
-    if (!site) return;
-    const m = getMonitor();
-    const p = monitorPrefs();
-    if (p.on[site]) m.start(site, p.budget);
-    else if (m.get().running && m.get().site !== site) m.stop();
-  }, [site]);
-
-  // The audit tab is shown only to the audit account; every audit API route checks the account again.
-  useEffect(() => {
-    fetch("/api/audit/access", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setCanAudit(!!d?.allowed))
-      .catch(() => {});
-  }, []);
 
   const downloadEvidence = () => {
     downloadJson(`evidence-${fileSafe(site)}-${new Date().toISOString().slice(0, 10)}.json`, {
@@ -107,16 +89,13 @@ export default function Dashboard() {
       searchConsoleProperty: site,
       ga4Property: ga4 || null,
       periodDays: days,
-      searchType,
-      comparedWith: compare === "yoy" ? "the same days a year earlier (52 weeks back)" : "the previous period",
+      comparedWith: compare === "yoy" ? "same period last year" : "previous period",
       sources,
-      data: {
-        searchConsole: gsc ? { ...gsc, sources: undefined } : null,
-        ga4: ga ? { ...ga, sources: undefined } : null,
-      },
+      data: { searchConsole: gsc ? { ...gsc, sources: undefined } : null, ga4: ga ? { ...ga, sources: undefined } : null },
     });
   };
 
+  // Load property lists once
   useEffect(() => {
     getJson<Properties>("/api/properties")
       .then((p) => {
@@ -124,10 +103,10 @@ export default function Dashboard() {
         const prefs = readPrefs();
         const s = p.gsc.find((x) => x.siteUrl === prefs.site)?.siteUrl || p.gsc[0]?.siteUrl || "";
         setSite(s);
-        setGa4(prefs.map?.[s] ?? p.gsc.find((x) => x.siteUrl === s)?.ga4Id ?? "");
-        if ((WINDOWS as readonly number[]).includes(prefs.days)) setDays(prefs.days);
-        if (prefs.compare === "yoy") setCompare("yoy");
-        if (SEARCH_TYPES.some(([id]) => id === prefs.searchType)) setSearchType(prefs.searchType);
+        const mapped = prefs.map?.[s] ?? p.gsc.find((x) => x.siteUrl === s)?.ga4Id ?? "";
+        setGa4(mapped);
+        if (prefs.days) setDays(prefs.days);
+        if (prefs.compare === "yoy" && yoyAllowed(prefs.days || 28)) setCompare("yoy");
       })
       .catch((e) => setError(e.message));
   }, []);
@@ -142,12 +121,10 @@ export default function Dashboard() {
   useEffect(() => {
     if (!site) return;
     const prefs = readPrefs();
-    localStorage.setItem(
-      "dash:prefs",
-      JSON.stringify({ ...prefs, site, days, compare, searchType, map: { ...(prefs.map || {}), [site]: ga4 } })
-    );
-  }, [site, ga4, days, compare, searchType]);
+    localStorage.setItem("dash:prefs", JSON.stringify({ ...prefs, site, days, compare, map: { ...(prefs.map || {}), [site]: ga4 } }));
+  }, [site, ga4, days, compare]);
 
+  // Year over year needs data from a year back; Search Console keeps 16 months, so it's off for 6 months
   useEffect(() => {
     if (compare === "yoy" && !yoyAllowed(days)) setCompare("previous");
   }, [days, compare]);
@@ -159,20 +136,17 @@ export default function Dashboard() {
     setError(null);
     setGaError(null);
     const [g, a] = await Promise.allSettled([
-      getJson<GscData>(`/api/gsc/performance?site=${encodeURIComponent(site)}&days=${days}&compare=${compare}&type=${searchType}`),
+      getJson<GscData>(`/api/gsc/performance?site=${encodeURIComponent(site)}&days=${days}&compare=${compare}`),
       ga4 ? getJson<Ga4Data>(`/api/ga4/overview?property=${ga4}&days=${days}&compare=${compare}`) : Promise.resolve(null),
     ]);
     if (id !== reqId.current) return; // a newer request superseded this one
     if (g.status === "fulfilled") setGsc(g.value);
-    else setError(g.reason?.message || "Search Console request failed");
+    else setError(g.reason.message);
     if (a.status === "fulfilled") setGa(a.value);
-    else {
-      setGa(null);
-      setGaError(a.reason?.message || "GA4 request failed");
-    }
+    else { setGa(null); setGaError(a.reason.message); }
     setUpdated(new Date());
     setLoading(false);
-  }, [site, ga4, days, compare, searchType]);
+  }, [site, ga4, days, compare]);
 
   useEffect(() => {
     setGsc(null);
@@ -180,18 +154,15 @@ export default function Dashboard() {
     load();
   }, [load]);
 
-  // Auto-refresh only while the browser tab is visible
   useEffect(() => {
     if (!live) return;
-    const t = setInterval(() => {
-      if (document.visibilityState === "visible") load();
-    }, REFRESH_MS);
+    const t = setInterval(load, REFRESH_MS);
     return () => clearInterval(t);
   }, [live, load]);
 
-  const tabs: { id: Tab; label: string }[] = canAudit ? [...BASE_TABS, { id: "audit", label: "GSC audit (AI)" }] : BASE_TABS;
-  const noGa4Notice = <div className="notice">Pick a GA4 property in the top bar to see this data.</div>;
-  const needsGsc = ["overview", "rankings", "queries"].includes(tab);
+  const noGa4Notice = (
+    <div className="notice">Pick a GA4 property in the top bar to see this data.</div>
+  );
 
   return (
     <>
@@ -201,6 +172,7 @@ export default function Dashboard() {
             Search & traffic dashboard
             <small>{session?.user?.email}</small>
           </div>
+
           <label className="control">
             Search Console property
             <select value={site} onChange={(e) => changeSite(e.target.value)} disabled={!props}>
@@ -210,6 +182,7 @@ export default function Dashboard() {
               ))}
             </select>
           </label>
+
           <label className="control">
             GA4 property
             <select value={ga4} onChange={(e) => setGa4(e.target.value)} disabled={!props}>
@@ -219,40 +192,37 @@ export default function Dashboard() {
               ))}
             </select>
           </label>
+
           <label className="control">
             Period
             <select value={days} onChange={(e) => setDays(Number(e.target.value))} style={{ minWidth: 120 }}>
-              {WINDOWS.map((d) => (
-                <option key={d} value={d}>Last {d} days</option>
-              ))}
+              <option value={7}>Last 7 days</option>
+              <option value={28}>Last 28 days</option>
+              <option value={90}>Last 3 months</option>
+              <option value={180}>Last 6 months</option>
             </select>
           </label>
+
           <label className="control">
             Compare with
             <select value={compare} onChange={(e) => setCompare(e.target.value as Compare)} style={{ minWidth: 150 }}>
               <option value="previous">Previous period</option>
-              <option value="yoy" disabled={!yoyAllowed(days)}>Same days last year</option>
+              <option value="yoy" disabled={!yoyAllowed(days)}>
+                Same period last year{yoyAllowed(days) ? "" : " (up to 3 months)"}
+              </option>
             </select>
           </label>
-          <label className="control">
-            Search type
-            <select value={searchType} onChange={(e) => setSearchType(e.target.value)}>
-              {SEARCH_TYPES.map(([id, label]) => (
-                <option key={id} value={id}>{label}</option>
-              ))}
-            </select>
-          </label>
+
           <button className="btn" onClick={load} disabled={loading || !site}>{loading ? "Refreshing…" : "Refresh"}</button>
-          <button className="btn" onClick={downloadEvidence} disabled={!gsc} title="Download every number with the exact Google API request behind it">
-            Download evidence
-          </button>
-          <button className="live btn" onClick={() => setLive(!live)} aria-pressed={live} title="Refresh automatically every 10 minutes while this tab is visible">
+          <button className="btn" onClick={downloadEvidence} disabled={!gsc} title="Download every number with the exact Google API request behind it">Download evidence</button>
+          <button className="live btn" onClick={() => setLive(!live)} aria-pressed={live} title="Refresh automatically every 5 minutes">
             <span className={`live-dot ${live ? "" : "off"}`} /> {live ? "Auto-refresh on" : "Auto-refresh off"}
           </button>
           <button className="btn" onClick={() => signOut({ callbackUrl: "/login" })}>Sign out</button>
         </div>
+
         <nav className="tabs" role="tablist">
-          {tabs.map((t) => (
+          {TABS.map((t) => (
             <button key={t.id} role="tab" className="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
               {t.label}
             </button>
@@ -266,48 +236,52 @@ export default function Dashboard() {
           {props && props.gsc.length === 0 && (
             <div className="notice">This Google account has no verified Search Console properties. Sign in with an account that has access.</div>
           )}
+
           {updated && (
             <p className="muted" style={{ margin: 0 }}>
               Updated {updated.toLocaleTimeString()}
-              {gsc && ` · Search data ${gsc.range.startDate} to ${gsc.range.endDate} vs ${gsc.previousRange.startDate} to ${gsc.previousRange.endDate}`}
-              {gsc?.dataThrough && ` · Search Console is complete through ${gsc.dataThrough}`}
-              {ga?.timeZone && ` · GA4 dates in ${ga.timeZone}`}
+              {gsc && ` · Search data ${gsc.range.startDate} to ${gsc.range.endDate}, compared with ${gsc.previousRange.startDate} to ${gsc.previousRange.endDate} (Search Console reports with a ~3 day delay)`}
               {gsc && " · Every figure has a Source button showing the Google API call behind it."}
             </p>
           )}
-          {!gsc && !error && needsGsc && <div className="notice">Loading data for {site || "your properties"}…</div>}
+
+          {/* NEW (4/4): no "Loading data" notice on the audit tab, and the tab itself */}
+          {!gsc && !error && tab !== "cta" && tab !== "audit" && <div className="notice">Loading data for {site || "your properties"}…</div>}
 
           {gsc && tab === "overview" && <Overview gsc={gsc} ga={ga} gaError={gaError} hasGa4={!!ga4} site={site} />}
           {gsc && tab === "rankings" && <Rankings gsc={gsc} />}
           {site && tab === "indexing" && <Indexing site={site} onChange={bumpIndex} />}
-          {site && tab === "monitor" && <IndexMonitor site={site} />}
+          {site && tab === "deindexed" && <DeindexReport site={site} onChange={bumpIndex} />}
+          {site && tab === "audit" && <CrawlAudit key={site} site={site} />}
           {gsc && tab === "queries" && <Queries gsc={gsc} />}
           {site && tab === "growth" && <QueryGrowth site={site} days={days} compare={compare} />}
+
           {tab === "audience" && (
             <>
               <Audience ga={ga} gaError={gaError} hasGa4={!!ga4} loading={loading} />
               <section className="section">
                 <h2>Channel drill-down</h2>
                 <p className="lede">
-                  Click a channel to see exactly where its traffic came from: source and medium, landing pages, countries, devices and
-                  campaigns. Rows with many sessions but almost no engagement are usually bots or tracking problems.
+                  Click a channel to see exactly where its traffic came from: source and medium, landing pages,
+                  countries, devices and campaigns. Rows with many sessions but almost no engagement are usually
+                  bots or tracking problems.
                 </p>
                 {ga4 ? <ChannelDrilldown key={`ch-${ga4}-${days}`} propertyId={ga4} days={days} /> : noGa4Notice}
               </section>
             </>
           )}
+
           {tab === "cta" && (
             <section className="section">
               <h2>CTA clicks</h2>
               <p className="lede">
-                Visits to the Buy / License, Request sample, Talk to expert, Customization and Connect pages. Click a CTA to filter every
-                table below to it: which channel and source the visitor came from, their country, region and city, which report they
-                were interested in, and the page they clicked from.
+                Visits to the Buy / License, Request sample, Talk to expert, Customization and Connect pages.
+                Click a CTA to filter every table below to it: which channel and source the visitor came from,
+                their country, region and city, which report they were interested in, and the page they clicked from.
               </p>
               {ga4 ? <CtaSection key={`cta-${ga4}-${days}`} propertyId={ga4} days={days} /> : noGa4Notice}
             </section>
           )}
-          {site && tab === "audit" && canAudit && <Audit site={site} />}
         </main>
       </SourcesProvider>
     </>
