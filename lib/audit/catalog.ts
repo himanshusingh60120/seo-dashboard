@@ -4,13 +4,15 @@
 
 export type Severity = "critical" | "high" | "medium" | "low";
 export type Category = "Indexing" | "Crawling" | "Sitemaps" | "Canonicals" | "Performance" | "Structured data";
+
 export type IssueType =
   | "http_404" | "soft_404" | "server_error" | "redirect_error" | "access_denied" | "blocked_robots" | "noindex"
   | "canonical_mismatch" | "crawled_not_indexed" | "discovered_not_indexed" | "duplicate_no_canonical" | "unknown_to_google"
   | "rich_result_errors" | "stale_crawl"
   | "url_4xx" | "url_5xx" | "url_redirect" | "redirect_chain" | "url_noindex" | "url_robots_blocked" | "url_canonical_elsewhere" | "http_inconclusive"
   | "no_sitemaps" | "sitemap_errors" | "sitemap_warnings" | "sitemap_stale"
-  | "traffic_drop" | "lost_visibility" | "position_drop" | "low_ctr" | "cannibalization";
+  | "traffic_drop" | "lost_visibility" | "position_drop" | "low_ctr" | "cannibalization"
+  | "broken_links" | "links_to_redirects" | "http_404_sources";
 
 export type CatalogEntry = {
   title: string; severity: Severity; category: Category; what: string;
@@ -425,5 +427,43 @@ export const CATALOG: Record<IssueType, CatalogEntry> = {
     ],
     verify: ["One page gets most of the impressions for the query in the next window"],
     doc: DOC.canonical,
+  },
+
+  /* ---------- From the dashboard's deep crawl ---------- */
+  broken_links: {
+    title: "Internal links to broken pages (found by the deep crawl)", severity: "high", category: "Crawling",
+    what: "Pages on your site link to these URLs, and the URLs return an error (4xx, 5xx or a redirect loop) right now. The evidence shows which page holds each link.",
+    causes: ["Pages were deleted or renamed without updating links", "Mistyped or hard-coded links in templates, menus or articles", "Links to old URL formats"],
+    steps: [
+      "Open each 'linked_from' page and update or remove the link",
+      "If the target moved, also 301-redirect it to its replacement",
+      "Fix template links (menus, footers, related-post widgets) first: one fix clears many links",
+    ],
+    verify: ["Re-run the audit: the deep crawl no longer finds links to these URLs"],
+    doc: DOC.http,
+  },
+  links_to_redirects: {
+    title: "Internal links that point at redirects (found by the deep crawl)", severity: "medium", category: "Crawling",
+    what: "Pages on your site link to URLs that redirect. Every redirect hop is a separate crawl request for Googlebot, so these links spend crawling on redirects instead of pages.",
+    causes: ["Links still use old URLs, http://, non-www or a different trailing slash", "Content moved and links weren't updated"],
+    steps: [
+      "Change each link on the 'linked_from' page to the 'final_url'",
+      "Fix template-wide links first",
+      "Keep the redirects in place for external links and bookmarks",
+    ],
+    verify: ["Re-run the audit: these links now return 200 directly"],
+    doc: DOC.redirects,
+  },
+  http_404_sources: {
+    title: "Where Google's 404 URLs are still linked from", severity: "high", category: "Crawling",
+    what: "URL Inspection lists the pages that link to each 404 URL. The deep crawl re-fetched those pages and your sitemaps and confirmed these links are still there today.",
+    causes: ["A page or sitemap still links to a removed URL"],
+    steps: [
+      "Edit each 'source' page to remove the link or point it at a live page",
+      "Remove the URL from the sitemap if it's listed there",
+      "If the content moved, 301-redirect the old URL",
+    ],
+    verify: ["Re-run the audit: the link is no longer found", "Then 'Validate fix' on 'Not found (404)' in the Page indexing report"],
+    doc: DOC.http,
   },
 };
