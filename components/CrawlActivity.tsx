@@ -1,17 +1,18 @@
 // components/CrawlActivity.tsx
 "use client";
-// How often Google crawls the site. Exact daily counts come from Search Console's Crawl stats report,
-// copied from the page with the bookmark button or imported from its export (there is no API for it);
-// per-page crawl recency comes from saved URL Inspection results; sitemap reads come from the Sitemaps API.
-import { useEffect, useMemo, useRef, useState } from "react";
+// How often Google crawls the site. Exact daily counts come from Search Console's Crawl stats report (there is no API
+// for it), sent by the "Copy crawl stats" bookmark or imported from its export, and kept in shared storage so everyone
+// sees the same numbers. Per-page crawl recency comes from saved URL Inspection results; sitemap reads from the Sitemaps API.
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Area, CartesianGrid, ComposedChart, Legend, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { Source, Sources } from "@/lib/types";
 import { loadIndexCache, type IndexCache } from "@/lib/indexCache";
 import { addDays } from "@/lib/dates";
 import {
   HOW_TO_EXPORT, KIND_LABEL, applyImport, clearCrawl, crawlStatsUrl, dailyRows, loadCrawl, parseCrawlFiles, saveCrawl,
-  type CrawlStore, type ParsedCrawl, type SeriesKind,
+  type CrawlImport, type CrawlStore, type ParsedCrawl, type SeriesKind,
 } from "@/lib/crawlStats";
+import { parseCapture } from "@/lib/crawlCapture";
 import CrawlPaste from "./CrawlPaste";
 import { Bars, DataTable, Delta, Kpis, PanelTitle, Section, SourcesProvider, SubTabs, num, pct, useSources, type KpiItem } from "./ui";
 
@@ -26,6 +27,7 @@ const WINDOWS: [number, string][] = [[7, "Last 7 days"], [30, "Last 30 days"], [
 const KINDS: SeriesKind[] = ["refresh", "discovery", "total", "other"];
 const SRC = ["client.crawlImport"];
 const DAY = 864e5;
+const empty = (): CrawlStore => ({ series: {}, imports: [] });
 
 const ago = (iso: string) => {
   if (!iso) return "–";
@@ -36,9 +38,12 @@ const ago = (iso: string) => {
 };
 const mb = (b: number | null) => (b == null ? "–" : `${(b / 1e6).toFixed(1)} MB`);
 
-export default function CrawlActivity({ site }: { site: string }) {
+export default function CrawlActivity({
+  site, inbox, waiting, onInboxHandled,
+}: { site: string; inbox?: string | null; waiting?: boolean; onInboxHandled?: () => void }) {
   const outer = useSources();
   const [store, setStore] = useState<CrawlStore | null>(null);
+  const [shared, setShared] = useState<boolean | null>(null);
   const [pending, setPending] = useState<Pending[] | null>(null);
   const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -47,15 +52,35 @@ export default function CrawlActivity({ site }: { site: string }) {
   const [sm, setSm] = useState<SitemapResp | null>(null);
   const [urlView, setUrlView] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
+  const handledInbox = useRef<string | null>(null);
 
   useEffect(() => {
     let live = true;
     setStore(null);
+    setShared(null);
     setPending(null);
     setMsg(null);
     setCache(null);
     setSm(null);
-    loadCrawl(site).then((s) => live && setStore(s));
+    (async () => {
+      try {
+        const r = await fetch(`/api/crawl?site=${encodeURIComponent(site)}`, { cache: "no-store" });
+        if (r.status === 501) {
+          const local = await loadCrawl(site);
+          if (live) { setShared(false); setStore(local); }
+          return;
+        }
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
+        if (live) { setShared(true); setStore(j.store || empty()); }
+      } catch (e) {
+        if (live) {
+          setShared(false);
+          setStore(await loadCrawl(site));
+          setMsg({ text: `Couldn't reach shared storage (${e instanceof Error ? e.message : "error"}). Showing data saved in this browser.`, error: true });
+        }
+      }
+    })();
     loadIndexCache(site).then((c) => live && setCache(c));
     fetch(`/api/gsc/sitemaps?site=${encodeURIComponent(site)}`, { cache: "no-store" })
       .then(async (r) => {
@@ -70,10 +95,57 @@ export default function CrawlActivity({ site }: { site: string }) {
     };
   }, [site]);
 
-  /* ---------- Getting data in ---------- */
+  /* ---------- Saving (shared storage, or this browser if it isn't set up) ---------- */
+
+  const saveItems = useCallback(
+    async (items: ParsedCrawl[]) => {
+      if (shared) {
+        const res = await fetch("/api/crawl", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ site, series: items.map((p) => ({ kind: p.kind, label: p.label, days: p.days, urls: p.urls, source: p.file })) }),
+        });
+        const j = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(j.error || `Saving failed (${res.status})`);
+        setStore(j.store);
+      } else {
+        let s = store || empty();
+        for (const p of items) s = applyImport(s, p, p.kind, p.label);
+        await saveCrawl(site, s);
+        setStore(s);
+      }
+    },
+    [shared, site, store]
+  );
 
   const addPending = (list: ParsedCrawl[]) =>
     setPending((prev) => [...(prev || []), ...list.map((p) => ({ ...p, choice: p.kind, otherLabel: p.label }))]);
+
+  /** Data from the bookmark (new tab) or pasted: saved straight away when the numbers check out. */
+  const handleCapture = useCallback(
+    async (text: string) => {
+      setMsg(null);
+      try {
+        const res = parseCapture(text, site);
+        if (res.verified) {
+          await saveItems(res.items);
+          setMsg({ text: `${res.summary} Saved${shared ? " for everyone" : " in this browser"}.` });
+        } else {
+          addPending(res.items);
+          setMsg({ text: `${res.summary} Check the numbers below against Search Console, then click Save.`, error: true });
+        }
+      } catch (e) {
+        setMsg({ text: e instanceof Error ? e.message : "Couldn't read the crawl data", error: true });
+      }
+    },
+    [site, saveItems, shared]
+  );
+
+  useEffect(() => {
+    if (!inbox || shared === null || !store || handledInbox.current === inbox) return;
+    handledInbox.current = inbox;
+    handleCapture(inbox).finally(() => onInboxHandled?.());
+  }, [inbox, shared, store, handleCapture, onInboxHandled]);
 
   const onFiles = async (list: FileList | null) => {
     if (!list?.length) return;
@@ -94,18 +166,29 @@ export default function CrawlActivity({ site }: { site: string }) {
 
   const confirmImport = async () => {
     if (!pending) return;
-    let s: CrawlStore = store || { series: {}, imports: [] };
-    for (const p of pending) s = applyImport(s, p, p.choice, p.choice === "other" ? p.otherLabel.trim() || p.file : KIND_LABEL[p.choice]);
-    await saveCrawl(site, s);
-    setStore(s);
-    setMsg({ text: `Saved ${pending.length} item(s). Days already saved were updated with the newer numbers.` });
-    setPending(null);
+    try {
+      await saveItems(
+        pending.map((p) => ({ ...p, kind: p.choice, label: p.choice === "other" ? p.otherLabel.trim() || p.file : KIND_LABEL[p.choice] }))
+      );
+      setMsg({ text: `Saved ${pending.length} item(s)${shared ? " for everyone" : " in this browser"}. Days already saved were updated with the newer numbers.` });
+      setPending(null);
+    } catch (e) {
+      setMsg({ text: e instanceof Error ? e.message : "Saving failed", error: true });
+    }
   };
 
   const clearAll = async () => {
-    if (!confirm("Delete the saved crawl data for this property in this browser?")) return;
-    await clearCrawl(site);
-    setStore({ series: {}, imports: [] });
+    if (!confirm(shared ? "Delete the crawl data saved for this property, for everyone?" : "Delete the crawl data saved for this property in this browser?")) return;
+    try {
+      if (shared) {
+        const r = await fetch(`/api/crawl?site=${encodeURIComponent(site)}`, { method: "DELETE" });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || `Delete failed (${r.status})`);
+      } else await clearCrawl(site);
+      setStore(empty());
+    } catch (e) {
+      setMsg({ text: e instanceof Error ? e.message : "Delete failed", error: true });
+    }
   };
 
   /* ---------- Saved crawl counts ---------- */
@@ -115,6 +198,7 @@ export default function CrawlActivity({ site }: { site: string }) {
   const rows = useMemo(() => (win && latest ? all.filter((r) => r.date > addDays(latest, -win)) : all), [all, win, latest]);
   const hasSplit = !!store?.series.refresh && !!store?.series.discovery;
   const hasReportedTotal = !!store?.series.total;
+  const lastSaved = store?.imports.length ? store.imports[store.imports.length - 1] : null;
 
   const k = useMemo(() => {
     const sum = (a: typeof rows, f: (r: (typeof rows)[number]) => number | null) => a.reduce((s, r) => s + (f(r) ?? 0), 0);
@@ -158,14 +242,14 @@ export default function CrawlActivity({ site }: { site: string }) {
       ? {
           id: "client.crawlImport",
           label: "Crawl stats from Search Console",
-          system: "Google Search Console Crawl stats report (copied from the page or imported from its export, saved in this browser)",
+          system: `Google Search Console Crawl stats report (copied by the bookmark or imported from its export; saved ${shared ? "in shared storage" : "in this browser"})`,
           range: { startDate: all[0].date, endDate: latest },
-          fetchedAt: store.imports[store.imports.length - 1]?.at || new Date().toISOString(),
+          fetchedAt: lastSaved?.at || new Date().toISOString(),
           rowCount: all.length,
           formula:
             `Daily counts from the report's chart data, merged by date (newer data wins). ` +
             `Saved: ${Object.values(store.series).map((s) => `${s.label} (${Object.keys(s.days).length} days)`).join(", ")}. ` +
-            `Copied data is checked against the total shown on the page before it can be saved. ` +
+            `Bookmark data is saved automatically only when Refresh + Discovery equals All crawl requests on at least 95% of days. ` +
             `Every Googlebot crawl is either Refresh or Discovery, so when no “All crawl requests” data was saved, the daily total is Refresh + Discovery.`,
           verifyUrl: crawlStatsUrl(site),
           verifyLabel: "Open Crawl stats in Search Console",
@@ -177,7 +261,7 @@ export default function CrawlActivity({ site }: { site: string }) {
   const merged = useMemo<Sources>(
     () => ({ ...outer, ...(sm?.sources || {}), ...(crawlSource ? { [crawlSource.id]: crawlSource } : {}) }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [outer, sm, store, latest]
+    [outer, sm, store, latest, shared]
   );
 
   const kpis: KpiItem[] = [
@@ -193,13 +277,13 @@ export default function CrawlActivity({ site }: { site: string }) {
     {
       label: "Refresh",
       value: k.splitDays ? num(k.ref) : "–",
-      sub: k.splitDays ? `${pct(k.ref / (k.ref + k.dis || 1), 0)} · re-crawls of known pages` : "copy or import the Refresh page",
+      sub: k.splitDays ? `${pct(k.ref / (k.ref + k.dis || 1), 0)} · re-crawls of known pages` : "not captured yet",
       source: SRC,
     },
     {
       label: "Discovery",
       value: k.splitDays ? num(k.dis) : "–",
-      sub: k.splitDays ? `${pct(k.dis / (k.ref + k.dis || 1), 0)} · first crawls of new URLs` : "copy or import the Discovery page",
+      sub: k.splitDays ? `${pct(k.dis / (k.ref + k.dis || 1), 0)} · first crawls of new URLs` : "not captured yet",
       source: SRC,
     },
     { label: "Busiest day", value: k.peak ? num(k.peak.total) : "–", sub: k.peak?.date, source: SRC },
@@ -230,9 +314,8 @@ export default function CrawlActivity({ site }: { site: string }) {
       buckets[age < 1 ? "Last 24 hours" : age < 7 ? "1–7 days" : age < 30 ? "7–30 days" : age < 90 ? "30–90 days" : "Over 90 days"]++;
       pages.push({ url, lastCrawl: r.lastCrawlTime.slice(0, 16).replace("T", " "), ageDays: Math.round(age * 10) / 10, crawledAs, state: r.coverageState });
     }
-    // Sitemap entries changed in the last 30 days: has Google crawled them since?
     const lags: number[] = [];
-    const waiting = cache.urls
+    const waitingPages = cache.urls
       .filter((u) => u.lastmod && !isNaN(Date.parse(u.lastmod)) && now - Date.parse(u.lastmod) < 30 * DAY)
       .map((u) => {
         const r = cache.inspected[u.url];
@@ -255,8 +338,8 @@ export default function CrawlActivity({ site }: { site: string }) {
       pages: pages.sort((a, b) => (b.ageDays ?? 1e9) - (a.ageDays ?? 1e9)),
       mobile,
       desktop,
-      waiting,
-      notYet: waiting.filter((w) => w.status !== "Crawled after the change").length,
+      waiting: waitingPages,
+      notYet: waitingPages.filter((w) => w.status !== "Crawled after the change").length,
       medianLag: lags.length ? lags[Math.floor(lags.length / 2)] : null,
     };
   }, [cache]);
@@ -268,17 +351,31 @@ export default function CrawlActivity({ site }: { site: string }) {
         source={crawlSource ? SRC : undefined}
         lede="How often Google crawls the site, split into Refresh (re-crawling pages Google already knows) and Discovery (crawling URLs for the first time)."
       >
+        {waiting && !inbox && <div className="notice" style={{ marginBottom: 16 }}>Collecting crawl stats from Search Console… this tab updates in a few seconds.</div>}
+        {msg && <p className={msg.error ? "notice error" : "notice"} style={{ marginTop: 0 }}>{msg.text}</p>}
+        {shared === false && (
+          <div className="notice error" style={{ marginBottom: 16 }}>
+            Shared storage isn't set up, so crawl data is saved only in this browser and other people (for example your CEO) won't see it.
+            Add Upstash Redis in Vercel → Storage, connect it to this project and redeploy.
+          </div>
+        )}
+        {lastSaved && (
+          <p className="muted" style={{ marginTop: 0 }}>
+            Last updated {new Date(lastSaved.at).toLocaleString()} ({ago(lastSaved.at)}){(lastSaved as CrawlImport & { by?: string }).by ? ` by ${(lastSaved as CrawlImport & { by?: string }).by}` : ""}
+            {shared ? " · saved for everyone" : ""}.
+          </p>
+        )}
+
         <div className="notice" style={{ marginBottom: 16 }}>
           <strong>Where these numbers come from</strong>
           <ul style={{ margin: "8px 0 0", paddingLeft: 18 }}>
             <li>
-              <strong>Google has no API for the Crawl stats report</strong>, so no app can fetch it on its own. The numbers come from the report
-              itself: copied from the page with the “Copy crawl stats” bookmark, or imported from its export. Either way they are exactly what Search
-              Console shows, and copied data is checked against the page's own total before it can be saved.
+              <strong>Google has no API for the Crawl stats report</strong>, so no app can fetch it on its own. Someone signed in to Search Console
+              clicks the “Copy crawl stats” bookmark on the report (about once a week), and the numbers are saved here for everyone. They are
+              exactly what Search Console shows, and they're only saved automatically when Refresh + Discovery equals the total for each day.
             </li>
             <li>
-              <strong>Search Console keeps only the last 90 days.</strong> Everything you save stays in this browser, merged by date, so copying every
-              month or two builds a longer history here.
+              <strong>Search Console keeps only the last 90 days.</strong> Each update is merged by date, so the history here grows beyond 90 days.
             </li>
             <li>
               <strong>It covers Google's crawlers only</strong> (Googlebot smartphone, desktop, image and so on), not other bots.
@@ -287,30 +384,29 @@ export default function CrawlActivity({ site }: { site: string }) {
         </div>
 
         <div className="panel">
-          <PanelTitle>Get Crawl stats into the dashboard</PanelTitle>
+          <PanelTitle>Update crawl stats</PanelTitle>
 
-          <CrawlPaste
-            site={site}
-            statsUrl={crawlStatsUrl(site)}
-            onParsed={(p) => {
-              setMsg(null);
-              addPending([p]);
-            }}
-          />
+          <CrawlPaste statsUrl={crawlStatsUrl(site)} onText={handleCapture} />
 
-          <h4 style={{ margin: "18px 0 6px" }}>Option B: import the export files</h4>
-          <p className="muted" style={{ marginTop: 0 }}>{HOW_TO_EXPORT}</p>
-          <div className="row" style={{ alignItems: "center" }}>
-            <input ref={fileRef} type="file" accept=".zip,.csv" multiple onChange={(e) => onFiles(e.target.files)} disabled={busy} aria-label="Choose Crawl stats export files" />
-            {busy && <span className="muted">Reading files…</span>}
-            {store && store.imports.length > 0 && !pending && <button className="btn" onClick={clearAll}>Delete saved crawl data</button>}
-          </div>
-          {msg && <p className={msg.error ? "notice error" : "muted"} style={{ marginBottom: 0 }}>{msg.text}</p>}
+          <details style={{ marginTop: 14 }}>
+            <summary className="muted">Or import Search Console export files</summary>
+            <p className="muted">{HOW_TO_EXPORT}</p>
+            <div className="row" style={{ alignItems: "center" }}>
+              <input ref={fileRef} type="file" accept=".zip,.csv" multiple onChange={(e) => onFiles(e.target.files)} disabled={busy} aria-label="Choose Crawl stats export files" />
+              {busy && <span className="muted">Reading files…</span>}
+            </div>
+          </details>
+
+          {store && store.imports.length > 0 && !pending && (
+            <div className="row" style={{ marginTop: 12 }}>
+              <button className="btn" onClick={clearAll}>Delete saved crawl data</button>
+            </div>
+          )}
 
           {pending && (
             <div style={{ marginTop: 14 }}>
               <p style={{ margin: "0 0 8px" }}>
-                <b>Check each item, then save.</b> The type was guessed from the page or file name; change it if it's wrong.
+                <b>Check each item, then save.</b> Change the type if it's wrong.
               </p>
               <div className="table-wrap">
                 <table>
@@ -329,11 +425,7 @@ export default function CrawlActivity({ site }: { site: string }) {
                       <tr key={`${p.file}-${i}`}>
                         <td className="url">
                           {p.file}
-                          {p.note && (
-                            <div className={p.note.startsWith("Matches") ? "" : "muted"} style={p.note.startsWith("Matches") ? { color: "var(--up, #1a7f37)" } : undefined}>
-                              {p.note}
-                            </div>
-                          )}
+                          {p.note && <div className="muted">{p.note}</div>}
                         </td>
                         <td>
                           <select
@@ -364,7 +456,7 @@ export default function CrawlActivity({ site }: { site: string }) {
                 </table>
               </div>
               <div className="row" style={{ marginTop: 10 }}>
-                <button className="btn primary" onClick={confirmImport}>Save import</button>
+                <button className="btn primary" onClick={confirmImport}>Save</button>
                 <button className="btn" onClick={() => setPending(null)}>Cancel</button>
               </div>
             </div>
@@ -373,7 +465,7 @@ export default function CrawlActivity({ site }: { site: string }) {
 
         {store && all.length === 0 && !pending && (
           <div className="notice" style={{ marginTop: 16 }}>
-            No crawl data saved for this property yet. Use “Copy crawl stats” on the Crawl stats page (and on its Refresh and Discovery pages), then paste here.
+            No crawl data saved for this property yet. Open Crawl stats in Search Console and click the “Copy crawl stats” bookmark.
           </div>
         )}
 
@@ -411,11 +503,6 @@ export default function CrawlActivity({ site }: { site: string }) {
                   {(hasReportedTotal || !hasSplit) && <Line type="monotone" dataKey="total" name="All crawl requests" stroke="#374151" dot={false} strokeWidth={2} />}
                 </ComposedChart>
               </ResponsiveContainer>
-              {!hasSplit && (
-                <p className="muted" style={{ marginBottom: 0 }}>
-                  Copy the Refresh and Discovery pages too (Crawl stats → By purpose) to see the split.
-                </p>
-              )}
             </div>
 
             <div className="panel" style={{ marginTop: 16 }}>
@@ -472,16 +559,21 @@ export default function CrawlActivity({ site }: { site: string }) {
 
             {store && store.imports.length > 0 && (
               <div className="panel" style={{ marginTop: 16 }}>
-                <PanelTitle>Saved in this browser</PanelTitle>
+                <PanelTitle>Update history</PanelTitle>
                 <DataTable
-                  rows={[...store.imports].reverse().map((x) => ({ ...x, at: new Date(x.at).toLocaleString() }))}
+                  rows={[...store.imports].reverse().map((x) => ({
+                    ...x,
+                    at: new Date(x.at).toLocaleString(),
+                    by: (x as CrawlImport & { by?: string }).by || "",
+                  }))}
                   cols={[
-                    { key: "file", label: "Source" },
+                    { key: "at", label: "Saved" },
+                    { key: "by", label: "By" },
                     { key: "label", label: "Type" },
                     { key: "from", label: "From" },
                     { key: "to", label: "To" },
                     { key: "days", label: "Days", num: true },
-                    { key: "at", label: "Saved" },
+                    { key: "file", label: "Source" },
                   ]}
                   pageSize={10}
                   empty="Nothing saved yet."
@@ -498,7 +590,7 @@ export default function CrawlActivity({ site }: { site: string }) {
         lede="From the URL Inspection results saved in this browser (Indexing tab and Live index monitor): the last time Googlebot crawled each inspected page. Updates automatically as more pages are inspected; it covers inspected pages only and shows the last crawl, not how many times."
       >
         {!recency || recency.inspected === 0 ? (
-          <div className="notice">No inspected pages yet. Load the URL list and inspect pages in the Indexing tab, or start the Live index monitor.</div>
+          <div className="notice">No inspected pages yet in this browser. Inspect pages in the Indexing tab, or start the Live index monitor.</div>
         ) : (
           <>
             <Kpis
@@ -558,7 +650,7 @@ export default function CrawlActivity({ site }: { site: string }) {
       <Section
         title="Sitemaps: when Google last read them"
         source={sm?.sources ? ["gsc.sitemaps"] : undefined}
-        lede="Sitemaps submitted in Search Console, from the Sitemaps API. Google re-reads sitemaps on its own schedule; a sitemap not read for weeks can slow down discovery of new pages."
+        lede="Sitemaps submitted in Search Console, from the Sitemaps API (updates automatically). Google re-reads sitemaps on its own schedule; a sitemap not read for weeks can slow down discovery of new pages."
       >
         {!sm && <p className="muted">Reading sitemaps…</p>}
         {sm?.error && <div className="notice error">{sm.error}</div>}
