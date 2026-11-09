@@ -2,9 +2,10 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { classify, clearIndexCache, flushIndexCache, loadIndexCache, pendingUrls, type IndexCache } from "@/lib/indexCache";
-import { DAILY_INSPECTION_LIMIT, inspectAndStore, loadUrlList, quotaLeft, quotaUsed } from "@/lib/checks";
+import { DAILY_INSPECTION_LIMIT, inspectAndStore, quotaLeft, quotaUsed } from "@/lib/checks";
 import { Bars, DataTable, Kpis, PanelTitle, Section, SubTabs, num } from "./ui";
 import IndexedRanking from "./IndexedRanking";
+import SitemapPicker from "./SitemapPicker";
 
 type V = "not" | "indexed" | "canonical" | "assumed" | "unchecked" | "errors";
 
@@ -18,7 +19,7 @@ const gscLink = (href: string) => (href ? <a href={href} target="_blank" rel="no
 
 export default function Indexing({ site, onChange }: { site: string; onChange?: () => void }) {
   const [cache, setCache] = useState<IndexCache | null>(null);
-  const [listing, setListing] = useState(false);
+  const [picking, setPicking] = useState(false);
   const [scan, setScan] = useState<{ done: number; total: number } | null>(null);
   const [limit, setLimit] = useState(500);
   const [maxAge, setMaxAge] = useState(7);
@@ -32,6 +33,7 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
     let live = true;
     setCache(null);
     setMsg(null);
+    setPicking(false);
     setUsed(quotaUsed(site));
     loadIndexCache(site).then((c) => {
       if (live) setCache(c);
@@ -41,20 +43,6 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
       flushIndexCache(site);
     };
   }, [site]);
-
-  const loadUrls = async () => {
-    setListing(true);
-    setMsg(null);
-    try {
-      const r = await loadUrlList(site);
-      setCache({ ...r.cache });
-      setMsg({ text: r.message });
-      onChange?.();
-    } catch (e) {
-      setMsg({ text: e instanceof Error ? e.message : "Could not load URLs", error: true });
-    }
-    setListing(false);
-  };
 
   const inspect = async (urls: string[]) => {
     stop.current = false;
@@ -119,12 +107,12 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
       <Section
         title="Indexed and unindexed pages"
         source={cache ? SRC : undefined}
-        lede="URLs come from your sitemaps, robots.txt sitemaps and pages with search impressions in the last 90 days. Each page is checked with Google's URL Inspection API — Search Console's own record. “Indexed” and “Not indexed” count only inspected pages; pages that only had impressions are shown separately as “Assumed indexed”. Failed checks are retried automatically. Results are saved in this browser."
+        lede="URLs come from the sitemaps you choose (plus, if you tick that option, pages with search impressions in the last 90 days). Each page is checked with Google's URL Inspection API — Search Console's own record. “Indexed” and “Not indexed” count only inspected pages; pages that only had impressions are shown separately as “Assumed indexed”. Failed checks are retried automatically. Results are saved in this browser."
       >
         <div className="panel">
           <div className="row">
-            <button className="btn primary" onClick={loadUrls} disabled={listing || !!scan}>
-              {listing ? "Reading sitemaps…" : cache ? "Reload URL list" : "Load URL list"}
+            <button className="btn primary" onClick={() => setPicking(true)} disabled={picking || !!scan}>
+              {cache ? "Reload URL list" : "Load URL list"}
             </button>
             <label className="control" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
               Check up to
@@ -166,15 +154,28 @@ export default function Indexing({ site, onChange }: { site: string; onChange?: 
           {msg && <p className={msg.error ? "notice error" : "muted"} style={{ marginBottom: 0 }}>{msg.text}</p>}
           {cache?.listedAt && (
             <p className="muted" style={{ marginBottom: 0 }}>
-              URL list loaded {new Date(cache.listedAt).toLocaleString()} from {num(cache.sitemaps.length)} sitemap file(s).
+              URL list loaded {new Date(cache.listedAt).toLocaleString()}: {num(cache.urls.length)} URLs from {num(cache.sitemaps.length)} sitemap file(s).
             </p>
           )}
         </div>
 
-        {!cache && (
+        {picking && (
+          <SitemapPicker
+            site={site}
+            onCancel={() => setPicking(false)}
+            onLoaded={(r) => {
+              setPicking(false);
+              setCache({ ...r.cache });
+              setMsg({ text: r.message });
+              onChange?.();
+            }}
+          />
+        )}
+
+        {!cache && !picking && (
           <div className="notice" style={{ marginTop: 16 }}>
-            Load the URL list to start. URL Inspection allows about 2,000 URLs per property per day, so large sites take several days; each run
-            continues with pages that don't have a recent result.
+            Load the URL list to start and choose which sitemaps to test. URL Inspection allows about 2,000 URLs per property per day, so large
+            sites take several days; each run continues with pages that don't have a recent result.
           </div>
         )}
 
