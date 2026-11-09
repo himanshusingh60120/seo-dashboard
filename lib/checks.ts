@@ -6,6 +6,7 @@ import {
   appendEvents, applyInspections, loadIndexCache, saveIndexCache,
   type IndexCache, type IndexEvent, type InspectionRec,
 } from "./indexCache";
+import type { SitemapList } from "./sitemaps";
 
 export const DAILY_INSPECTION_LIMIT = 2000;
 
@@ -58,9 +59,36 @@ export type SitemapStatus = {
   lastDownloaded: string; lastSubmitted: string; readByDashboard: number | null;
 };
 
-/** Reads sitemaps + recent search pages on the server and saves the URL list (keeping earlier inspections). */
-export async function loadUrlList(site: string) {
-  const res = await fetch(`/api/gsc/sitemap-urls?site=${encodeURIComponent(site)}`, { cache: "no-store" });
+export type UrlListOptions = { sitemaps: string[]; includeSearch: boolean };
+export type UrlListResult = {
+  cache: IndexCache;
+  message: string;
+  errors: { sitemap: string; error: string }[];
+  sitemapStatus: SitemapStatus[];
+};
+
+/** Every sitemap file found for the property, with URL counts, for the sitemap picker. */
+export async function discoverSitemaps(site: string): Promise<SitemapList> {
+  const res = await fetch(`/api/gsc/sitemap-urls?site=${encodeURIComponent(site)}&mode=list`, { cache: "no-store" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  return { files: data.files || [], note: data.note || "" };
+}
+
+/**
+ * Reads sitemaps on the server and saves the URL list (keeping earlier inspections).
+ * With options: only the chosen sitemap files, plus pages with search impressions if asked.
+ * Without options: every sitemap plus pages with impressions in the last 90 days.
+ */
+export async function loadUrlList(site: string, opts?: UrlListOptions): Promise<UrlListResult> {
+  const res = opts
+    ? await fetch("/api/gsc/sitemap-urls", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ site, sitemaps: opts.sitemaps, includeSearch: opts.includeSearch }),
+      })
+    : await fetch(`/api/gsc/sitemap-urls?site=${encodeURIComponent(site)}`, { cache: "no-store" });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   const prev = await loadIndexCache(site);
@@ -72,12 +100,16 @@ export async function loadUrlList(site: string) {
   };
   saveIndexCache(site, cache, true);
   const fromMaps = cache.urls.filter((u) => u.sources.includes("sitemap")).length;
+  const searchOnly = cache.urls.length - fromMaps;
   const errors: { sitemap: string; error: string }[] = data.errors || [];
-  const message =
-    `Found ${cache.urls.length.toLocaleString()} URLs: ${fromMaps.toLocaleString()} from ${cache.sitemaps.length} sitemap file(s), ` +
-    `the rest from search results (last 90 days).` +
-    (errors.length ? ` ${errors.length} sitemap problem(s): ${errors.slice(0, 5).map((e) => `${e.sitemap} (${e.error})`).join(", ")}.` : "") +
-    (data.outsideProperty ? ` ${Number(data.outsideProperty).toLocaleString()} URL(s) outside this property were skipped.` : "");
+  const problems = errors.length ? ` ${errors.length} sitemap problem(s): ${errors.slice(0, 5).map((e) => `${e.sitemap} (${e.error})`).join(", ")}.` : "";
+  const outside = data.outsideProperty ? ` ${Number(data.outsideProperty).toLocaleString()} URL(s) outside this property were skipped.` : "";
+  const message = opts
+    ? `Loaded ${cache.urls.length.toLocaleString()} URLs: ${fromMaps.toLocaleString()} from ${cache.sitemaps.length} sitemap file(s) you chose` +
+      (opts.includeSearch ? `, plus ${searchOnly.toLocaleString()} from search results (last 90 days)` : "") +
+      "." + problems + outside
+    : `Found ${cache.urls.length.toLocaleString()} URLs: ${fromMaps.toLocaleString()} from ${cache.sitemaps.length} sitemap file(s), ` +
+      `the rest from search results (last 90 days).` + problems + outside;
   return { cache, message, errors, sitemapStatus: (data.sitemapStatus || []) as SitemapStatus[] };
 }
 
