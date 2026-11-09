@@ -39,7 +39,7 @@ export default function Overview({ gsc, ga, gaError, hasGa4, site }: { gsc: GscD
   const g = ga?.totals;
   const traffic: KpiItem[] = g
     ? [
-        { label: "Users", source: ["ga4.trend", "ga4.previous"], value: num(g.current.totalUsers), delta: <Delta cur={g.current.totalUsers} prev={g.previous.totalUsers} /> },
+        { label: "Active users", source: ["ga4.trend", "ga4.previous"], value: num(g.current.activeUsers), delta: <Delta cur={g.current.activeUsers} prev={g.previous.activeUsers} /> },
         { label: "New users", source: ["ga4.trend", "ga4.previous"], value: num(g.current.newUsers), delta: <Delta cur={g.current.newUsers} prev={g.previous.newUsers} /> },
         { label: "Sessions", source: ["ga4.trend", "ga4.previous"], value: num(g.current.sessions), delta: <Delta cur={g.current.sessions} prev={g.previous.sessions} /> },
         { label: "Organic search sessions", source: ["ga4.organic", "ga4.trend"], value: num(ga!.organicTotals.sessions), sub: g.current.sessions ? `${pct(ga!.organicTotals.sessions / g.current.sessions)} of sessions` : undefined },
@@ -58,13 +58,20 @@ export default function Overview({ gsc, ga, gaError, hasGa4, site }: { gsc: GscD
         </div>
       </Section>
 
-      <Section title="Site traffic" lede="From Google Analytics 4, all channels.">
+      <Section
+        title="Site traffic"
+        lede={
+          ga
+            ? `From Google Analytics 4, all channels, ${ga.range.startDate} to ${ga.range.endDate}. “Active users” is GA4's standard user count — the same number its reports show.`
+            : "From Google Analytics 4, all channels."
+        }
+      >
         {!hasGa4 && <div className="notice">Choose a GA4 property in the top bar to see users, sessions and geography for this site.</div>}
         {gaError && <div className="notice error">{gaError}</div>}
         {g && (
           <>
             <Kpis items={traffic} />
-            <div className="panel" style={{ marginTop: 16 }}><PanelTitle source={["ga4.trend", "ga4.organic"]}>Users and sessions</PanelTitle><TrafficTrend data={ga!.trend} /></div>
+            <div className="panel" style={{ marginTop: 16 }}><PanelTitle source={["ga4.trend", "ga4.organic"]}>Active users and sessions</PanelTitle><TrafficTrend data={ga!.trend} /></div>
           </>
         )}
       </Section>
