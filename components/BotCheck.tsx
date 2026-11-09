@@ -64,7 +64,7 @@ export default function BotCheck({ propertyId, days, scope }: { propertyId: stri
   }, [propertyId, days, scope]);
 
   const what = scope === 'cta' ? 'CTA page' : 'site';
-  const threshold = data?.threshold ?? 0.7;
+  const threshold = data?.threshold ?? 0.1;
 
   return (
     <div className="section" style={{ marginTop: 28 }}>
