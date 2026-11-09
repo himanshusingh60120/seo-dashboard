@@ -1,6 +1,7 @@
 // lib/auth.ts
 import type { NextAuthOptions } from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
+import { DEFAULT_ALLOWED_DOMAINS } from "./access";
 
 export const GOOGLE_SCOPES = [
   "openid", "email", "profile",
@@ -10,9 +11,22 @@ export const GOOGLE_SCOPES = [
 
 const list = (v?: string) => (v || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
 
-/** Deny by default: an empty ALLOWED_EMAILS lets nobody in. */
+/** Domains whose Google accounts may sign in. ALLOWED_DOMAINS (comma-separated) replaces the built-in list when set. */
+export function allowedDomains(): string[] {
+  const fromEnv = list(process.env.ALLOWED_DOMAINS).map((d) => d.replace(/^@/, ""));
+  return fromEnv.length ? fromEnv : [...DEFAULT_ALLOWED_DOMAINS];
+}
+
+/**
+ * Deny by default. An account is allowed when its domain is one of the allowed domains (exact match:
+ * subdomains such as mail.kingsresearch.com don't count) or the full address is listed in ALLOWED_EMAILS.
+ */
 export function isAllowedEmail(email?: string | null) {
-  return !!email && list(process.env.ALLOWED_EMAILS).includes(email.toLowerCase());
+  if (!email) return false;
+  const e = email.trim().toLowerCase();
+  const at = e.lastIndexOf("@");
+  if (at < 1 || at === e.length - 1) return false;
+  return allowedDomains().includes(e.slice(at + 1)) || list(process.env.ALLOWED_EMAILS).includes(e);
 }
 
 /** The AI audit is limited to these accounts (default hsingh@kingsresearch.com). */
@@ -54,7 +68,9 @@ export const authOptions: NextAuthOptions = {
     }),
   ],
   callbacks: {
-    async signIn({ user }) {
+    async signIn({ user, profile }) {
+      // Access is granted by domain, so only accept addresses Google has verified.
+      if ((profile as { email_verified?: boolean } | undefined)?.email_verified === false) return false;
       return isAllowedEmail(user.email);
     },
     // Tokens live only in the encrypted session cookie. Refreshed here so the cookie stays current.
