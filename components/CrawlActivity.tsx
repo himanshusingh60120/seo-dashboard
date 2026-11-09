@@ -1,8 +1,8 @@
 // components/CrawlActivity.tsx
 "use client";
-// How often Google crawls the site. Exact daily counts come from Search Console's Crawl stats export
-// (there is no API for it); per-page crawl recency comes from saved URL Inspection results; sitemap reads
-// come from the Sitemaps API.
+// How often Google crawls the site. Exact daily counts come from Search Console's Crawl stats report,
+// copied from the page with the bookmark button or imported from its export (there is no API for it);
+// per-page crawl recency comes from saved URL Inspection results; sitemap reads come from the Sitemaps API.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Area, CartesianGrid, ComposedChart, Legend, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { Source, Sources } from "@/lib/types";
@@ -12,6 +12,7 @@ import {
   HOW_TO_EXPORT, KIND_LABEL, applyImport, clearCrawl, crawlStatsUrl, dailyRows, loadCrawl, parseCrawlFiles, saveCrawl,
   type CrawlStore, type ParsedCrawl, type SeriesKind,
 } from "@/lib/crawlStats";
+import CrawlPaste from "./CrawlPaste";
 import { Bars, DataTable, Delta, Kpis, PanelTitle, Section, SourcesProvider, SubTabs, num, pct, useSources, type KpiItem } from "./ui";
 
 type Pending = ParsedCrawl & { choice: SeriesKind; otherLabel: string };
@@ -21,7 +22,7 @@ type SitemapRow = {
 };
 type SitemapResp = { sitemaps?: SitemapRow[]; sources?: Sources; error?: string };
 
-const WINDOWS: [number, string][] = [[7, "Last 7 days"], [30, "Last 30 days"], [90, "Last 90 days"], [0, "Everything imported"]];
+const WINDOWS: [number, string][] = [[7, "Last 7 days"], [30, "Last 30 days"], [90, "Last 90 days"], [0, "Everything saved"]];
 const KINDS: SeriesKind[] = ["refresh", "discovery", "total", "other"];
 const SRC = ["client.crawlImport"];
 const DAY = 864e5;
@@ -69,7 +70,10 @@ export default function CrawlActivity({ site }: { site: string }) {
     };
   }, [site]);
 
-  /* ---------- Import ---------- */
+  /* ---------- Getting data in ---------- */
+
+  const addPending = (list: ParsedCrawl[]) =>
+    setPending((prev) => [...(prev || []), ...list.map((p) => ({ ...p, choice: p.kind, otherLabel: p.label }))]);
 
   const onFiles = async (list: FileList | null) => {
     if (!list?.length) return;
@@ -79,7 +83,7 @@ export default function CrawlActivity({ site }: { site: string }) {
       const { parsed, skipped } = await parseCrawlFiles(Array.from(list));
       const usable = parsed.filter((p) => Object.keys(p.days).length || p.urls.length);
       if (!usable.length) throw new Error(`No Crawl stats data was found in these files. ${HOW_TO_EXPORT}`);
-      setPending(usable.map((p) => ({ ...p, choice: p.kind, otherLabel: p.label })));
+      addPending(usable);
       if (skipped.length) setMsg({ text: `Skipped ${skipped.join(", ")}: only ZIP and CSV files are read.` });
     } catch (e) {
       setMsg({ text: e instanceof Error ? e.message : "Couldn't read the files", error: true });
@@ -94,17 +98,17 @@ export default function CrawlActivity({ site }: { site: string }) {
     for (const p of pending) s = applyImport(s, p, p.choice, p.choice === "other" ? p.otherLabel.trim() || p.file : KIND_LABEL[p.choice]);
     await saveCrawl(site, s);
     setStore(s);
-    setMsg({ text: `Imported ${pending.length} file(s). Days already saved were updated with the newer numbers.` });
+    setMsg({ text: `Saved ${pending.length} item(s). Days already saved were updated with the newer numbers.` });
     setPending(null);
   };
 
   const clearAll = async () => {
-    if (!confirm("Delete the imported crawl data for this property in this browser?")) return;
+    if (!confirm("Delete the saved crawl data for this property in this browser?")) return;
     await clearCrawl(site);
     setStore({ series: {}, imports: [] });
   };
 
-  /* ---------- Imported crawl counts ---------- */
+  /* ---------- Saved crawl counts ---------- */
 
   const all = useMemo(() => (store ? dailyRows(store) : []), [store]);
   const latest = all.length ? all[all.length - 1].date : "";
@@ -123,13 +127,14 @@ export default function CrawlActivity({ site }: { site: string }) {
     const msRows = rows.filter((r) => r.ms != null && r.total);
     const msWeight = sum(msRows, (r) => r.total);
     const ms = msWeight ? sum(msRows, (r) => (r.ms ?? 0) * (r.total ?? 0)) / msWeight : null;
+    const bytes = sum(rows.filter((r) => r.bytes != null), (r) => r.bytes);
     const cut7 = latest ? addDays(latest, -7) : "";
     const cut14 = latest ? addDays(latest, -14) : "";
     const last7 = all.filter((r) => r.total != null && r.date > cut7);
     const prev7 = all.filter((r) => r.total != null && r.date <= cut7 && r.date > cut14);
     return {
       total, days: withTotal.length, avg: withTotal.length ? total / withTotal.length : 0,
-      ref, dis, splitDays: both.length, peak, ms,
+      ref, dis, splitDays: both.length, peak, ms, bytes,
       last7: sum(last7, (r) => r.total), prev7: sum(prev7, (r) => r.total), has14: last7.length === 7 && prev7.length === 7,
     };
   }, [rows, all, latest]);
@@ -152,15 +157,16 @@ export default function CrawlActivity({ site }: { site: string }) {
     store && all.length
       ? {
           id: "client.crawlImport",
-          label: "Crawl stats imported from Search Console",
-          system: "Google Search Console Crawl stats report (CSV export, imported into this browser)",
+          label: "Crawl stats from Search Console",
+          system: "Google Search Console Crawl stats report (copied from the page or imported from its export, saved in this browser)",
           range: { startDate: all[0].date, endDate: latest },
           fetchedAt: store.imports[store.imports.length - 1]?.at || new Date().toISOString(),
           rowCount: all.length,
           formula:
-            `Daily counts read from the exported chart data and merged by date across imports (newer files win). ` +
+            `Daily counts from the report's chart data, merged by date (newer data wins). ` +
             `Saved: ${Object.values(store.series).map((s) => `${s.label} (${Object.keys(s.days).length} days)`).join(", ")}. ` +
-            `Every Googlebot crawl is either Refresh or Discovery, so when no “All crawl requests” file was imported, the daily total is Refresh + Discovery.`,
+            `Copied data is checked against the total shown on the page before it can be saved. ` +
+            `Every Googlebot crawl is either Refresh or Discovery, so when no “All crawl requests” data was saved, the daily total is Refresh + Discovery.`,
           verifyUrl: crawlStatsUrl(site),
           verifyLabel: "Open Crawl stats in Search Console",
           verifyHow:
@@ -187,17 +193,18 @@ export default function CrawlActivity({ site }: { site: string }) {
     {
       label: "Refresh",
       value: k.splitDays ? num(k.ref) : "–",
-      sub: k.splitDays ? `${pct(k.ref / (k.ref + k.dis || 1), 0)} · re-crawls of known pages` : "import the Refresh export",
+      sub: k.splitDays ? `${pct(k.ref / (k.ref + k.dis || 1), 0)} · re-crawls of known pages` : "copy or import the Refresh page",
       source: SRC,
     },
     {
       label: "Discovery",
       value: k.splitDays ? num(k.dis) : "–",
-      sub: k.splitDays ? `${pct(k.dis / (k.ref + k.dis || 1), 0)} · first crawls of new URLs` : "import the Discovery export",
+      sub: k.splitDays ? `${pct(k.dis / (k.ref + k.dis || 1), 0)} · first crawls of new URLs` : "copy or import the Discovery page",
       source: SRC,
     },
     { label: "Busiest day", value: k.peak ? num(k.peak.total) : "–", sub: k.peak?.date, source: SRC },
   ];
+  if (k.bytes) kpis.push({ label: "Downloaded", value: `${(k.bytes / 1e9).toFixed(2)} GB`, sub: "total download size", source: SRC });
   if (k.ms != null) kpis.push({ label: "Avg. response time", value: `${num(k.ms)} ms`, sub: "how fast your server answered Googlebot", source: SRC });
 
   /* ---------- Crawl recency from URL Inspection ---------- */
@@ -265,11 +272,12 @@ export default function CrawlActivity({ site }: { site: string }) {
           <strong>Where these numbers come from</strong>
           <ul style={{ margin: "8px 0 0", paddingLeft: 18 }}>
             <li>
-              <strong>Google has no API for the Crawl stats report</strong>, so no app can read it directly. These counts come from the report's own
-              export, imported here: exactly the numbers Search Console shows.
+              <strong>Google has no API for the Crawl stats report</strong>, so no app can fetch it on its own. The numbers come from the report
+              itself: copied from the page with the “Copy crawl stats” bookmark, or imported from its export. Either way they are exactly what Search
+              Console shows, and copied data is checked against the page's own total before it can be saved.
             </li>
             <li>
-              <strong>Search Console keeps only the last 90 days.</strong> Each import is saved in this browser and merged by date, so importing every
+              <strong>Search Console keeps only the last 90 days.</strong> Everything you save stays in this browser, merged by date, so copying every
               month or two builds a longer history here.
             </li>
             <li>
@@ -279,27 +287,37 @@ export default function CrawlActivity({ site }: { site: string }) {
         </div>
 
         <div className="panel">
-          <PanelTitle>Import Crawl stats exports</PanelTitle>
-          <p className="muted" style={{ marginTop: 0 }}>
-            {HOW_TO_EXPORT}{" "}
-            <a href={crawlStatsUrl(site)} target="_blank" rel="noreferrer">Open Crawl stats for this property</a>
-          </p>
+          <PanelTitle>Get Crawl stats into the dashboard</PanelTitle>
+
+          <CrawlPaste
+            site={site}
+            statsUrl={crawlStatsUrl(site)}
+            onParsed={(p) => {
+              setMsg(null);
+              addPending([p]);
+            }}
+          />
+
+          <h4 style={{ margin: "18px 0 6px" }}>Option B: import the export files</h4>
+          <p className="muted" style={{ marginTop: 0 }}>{HOW_TO_EXPORT}</p>
           <div className="row" style={{ alignItems: "center" }}>
             <input ref={fileRef} type="file" accept=".zip,.csv" multiple onChange={(e) => onFiles(e.target.files)} disabled={busy} aria-label="Choose Crawl stats export files" />
             {busy && <span className="muted">Reading files…</span>}
-            {store && store.imports.length > 0 && !pending && <button className="btn" onClick={clearAll}>Delete imported crawl data</button>}
+            {store && store.imports.length > 0 && !pending && <button className="btn" onClick={clearAll}>Delete saved crawl data</button>}
           </div>
           {msg && <p className={msg.error ? "notice error" : "muted"} style={{ marginBottom: 0 }}>{msg.text}</p>}
 
           {pending && (
-            <div style={{ marginTop: 12 }}>
-              <p style={{ margin: "0 0 8px" }}><b>Check what each file is, then save.</b> The type was guessed from the file name; change it if it's wrong.</p>
+            <div style={{ marginTop: 14 }}>
+              <p style={{ margin: "0 0 8px" }}>
+                <b>Check each item, then save.</b> The type was guessed from the page or file name; change it if it's wrong.
+              </p>
               <div className="table-wrap">
                 <table>
                   <thead>
                     <tr>
-                      <th>File</th>
-                      <th>This file is</th>
+                      <th>Source</th>
+                      <th>This is</th>
                       <th>Dates</th>
                       <th className="num">Days</th>
                       <th className="num">Crawl requests</th>
@@ -309,7 +327,14 @@ export default function CrawlActivity({ site }: { site: string }) {
                   <tbody>
                     {pending.map((p, i) => (
                       <tr key={`${p.file}-${i}`}>
-                        <td className="url">{p.file}{p.note && <div className="muted">{p.note}</div>}</td>
+                        <td className="url">
+                          {p.file}
+                          {p.note && (
+                            <div className={p.note.startsWith("Matches") ? "" : "muted"} style={p.note.startsWith("Matches") ? { color: "var(--up, #1a7f37)" } : undefined}>
+                              {p.note}
+                            </div>
+                          )}
+                        </td>
                         <td>
                           <select
                             value={p.choice}
@@ -347,7 +372,9 @@ export default function CrawlActivity({ site }: { site: string }) {
         </div>
 
         {store && all.length === 0 && !pending && (
-          <div className="notice" style={{ marginTop: 16 }}>No crawl data imported for this property yet. Import the Refresh and Discovery exports to start.</div>
+          <div className="notice" style={{ marginTop: 16 }}>
+            No crawl data saved for this property yet. Use “Copy crawl stats” on the Crawl stats page (and on its Refresh and Discovery pages), then paste here.
+          </div>
         )}
 
         {all.length > 0 && (
@@ -362,7 +389,7 @@ export default function CrawlActivity({ site }: { site: string }) {
                 </select>
               </label>
               <span className="muted">
-                Imported data covers {all[0].date} to {latest}. “Last N days” counts back from {latest}, the latest day imported.
+                Saved data covers {all[0].date} to {latest}. “Last N days” counts back from {latest}, the latest day saved.
               </span>
             </div>
 
@@ -386,7 +413,7 @@ export default function CrawlActivity({ site }: { site: string }) {
               </ResponsiveContainer>
               {!hasSplit && (
                 <p className="muted" style={{ marginBottom: 0 }}>
-                  Import both the Refresh and the Discovery exports to see the split.
+                  Copy the Refresh and Discovery pages too (Crawl stats → By purpose) to see the split.
                 </p>
               )}
             </div>
@@ -423,7 +450,7 @@ export default function CrawlActivity({ site }: { site: string }) {
 
             {others.length > 0 && (
               <div className="panel" style={{ marginTop: 16 }}>
-                <PanelTitle source={SRC}>Other breakdowns imported</PanelTitle>
+                <PanelTitle source={SRC}>Other breakdowns saved</PanelTitle>
                 <Bars items={others.map((o) => ({ label: o.label, value: o.requests, note: `${num(o.requests)} · ${num(o.days)} days` }))} />
               </div>
             )}
@@ -438,26 +465,26 @@ export default function CrawlActivity({ site }: { site: string }) {
                   rows={urlSeries.urls}
                   cols={[{ key: "url", label: "URL", url: true }, { key: "when", label: "Crawled" }]}
                   csvName={`crawled-urls-${urlSeries.key.replace(/[^a-z0-9]+/gi, "-")}.csv`}
-                  empty="No example URLs in this export."
+                  empty="No example URLs saved."
                 />
               </div>
             )}
 
             {store && store.imports.length > 0 && (
               <div className="panel" style={{ marginTop: 16 }}>
-                <PanelTitle>Imports saved in this browser</PanelTitle>
+                <PanelTitle>Saved in this browser</PanelTitle>
                 <DataTable
                   rows={[...store.imports].reverse().map((x) => ({ ...x, at: new Date(x.at).toLocaleString() }))}
                   cols={[
-                    { key: "file", label: "File" },
+                    { key: "file", label: "Source" },
                     { key: "label", label: "Type" },
                     { key: "from", label: "From" },
                     { key: "to", label: "To" },
                     { key: "days", label: "Days", num: true },
-                    { key: "at", label: "Imported" },
+                    { key: "at", label: "Saved" },
                   ]}
                   pageSize={10}
-                  empty="No imports yet."
+                  empty="Nothing saved yet."
                 />
               </div>
             )}
