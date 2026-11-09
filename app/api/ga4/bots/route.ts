@@ -14,7 +14,7 @@ type Kind = 'location' | 'source' | 'tech' | 'language';
 type Level = 'Suspect bot' | 'High' | 'Medium';
 
 /** Segments whose sessions average less engagement time than this (seconds) are labelled "Suspect bot". */
-const SUSPECT_BOT_SECONDS = 0.7;
+const SUSPECT_BOT_SECONDS = 0.2;
 /** Ignore tiny segments: one or two quick bounces aren't a pattern. */
 const MIN_SESSIONS = 3;
 const RANK: Record<Level, number> = { 'Suspect bot': 0, High: 1, Medium: 2 };
