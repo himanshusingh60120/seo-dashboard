@@ -113,6 +113,7 @@ function SourceDetail({ s, all }: { s: Source; all: Sources }) {
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
+  const links = s.links || [];
   return (
     <div className="src">
       <h4>{s.label}</h4>
@@ -125,12 +126,15 @@ function SourceDetail({ s, all }: { s: Source; all: Sources }) {
         {s.formula && (<><dt>How it's calculated</dt><dd>{s.formula}</dd></>)}
         {s.derivedFrom && (<><dt>Calculated from</dt><dd>{s.derivedFrom.map((d) => all[d]?.label || d).join("; ")}</dd></>)}
       </dl>
-      {(s.verifyHow || s.verifyUrl || s.explorerUrl) && (
+      {(s.verifyHow || s.verifyUrl || s.explorerUrl || links.length > 0) && (
         <div className="src-verify">
           <strong>Check it yourself</strong>
           {s.verifyHow && <p>{s.verifyHow}</p>}
           <div className="row">
             {s.verifyUrl && <a className="btn" href={s.verifyUrl} target="_blank" rel="noreferrer">{s.verifyLabel || "Open in Google"}</a>}
+            {links.map((l) => (
+              <a key={l.url} className="btn" href={l.url} target="_blank" rel="noreferrer">{l.label}</a>
+            ))}
             {s.explorerUrl && <a className="btn" href={s.explorerUrl} target="_blank" rel="noreferrer">{s.explorerLabel || "Rerun the request"}</a>}
           </div>
         </div>
