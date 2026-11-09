@@ -5,10 +5,12 @@
 import { useEffect, useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { DataTable, Kpis, Section, SubTabs, num } from "./ui";
-import { EVENT_LABEL, isIndexedVerdict, loadEvents, peekIndexCache, type IndexEvent } from "@/lib/indexCache";
+import SitemapPicker from "./SitemapPicker";
+import { EVENT_LABEL, isIndexedVerdict, loadEvents, loadIndexCache, peekIndexCache, type IndexCache, type IndexEvent } from "@/lib/indexCache";
 import { monitorPrefs, saveMonitorPrefs, useMonitor, type Phase } from "@/lib/monitor";
-import { DAILY_INSPECTION_LIMIT, loadUrlList, quotaUsed } from "@/lib/checks";
+import { DAILY_INSPECTION_LIMIT, quotaUsed } from "@/lib/checks";
 import { WINDOWS } from "@/lib/dates";
+import { normalizeUrl } from "@/lib/url";
 import { downloadFile, eventsReportHtml, fileSafe } from "@/lib/evidence";
 
 type View = "events" | "suspected";
@@ -31,6 +33,8 @@ export default function IndexMonitor({ site }: { site: string }) {
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const [perm, setPerm] = useState("default");
+  const [picking, setPicking] = useState(false);
+  const [listCache, setListCache] = useState<IndexCache | null>(null);
   const mine = state.site === site;
   const running = state.running && mine;
 
@@ -38,6 +42,20 @@ export default function IndexMonitor({ site }: { site: string }) {
     setBudget(monitorPrefs().budget);
     if (typeof Notification !== "undefined") setPerm(Notification.permission);
   }, []);
+
+  useEffect(() => {
+    setPicking(false);
+    setMsg("");
+  }, [site]);
+
+  // The saved URL list, re-read after it changes
+  useEffect(() => {
+    let live = true;
+    loadIndexCache(site).then((c) => live && setListCache(c));
+    return () => {
+      live = false;
+    };
+  }, [site, msg]);
 
   // Reload saved changes whenever the engine records new ones (the Indexing tab and the audit add to them too)
   useEffect(() => {
@@ -71,26 +89,17 @@ export default function IndexMonitor({ site }: { site: string }) {
     }
     setBusy(false);
   };
-  const reloadList = async () => {
-    setBusy(true);
-    setMsg("Reading sitemaps…");
-    try {
-      setMsg((await loadUrlList(site)).message);
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : "Couldn't load the URL list");
-    }
-    setBusy(false);
-  };
 
   const fresh = mine ? state.fresh : null;
   const used = mine && state.running ? state.used : quotaUsed(site);
   const cutoff = Date.now() - days * 864e5;
   const inWindow = events.filter((e) => Date.parse(e.at) >= cutoff).sort((a, b) => b.at.localeCompare(a.at));
   const count = (t: IndexEvent["type"]) => inWindow.filter((e) => e.type === t).length;
-  const cache = peekIndexCache(site);
+  const cache = listCache ?? peekIndexCache(site);
+  const listed = new Set((cache?.urls || []).map((u) => u.url));
   const status = (u: string) => {
     const r = cache?.inspected[u];
-    if (!r) return "Not inspected yet (queued first)";
+    if (!r) return listed.has(u) || listed.has(normalizeUrl(u)) ? "Not inspected yet (queued first)" : "Not in the chosen sitemaps, so not inspected";
     if (r.verdict === "ERROR") return "Last check failed (will retry)";
     return `${isIndexedVerdict(r.verdict) ? "Indexed" : "NOT indexed"} · ${r.coverageState} · ${new Date(r.checkedAt).toLocaleString()}`;
   };
@@ -110,7 +119,7 @@ export default function IndexMonitor({ site }: { site: string }) {
   return (
     <Section
       title="Live index monitor"
-      lede="Watches indexing while this dashboard is open in a browser tab. Every 15 minutes it reads Search Console's fresh data (a few hours behind) to spot pages that suddenly stopped getting impressions, and it keeps re-checking pages with the URL Inspection API in priority order: suspected drops first, then failed checks, new sitemap URLs, top pages, and indexed pages every 3 days. Every status change is saved in this browser. Google doesn't offer a real-time index feed, so this is the closest free option."
+      lede="Watches indexing while this dashboard is open in a browser tab. Every 15 minutes it reads Search Console's fresh data (a few hours behind) to spot pages that suddenly stopped getting impressions, and it keeps re-checking pages with the URL Inspection API in priority order: suspected drops first, then failed checks, new sitemap URLs, top pages, and indexed pages every 3 days. It only inspects pages in the URL list, which comes from the sitemaps you choose under “Reload URL list”. Every status change is saved in this browser. Google doesn't offer a real-time index feed, so this is the closest free option."
     >
       <div className="panel">
         <div className="row">
@@ -126,7 +135,7 @@ export default function IndexMonitor({ site }: { site: string }) {
             </select>
           </label>
           <button className="btn" onClick={refreshNow} disabled={busy}>Refresh fresh data now</button>
-          <button className="btn" onClick={reloadList} disabled={busy}>Reload URL list</button>
+          <button className="btn" onClick={() => setPicking(true)} disabled={busy || picking}>Reload URL list</button>
           {perm === "default" && <button className="btn" onClick={askNotify}>Enable desktop alerts</button>}
         </div>
         <p className="muted" style={{ marginBottom: 0 }}>
@@ -141,9 +150,25 @@ export default function IndexMonitor({ site }: { site: string }) {
           {running && state.queue ? ` · ${num(state.queue)} page(s) in the queue` : ""}
           {running && state.lastBatchAt ? ` · last batch ${new Date(state.lastBatchAt).toLocaleTimeString()}` : ""}
         </p>
+        {cache?.listedAt && (
+          <p className="muted" style={{ marginBottom: 0 }}>
+            URL list: {num(cache.urls.length)} URLs from {num(cache.sitemaps.length)} sitemap file(s), loaded {new Date(cache.listedAt).toLocaleString()}.
+          </p>
+        )}
         {perm === "denied" && <p className="muted" style={{ marginBottom: 0 }}>Desktop alerts are blocked in this browser's site settings.</p>}
         {msg && <p className="muted" style={{ marginBottom: 0 }}>{msg}</p>}
       </div>
+
+      {picking && (
+        <SitemapPicker
+          site={site}
+          onCancel={() => setPicking(false)}
+          onLoaded={(r) => {
+            setPicking(false);
+            setMsg(r.message);
+          }}
+        />
+      )}
 
       <div style={{ marginTop: 16 }}>
         <Kpis
