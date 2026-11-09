@@ -15,6 +15,16 @@ Built with Next.js 14, deployed on Vercel, no database needed.
 
 Every table can be filtered, sorted and exported to CSV. Data refreshes automatically every 5 minutes (toggle in the top bar).
 
+## Who can sign in
+
+- Any **verified** Google account whose address ends in one of these domains:
+  `@kingsresearch.com`, `@datademand.com`, `@ondot.com`, `@kingsglobal.com`, `@kgv.ae`, `@kingstechmedia.com`
+- Plus any individual address listed in `ALLOWED_EMAILS` (optional, comma-separated).
+- Only exact domains count: `someone@mail.kingsresearch.com` is not allowed.
+- The built-in list is in `lib/access.ts`. To change it without editing code, set `ALLOWED_DOMAINS` (comma-separated); it **replaces** the built-in list.
+- Signing in doesn't grant access to data: each person sees only the Search Console and GA4 properties their own Google account can access.
+- The AI audit tab stays limited to `AUDIT_EMAILS`.
+
 ## Setup
 
 ### 1. Google Cloud project
@@ -25,9 +35,9 @@ Every table can be filtered, sorted and exported to CSV. Data refreshes automati
    - Google Analytics Admin API
    - Google Analytics Data API
 3. **APIs & Services → OAuth consent screen** (Google Auth Platform):
-   - User type **External** (or **Internal** if you're on Google Workspace and only colleagues will sign in).
+   - User type **External**. Sign-in is open to several company domains, and an **Internal** app only accepts accounts from the single Google Workspace organisation that owns the project (others get `Error 403: org_internal`).
    - Add the scopes `.../auth/webmasters.readonly` and `.../auth/analytics.readonly`.
-   - Under **Test users**, add every Google account that will sign in.
+   - While the app is in **Testing**, only accounts listed under **Test users** can sign in. To let everyone on the allowed domains in, publish the app (**Audience → Publish app**).
 4. **APIs & Services → Credentials → Create credentials → OAuth client ID**:
    - Application type: **Web application**
    - Authorised redirect URIs:
@@ -36,7 +46,7 @@ Every table can be filtered, sorted and exported to CSV. Data refreshes automati
    - Copy the **Client ID** and **Client secret**.
 
 > **Refresh tokens in "Testing" mode expire after 7 days.** If the app stays in Testing, you'll need to sign in again weekly.
-> To avoid that, publish the app (Internal apps don't need verification; External apps using these read-only scopes may ask for verification).
+> Publishing avoids that. External apps using these read-only scopes may ask for verification; until then Google shows an "unverified app" notice at sign-in.
 
 ### 2. Run locally
 
@@ -47,7 +57,7 @@ npm run dev
 ```
 
 Generate `NEXTAUTH_SECRET` with `openssl rand -base64 32`.
-Set `ALLOWED_EMAILS` to the accounts allowed to use the dashboard, otherwise anyone who can complete Google sign-in could open it.
+Sign-in is limited to the company domains listed under *Who can sign in*; use `ALLOWED_EMAILS` only for individual addresses outside those domains.
 
 ### 3. Push to GitHub
 
@@ -65,7 +75,7 @@ git push -u origin main
 ### 4. Deploy on Vercel
 
 1. <https://vercel.com/new> → import the GitHub repo (framework is detected as Next.js).
-2. Add environment variables: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `NEXTAUTH_SECRET`, `NEXTAUTH_URL` (= `https://YOUR-APP.vercel.app`), `ALLOWED_EMAILS`.
+2. Add environment variables: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `NEXTAUTH_SECRET`, `NEXTAUTH_URL` (= `https://YOUR-APP.vercel.app`). Optional: `ALLOWED_EMAILS`, `ALLOWED_DOMAINS`.
 3. Deploy, then add the production redirect URI from step 1.4 to your OAuth client.
 
 Every push to `main` redeploys automatically.
@@ -100,7 +110,7 @@ app/
   api/ga4/overview/         Users, sessions, geography, channels, realtime
   login/                    Sign-in page
 components/                 Dashboard UI (tabs, tables, charts)
-lib/                        Google API client, auth, date ranges, index cache
+lib/                        Google API client, auth + allowed sign-in domains (access.ts), date ranges, index cache
 middleware.ts               Protects all pages behind sign-in
 ```
 
