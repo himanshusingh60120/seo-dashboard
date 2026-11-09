@@ -17,10 +17,13 @@ export default function Audience({ ga, gaError, hasGa4, loading }: { ga: Ga4Data
 
   return (
     <>
-      <Section title="Traffic" lede={`Google Analytics 4, ${ga.range.startDate} to ${ga.range.endDate}. “Users” is GA4's count of unique users.`}>
+      <Section
+        title="Traffic"
+        lede={`Google Analytics 4, ${ga.range.startDate} to ${ga.range.endDate}. “Active users” is GA4's standard user count — the same number its reports show.`}
+      >
         <Kpis
           items={[
-            { label: "Unique users", source: ["ga4.trend", "ga4.previous"], value: num(c.totalUsers), delta: <Delta cur={c.totalUsers} prev={p.totalUsers} /> },
+            { label: "Active users", source: ["ga4.trend", "ga4.previous"], value: num(c.activeUsers), delta: <Delta cur={c.activeUsers} prev={p.activeUsers} /> },
             { label: "New users", source: ["ga4.trend", "ga4.previous"], value: num(c.newUsers), delta: <Delta cur={c.newUsers} prev={p.newUsers} /> },
             { label: "Sessions", source: ["ga4.trend", "ga4.previous"], value: num(c.sessions), delta: <Delta cur={c.sessions} prev={p.sessions} /> },
             { label: "Page views", source: ["ga4.trend", "ga4.previous"], value: num(c.screenPageViews), delta: <Delta cur={c.screenPageViews} prev={p.screenPageViews} /> },
@@ -29,7 +32,7 @@ export default function Audience({ ga, gaError, hasGa4, loading }: { ga: Ga4Data
           ]}
         />
         <div className="grid-2" style={{ marginTop: 16 }}>
-          <div className="panel"><PanelTitle source={["ga4.trend", "ga4.organic"]}>Users and sessions by day</PanelTitle><TrafficTrend data={ga.trend} /></div>
+          <div className="panel"><PanelTitle source={["ga4.trend", "ga4.organic"]}>Active users and sessions by day</PanelTitle><TrafficTrend data={ga.trend} /></div>
           <div className="panel">
             <PanelTitle source={["ga4.channels"]}>Sessions by channel</PanelTitle>
             <Bars items={ga.channels.map((r) => ({ label: r.channel, value: r.sessions }))} />
@@ -47,7 +50,7 @@ export default function Audience({ ga, gaError, hasGa4, loading }: { ga: Ga4Data
         )}
       </Section>
 
-      <Section title="Where users are" lede="Users by country and city for the selected period.">
+      <Section title="Where users are" lede="Active users by country and city for the selected period.">
         <div className="grid-2">
           <div className="panel">
             <PanelTitle source={["ga4.countries"]}>Top countries</PanelTitle>
@@ -60,14 +63,15 @@ export default function Audience({ ga, gaError, hasGa4, loading }: { ga: Ga4Data
                 rows={countries}
                 cols={[
                   { key: "country", label: "Country" },
-                  { key: "users", label: "Users", num: true, render: (r) => num(r.users) },
+                  { key: "users", label: "Active users", num: true, render: (r) => num(r.users) },
                   { key: "share", label: "Share", num: true, render: (r) => pct(r.share) },
                   { key: "sessions", label: "Sessions", num: true, render: (r) => num(r.sessions) },
                   { key: "engagementRate", label: "Engaged", num: true, render: (r) => pct(r.engagementRate) },
                 ]}
+                csvRow={(r) => ({ country: r.country, active_users: r.users, share: r.share, sessions: r.sessions, engagement_rate: r.engagementRate })}
                 initialSort="users"
                 pageSize={10}
-                csvName="users-by-country.csv"
+                csvName="active-users-by-country.csv"
                 source={["ga4.countries"]}
               />
             ) : (
@@ -76,12 +80,13 @@ export default function Audience({ ga, gaError, hasGa4, loading }: { ga: Ga4Data
                 cols={[
                   { key: "city", label: "City" },
                   { key: "country", label: "Country" },
-                  { key: "users", label: "Users", num: true, render: (r) => num(r.users) },
+                  { key: "users", label: "Active users", num: true, render: (r) => num(r.users) },
                   { key: "sessions", label: "Sessions", num: true, render: (r) => num(r.sessions) },
                 ]}
+                csvRow={(r) => ({ city: r.city, country: r.country, active_users: r.users, sessions: r.sessions })}
                 initialSort="users"
                 pageSize={10}
-                csvName="users-by-city.csv"
+                csvName="active-users-by-city.csv"
                 source={["ga4.cities"]}
               />
             )}
@@ -96,9 +101,10 @@ export default function Audience({ ga, gaError, hasGa4, loading }: { ga: Ga4Data
             cols={[
               { key: "page", label: "Landing page" },
               { key: "sessions", label: "Sessions", num: true, render: (r) => num(r.sessions) },
-              { key: "users", label: "Users", num: true, render: (r) => num(r.users) },
+              { key: "users", label: "Active users", num: true, render: (r) => num(r.users) },
               { key: "engagementRate", label: "Engaged", num: true, render: (r) => pct(r.engagementRate) },
             ]}
+            csvRow={(r) => ({ landing_page: r.page, sessions: r.sessions, active_users: r.users, engagement_rate: r.engagementRate })}
             initialSort="sessions"
             csvName="landing-pages.csv"
             source={["ga4.landing"]}
