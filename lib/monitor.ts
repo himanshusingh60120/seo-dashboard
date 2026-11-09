@@ -3,9 +3,11 @@
 // Live index monitor engine. One instance per browser tab, kept outside React so it keeps running while you
 // switch dashboard tabs. Loop: every 15 min read fresh Search Console data → build a priority queue → inspect
 // 10 URLs → pause 15 s → repeat, within a daily budget (Google allows ~2,000 inspections per property per day).
+// Only pages in the URL list (the sitemaps the user chose) are inspected.
 import { useEffect, useState } from "react";
 import { DAILY_INSPECTION_LIMIT, inspectAndStore, quotaUsed } from "./checks";
 import { EVENT_LABEL, isIndexedVerdict, loadEvents, loadIndexCache, type IndexCache, type IndexEvent } from "./indexCache";
+import { normalizeUrl } from "./url";
 
 export { EVENT_LABEL };
 
@@ -36,9 +38,14 @@ const D = 24 * H;
 
 type QItem = { url: string; pri: number; why: string };
 
-/** Who gets checked first: suspected drops, failed checks, new sitemap URLs, top pages, indexed pages, the rest. */
+/**
+ * Who gets checked first: suspected drops, failed checks, new sitemap URLs, top pages, indexed pages, the rest.
+ * Only URLs in the URL list are queued, so pages outside the chosen sitemaps are never inspected.
+ */
 export function buildQueue(c: IndexCache, fresh: FreshSignal | null): QItem[] {
   const now = Date.now();
+  const listed = new Set(c.urls.map((u) => u.url));
+  const inList = (u: string) => listed.has(u) || listed.has(normalizeUrl(u));
   const age = (u: string) => {
     const r = c.inspected[u];
     return r && r.verdict !== "ERROR" ? now - Date.parse(r.checkedAt) : Infinity;
@@ -48,13 +55,13 @@ export function buildQueue(c: IndexCache, fresh: FreshSignal | null): QItem[] {
     const cur = out.get(url);
     if (!cur || cur.pri > pri) out.set(url, { url, pri, why });
   };
-  for (const p of fresh?.suspected || []) if (age(p.page) > 6 * H) add(p.page, 0, "impressions stopped in the last 2 days");
+  for (const p of fresh?.suspected || []) if (inList(p.page) && age(p.page) > 6 * H) add(p.page, 0, "impressions stopped in the last 2 days");
   for (const u of c.urls) {
     const r = c.inspected[u.url];
     if (r?.verdict === "ERROR") add(u.url, 1, "retrying a failed check");
     else if (!r && u.lastmod && now - Date.parse(u.lastmod) < 7 * D) add(u.url, 1, "new or updated in the sitemap");
   }
-  for (const p of fresh?.top || []) if (age(p.page) > D) add(p.page, 2, "top page, not checked in 24 h");
+  for (const p of fresh?.top || []) if (inList(p.page) && age(p.page) > D) add(p.page, 2, "top page, not checked in 24 h");
   for (const u of c.urls) {
     const r = c.inspected[u.url];
     if (r && isIndexedVerdict(r.verdict) && age(u.url) > 3 * D) add(u.url, 3, "indexed page, re-checked every 3 days");
@@ -219,7 +226,7 @@ export class Monitor {
       }
       const cache = await loadIndexCache(site);
       if (!cache?.urls.length) {
-        this.set({ used, phase: "waiting", message: "No URL list yet: click “Reload URL list” so the monitor knows which pages to check." });
+        this.set({ used, phase: "waiting", message: "No URL list yet: click “Reload URL list” and choose the sitemaps to test." });
         await this.sleep(60_000, id, site);
         continue;
       }
