@@ -74,6 +74,9 @@ export default function Dashboard() {
   const reqId = useRef(0);
   const [indexVersion, setIndexVersion] = useState(0);
   const bumpIndex = useCallback(() => setIndexVersion((v) => v + 1), []);
+  // Crawl stats sent by the "Copy crawl stats" bookmark (arrives in the URL after #)
+  const [inbox, setInbox] = useState<string | null>(null);
+  const [inboxWaiting, setInboxWaiting] = useState(false);
 
   // Every source behind the numbers on screen, so any "Source" button can explain itself
   const sources = useMemo<Sources>(() => {
@@ -102,6 +105,52 @@ export default function Dashboard() {
       .then((d) => setCanAudit(!!d?.allowed))
       .catch(() => {});
   }, []);
+
+  // Receive data from the "Copy crawl stats" bookmark: it opens this page with #crawl-wait, then #crawlstats=<data>.
+  useEffect(() => {
+    const take = () => {
+      const h = window.location.hash;
+      if (!h.startsWith("#crawl-wait") && !h.startsWith("#crawlstats=")) return;
+      const clean = () => window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      setTab("crawl");
+      if (h.startsWith("#crawl-wait")) {
+        setInboxWaiting(true);
+        clean();
+        return;
+      }
+      let raw = "";
+      try {
+        raw = decodeURIComponent(h.slice("#crawlstats=".length));
+      } catch {
+        raw = "";
+      }
+      clean();
+      if (raw) setInbox(raw);
+      setInboxWaiting(false);
+    };
+    take();
+    window.addEventListener("hashchange", take);
+    return () => window.removeEventListener("hashchange", take);
+  }, []);
+
+  const inboxSite = useMemo(() => {
+    try {
+      return inbox ? String(JSON.parse(inbox)?.site || "") : "";
+    } catch {
+      return "";
+    }
+  }, [inbox]);
+
+  // Switch to the property the crawl stats were copied from, if this account has it.
+  useEffect(() => {
+    if (!inboxSite || !props || inboxSite === site) return;
+    if (props.gsc.some((x) => x.siteUrl === inboxSite)) changeSite(inboxSite);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inboxSite, props]);
+
+  // Hand the data over once the right property is showing (or if this account can't open that property, so it can say so).
+  const inboxReady =
+    !!inbox && (!inboxSite || inboxSite === site || (!!props && !props.gsc.some((x) => x.siteUrl === inboxSite)));
 
   const downloadEvidence = () => {
     downloadJson(`evidence-${fileSafe(site)}-${new Date().toISOString().slice(0, 10)}.json`, {
@@ -294,7 +343,17 @@ export default function Dashboard() {
           {gsc && tab === "rankings" && <Rankings gsc={gsc} />}
           {site && tab === "indexing" && <Indexing site={site} onChange={bumpIndex} />}
           {site && tab === "monitor" && <IndexMonitor site={site} />}
-          {site && tab === "crawl" && <CrawlActivity site={site} />}
+          {site && tab === "crawl" && (
+            <CrawlActivity
+              site={site}
+              inbox={inboxReady ? inbox : null}
+              waiting={inboxWaiting || (!!inbox && !inboxReady)}
+              onInboxHandled={() => {
+                setInbox(null);
+                setInboxWaiting(false);
+              }}
+            />
+          )}
           {gsc && tab === "queries" && <Queries gsc={gsc} />}
           {site && tab === "growth" && <QueryGrowth site={site} days={days} compare={compare} />}
 
