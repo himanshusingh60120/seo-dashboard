@@ -1,4 +1,5 @@
 // app/api/ga4/overview/route.ts
+// "Users" everywhere in this route is GA4's Active users — the metric GA4's own reports show — so numbers match GA4 exactly.
 import { NextRequest, NextResponse } from "next/server";
 import { getGoogleAccessToken } from "@/lib/token";
 import { ga4Endpoint, ga4Window, runRealtime, runReport, type GaReport } from "@/lib/google";
@@ -54,18 +55,17 @@ export async function GET(req: NextRequest) {
     const totalsHow = (r: Range, cmp: Range | null) =>
       `${opens(r, cmp)} Check the totals row at the top of each table: Demographic details shows Active users and New users, ` +
       `Traffic acquisition shows Sessions and Engagement rate, and Pages and screens shows Views. ` +
-      `GA4's standard reports count Active users, while this dashboard's “Users” is Total users, so GA4 can show a slightly lower number. ` +
       `Average session duration isn't a default column; add it with Customize report (pencil icon).`;
     // TOTAL counts every country, not just the 20 rows returned.
     const realtimeBody = { dimensions: [{ name: "country" }], metrics: [{ name: "activeUsers" }], metricAggregations: ["TOTAL"], limit: 20 };
 
     const [trend, prev, countries, cities, channels, landing, organic, realtime] = await Promise.all([
       report(
-        "ga4.trend", "Users, sessions and page views by day (this period)",
+        "ga4.trend", "Active users, sessions and page views by day (this period)",
         { dateRanges: [current], dimensions: [{ name: "date" }], metrics: m(METRICS), metricAggregations: ["TOTAL"], orderBys: [{ dimension: { dimensionName: "date" } }], limit: 400 },
         totalsHow(current, previous),
         [
-          open("country", current, previous, "Users and new users"),
+          open("country", current, previous, "Active users and new users"),
           open("traffic", current, previous, "Sessions and engagement rate"),
           open("pages", current, previous, "Views"),
         ]
@@ -75,39 +75,39 @@ export async function GET(req: NextRequest) {
         { dateRanges: [previous], metrics: m(METRICS) },
         totalsHow(previous, null),
         [
-          open("country", previous, null, "Users and new users"),
+          open("country", previous, null, "Active users and new users"),
           open("traffic", previous, null, "Sessions and engagement rate"),
           open("pages", previous, null, "Views"),
         ]
       ),
       report(
-        "ga4.countries", "Users by country",
-        { dateRanges: [current], dimensions: [{ name: "country" }, { name: "countryId" }], metrics: m(["totalUsers", "sessions", "engagementRate"]), orderBys: byDesc("totalUsers"), limit: 250 },
-        `${opens(current)} One row per country. GA4 shows Active users; the dashboard's Users column is Total users.`,
-        [open("country", current, null, "Users by country")]
+        "ga4.countries", "Active users by country",
+        { dateRanges: [current], dimensions: [{ name: "country" }, { name: "countryId" }], metrics: m(["activeUsers", "sessions", "engagementRate"]), orderBys: byDesc("activeUsers"), limit: 250 },
+        `${opens(current)} One row per country; compare the Active users column.`,
+        [open("country", current, null, "Active users by country")]
       ),
       report(
-        "ga4.cities", "Users by city",
-        { dateRanges: [current], dimensions: [{ name: "city" }, { name: "country" }], metrics: m(["totalUsers", "sessions"]), orderBys: byDesc("totalUsers"), limit: 50 },
-        `${opens(current)} One row per city. GA4 shows Active users; the dashboard's Users column is Total users.`,
-        [open("city", current, null, "Users by city")]
+        "ga4.cities", "Active users by city",
+        { dateRanges: [current], dimensions: [{ name: "city" }, { name: "country" }], metrics: m(["activeUsers", "sessions"]), orderBys: byDesc("activeUsers"), limit: 50 },
+        `${opens(current)} One row per city; compare the Active users column.`,
+        [open("city", current, null, "Active users by city")]
       ),
       report(
         "ga4.channels", "Sessions by channel",
-        { dateRanges: [current], dimensions: [{ name: "sessionDefaultChannelGroup" }], metrics: m(["sessions", "totalUsers"]), orderBys: byDesc("sessions"), limit: 20 },
+        { dateRanges: [current], dimensions: [{ name: "sessionDefaultChannelGroup" }], metrics: m(["sessions", "activeUsers"]), orderBys: byDesc("sessions"), limit: 20 },
         `${opens(current)} One row per channel group; compare the Sessions column.`,
         [open("traffic", current, null, "Sessions by channel")]
       ),
       report(
         "ga4.landing", "Top landing pages",
-        { dateRanges: [current], dimensions: [{ name: "landingPage" }], metrics: m(["sessions", "totalUsers", "engagementRate"]), orderBys: byDesc("sessions"), limit: 50 },
+        { dateRanges: [current], dimensions: [{ name: "landingPage" }], metrics: m(["sessions", "activeUsers", "engagementRate"]), orderBys: byDesc("sessions"), limit: 50 },
         `GA4 → Reports → Engagement → Landing page, dates ${period(current)}. GA4 has no stable link for this report, so the button opens the property.`,
         []
       ),
       report(
         "ga4.organic", "Organic search sessions by day",
         {
-          dateRanges: [current], dimensions: [{ name: "date" }], metrics: m(["sessions", "totalUsers"]),
+          dateRanges: [current], dimensions: [{ name: "date" }], metrics: m(["sessions", "activeUsers"]),
           dimensionFilter: { filter: { fieldName: "sessionDefaultChannelGroup", stringFilter: { value: "Organic Search" } } },
           metricAggregations: ["TOTAL"], orderBys: [{ dimension: { dimensionName: "date" } }], limit: 400,
         },
@@ -137,7 +137,8 @@ export async function GET(req: NextRequest) {
       timeZone,
       totals: { current: obj(trend.totals), previous: obj(prev.rows[0]?.mets || []) },
       organicTotals: { sessions: organic.totals[0] ?? 0, users: organic.totals[1] ?? 0 },
-      trend: trend.rows.map((r) => ({ date: fmtDate(r.dims[0]), users: r.mets[0], sessions: r.mets[3], views: r.mets[4], organicSessions: organicByDate.get(r.dims[0]) ?? 0 })),
+      // users = activeUsers (index 1 of METRICS)
+      trend: trend.rows.map((r) => ({ date: fmtDate(r.dims[0]), users: r.mets[1], sessions: r.mets[3], views: r.mets[4], organicSessions: organicByDate.get(r.dims[0]) ?? 0 })),
       countries: countries.rows.map((r) => ({ country: r.dims[0], code: r.dims[1], users: r.mets[0], sessions: r.mets[1], engagementRate: r.mets[2] })),
       cities: cities.rows.map((r) => ({ city: r.dims[0], country: r.dims[1], users: r.mets[0], sessions: r.mets[1] })),
       channels: channels.rows.map((r) => ({ channel: r.dims[0], sessions: r.mets[0], users: r.mets[1] })),
