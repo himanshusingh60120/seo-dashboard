@@ -1,16 +1,24 @@
 // app/api/gsc/sitemap-urls/route.ts
-// Builds the URL list: every sitemap Search Console knows + robots.txt "Sitemap:" lines + /sitemap.xml
-// (following sitemap indexes, .gz supported), plus every page with impressions in the last 90 days.
+// Sitemaps and URL lists for the Indexing tab and the Live index monitor.
+//
+//   GET  ?site=…&mode=list                → every sitemap file found (Search Console, robots.txt "Sitemap:" lines,
+//                                            /sitemap.xml and files inside sitemap indexes) with URL counts, so the
+//                                            user can choose which ones to test.
+//   POST { site, sitemaps, includeSearch } → URL list from the chosen sitemap files only (indexes inside them are
+//                                            followed), plus pages with impressions in the last 90 days if asked.
+//   GET  ?site=…                           → every sitemap plus pages with impressions (previous behaviour, used by the audit).
+//
 // URLs are normalised and de-duplicated; URLs outside the property are skipped. Fetches only go to your own
 // domains or to sitemap hosts listed in Search Console, and never to private addresses.
 import { NextRequest, NextResponse } from "next/server";
 import { gunzipSync } from "zlib";
-import { getGoogleAccessToken } from "@/lib/token";
-import { assertSiteAccess, latestFinalDate, listSitemaps, searchAnalyticsAll, MAX_ROWS } from "@/lib/google";
+import { getGoogleAccessToken, HttpError } from "@/lib/token";
+import { assertSiteAccess, latestFinalDate, listSitemaps, searchAnalyticsAll, MAX_ROWS, type SitemapInfo } from "@/lib/google";
 import { getRobots, safeFetch } from "@/lib/safeFetch";
 import { addDays } from "@/lib/dates";
 import { normalizeUrl, propertyHost, registrableDomain, urlInProperty } from "@/lib/url";
 import { fail } from "@/lib/api";
+import type { SitemapFile, SitemapList } from "@/lib/sitemaps";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -19,8 +27,9 @@ export const maxDuration = 60;
 const MAX_URLS = 100_000;
 const MAX_FILES = 2000;
 const PARALLEL = 8;
-/** Stop reading sitemaps after this long so the request ends inside Vercel's 60-second limit. */
+/** Stop reading after this long so the request ends inside Vercel's 60-second limit. */
 const BUDGET_MS = 35_000;
+const LIST_BUDGET_MS = 40_000;
 const MAX_BYTES = 60 * 1024 * 1024;
 
 const ENT: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
@@ -60,115 +69,236 @@ async function readXml(url: string, allowHost: (h: string) => boolean) {
   return (gz ? gunzipSync(buf) : buf).toString("utf8");
 }
 
+type Loc = { loc: string; lastmod?: string };
+type Parsed = { kind: "index"; children: Loc[] } | { kind: "urlset"; urls: Loc[]; count: number };
+
+/** `full` = extract every page URL; otherwise only count them (faster, for the picker). */
+function parse(xml: string, full: boolean): Parsed {
+  if (/<sitemapindex\b/i.test(xml)) {
+    const children: Loc[] = [];
+    for (const m of xml.matchAll(/<sitemap\b[^>]*>([\s\S]*?)<\/sitemap>/gi)) {
+      const loc = tag(m[1], "loc");
+      if (loc) children.push({ loc, lastmod: tag(m[1], "lastmod") || undefined });
+    }
+    return { kind: "index", children };
+  }
+  if (!full) return { kind: "urlset", urls: [], count: (xml.match(/<url\b[^>]*>/gi) || []).length };
+  const urls: Loc[] = [];
+  for (const m of xml.matchAll(/<url\b[^>]*>([\s\S]*?)<\/url>/gi)) {
+    const loc = tag(m[1], "loc");
+    if (loc) urls.push({ loc, lastmod: tag(m[1], "lastmod") || undefined });
+  }
+  return { kind: "urlset", urls, count: urls.length };
+}
+
+const submittedOf = (s: SitemapInfo) => {
+  const c = s.contents || [];
+  if (!c.length) return null;
+  const web = c.filter((x) => !x.type || x.type === "web");
+  return (web.length ? web : c).reduce((n, x) => n + (Number(x.submitted) || 0), 0);
+};
+
+/** Top-level sitemap files for the property and the hosts we're allowed to fetch from. */
+async function siteContext(token: string, siteUrl: string) {
+  const host = propertyHost(siteUrl).replace(/^www\./, "");
+  const domain = registrableDomain(host);
+  const listed = await listSitemaps(token, siteUrl).catch(() => [] as SitemapInfo[]);
+  const trusted = new Set(listed.map((s) => hostOf(s.path)).filter(Boolean));
+  const allowHost = (h: string) => registrableDomain(h) === domain || trusted.has(h);
+  const origins = siteUrl.startsWith("sc-domain:") ? [`https://${host}`, `https://www.${host}`] : [new URL(siteUrl).origin];
+  const robotsMaps = (await Promise.all(origins.map((o) => getRobots(o)))).flatMap((r) => r?.sitemaps || []);
+  const from = new Map<string, string>();
+  for (const s of listed) from.set(s.path, "Search Console");
+  for (const r of robotsMaps) if (!from.has(r)) from.set(r, "robots.txt");
+  const optional = new Set<string>();
+  for (const o of origins) {
+    const f = `${o}/sitemap.xml`;
+    if (!from.has(f)) {
+      from.set(f, "/sitemap.xml");
+      optional.add(f);
+    }
+  }
+  return { listed, allowHost, from, optional };
+}
+
+/** Every sitemap file we can find, with URL counts, for the picker. */
+async function discover(token: string, siteUrl: string): Promise<SitemapList> {
+  const ctx = await siteContext(token, siteUrl);
+  const gsc = new Map(ctx.listed.map((s) => [s.path, s] as const));
+  const files = new Map<string, SitemapFile>();
+  const entry = (url: string, parent: string | null, foundIn: string, lastmod?: string) => {
+    if (files.has(url)) return;
+    const g = gsc.get(url);
+    files.set(url, {
+      url, parent, foundIn, type: "unread", urls: null, children: null,
+      submitted: g ? submittedOf(g) : null,
+      ...(lastmod ? { lastmod } : {}),
+    });
+  };
+  for (const [url, foundIn] of ctx.from) entry(url, null, foundIn);
+
+  const queue = Array.from(ctx.from.keys());
+  const seen = new Set<string>();
+  const started = Date.now();
+  let timedOut = false;
+  while (queue.length && seen.size < MAX_FILES) {
+    if (Date.now() - started > LIST_BUDGET_MS) {
+      timedOut = true;
+      break;
+    }
+    const batch: string[] = [];
+    while (queue.length && batch.length < PARALLEL) {
+      const u = queue.shift()!;
+      if (!seen.has(u)) {
+        seen.add(u);
+        batch.push(u);
+      }
+    }
+    await Promise.all(
+      batch.map(async (u) => {
+        const f = files.get(u);
+        if (!f) return;
+        try {
+          const p = parse(await readXml(u, ctx.allowHost), false);
+          if (p.kind === "index") {
+            f.type = "index";
+            f.children = p.children.length;
+            for (const c of p.children) {
+              if (!files.has(c.loc)) {
+                entry(c.loc, u, "", c.lastmod);
+                queue.push(c.loc);
+              }
+            }
+          } else {
+            f.type = "urlset";
+            f.urls = p.count;
+          }
+        } catch (e) {
+          if (ctx.optional.has(u)) files.delete(u); // a missing /sitemap.xml is normal
+          else {
+            f.type = "error";
+            f.error = e instanceof Error ? e.message : "Failed";
+          }
+        }
+      })
+    );
+  }
+  const unread = Array.from(files.values()).filter((f) => f.type === "unread").length;
+  const note = unread
+    ? `${unread.toLocaleString()} sitemap file(s) weren't opened ${timedOut ? "within the time limit" : "(file limit reached)"}, so their URL counts are unknown. You can still choose them.`
+    : "";
+  return { files: Array.from(files.values()), note };
+}
+
+/** URL list from the chosen sitemap files (or all of them when `chosen` is null), plus search pages if asked. */
+async function collect(token: string, siteUrl: string, chosen: string[] | null, includeSearch: boolean) {
+  const ctx = await siteContext(token, siteUrl);
+  const queue = chosen ? [...chosen] : Array.from(ctx.from.keys());
+  const optional = chosen ? new Set<string>() : ctx.optional;
+
+  const seen = new Set<string>();
+  const read: { path: string; urls: number }[] = [];
+  const urls = new Map<string, { url: string; sources: Set<string>; lastmod?: string }>();
+  const errors: { sitemap: string; error: string }[] = [];
+  let outside = 0;
+  let timedOut = false;
+  const add = (raw: string, source: string, lastmod?: string) => {
+    const url = normalizeUrl(raw);
+    if (!urlInProperty(siteUrl, url)) {
+      outside++;
+      return;
+    }
+    const e = urls.get(url) || { url, sources: new Set<string>() };
+    e.sources.add(source);
+    if (lastmod && (!e.lastmod || lastmod > e.lastmod)) e.lastmod = lastmod;
+    urls.set(url, e);
+  };
+
+  const started = Date.now();
+  while (queue.length && seen.size < MAX_FILES && urls.size < MAX_URLS) {
+    if (Date.now() - started > BUDGET_MS) {
+      timedOut = true;
+      break;
+    }
+    const batch: string[] = [];
+    while (queue.length && batch.length < PARALLEL) {
+      const sm = queue.shift()!;
+      if (!seen.has(sm)) {
+        seen.add(sm);
+        batch.push(sm);
+      }
+    }
+    await Promise.all(
+      batch.map(async (sm) => {
+        try {
+          const p = parse(await readXml(sm, ctx.allowHost), true);
+          if (p.kind === "index") {
+            for (const c of p.children) if (!seen.has(c.loc)) queue.push(c.loc);
+            read.push({ path: sm, urls: 0 });
+          } else {
+            for (const u of p.urls) add(u.loc, "sitemap", u.lastmod);
+            read.push({ path: sm, urls: p.urls.length });
+          }
+        } catch (e) {
+          if (!optional.has(sm)) errors.push({ sitemap: sm, error: e instanceof Error ? e.message : "Failed" });
+        }
+      })
+    );
+  }
+  const unread = queue.filter((q) => !seen.has(q)).length;
+  if (timedOut || unread) {
+    errors.push({ sitemap: `${unread} more sitemap file(s)`, error: timedOut ? "not read: 35-second time limit" : "not read: file or URL limit reached" });
+  }
+
+  if (includeSearch) {
+    // Every page with impressions in the last 90 days (ending on the latest final day).
+    const end = await latestFinalDate(token, siteUrl);
+    const perf = await searchAnalyticsAll(token, siteUrl, { startDate: addDays(end, -89), endDate: end, dimensions: ["page"] }, MAX_ROWS);
+    for (const r of perf) add(r.keys[0], "search");
+  }
+
+  return {
+    sitemaps: read.map((r) => r.path),
+    sitemapStatus: ctx.listed.map((s) => ({
+      path: s.path,
+      errors: Number(s.errors || 0),
+      warnings: Number(s.warnings || 0),
+      isPending: !!s.isPending,
+      lastDownloaded: s.lastDownloaded || "",
+      lastSubmitted: s.lastSubmitted || "",
+      readByDashboard: read.find((r) => r.path === s.path)?.urls ?? null,
+    })),
+    errors,
+    outsideProperty: outside,
+    urls: Array.from(urls.values())
+      .slice(0, MAX_URLS)
+      .map((e) => ({ url: e.url, sources: Array.from(e.sources), ...(e.lastmod ? { lastmod: e.lastmod } : {}) })),
+  };
+}
+
 export async function GET(req: NextRequest) {
   try {
     const token = await getGoogleAccessToken(req);
     const siteUrl = req.nextUrl.searchParams.get("site") || "";
     await assertSiteAccess(token, siteUrl);
+    if (req.nextUrl.searchParams.get("mode") === "list") return NextResponse.json(await discover(token, siteUrl));
+    return NextResponse.json(await collect(token, siteUrl, null, true));
+  } catch (e) {
+    return fail(e);
+  }
+}
 
-    const host = propertyHost(siteUrl).replace(/^www\./, "");
-    const domain = registrableDomain(host);
-    const listed = await listSitemaps(token, siteUrl).catch(() => []);
-    const trusted = new Set(listed.map((s) => hostOf(s.path)).filter(Boolean));
-    const allowHost = (h: string) => registrableDomain(h) === domain || trusted.has(h);
-    const origins = siteUrl.startsWith("sc-domain:") ? [`https://${host}`, `https://www.${host}`] : [new URL(siteUrl).origin];
-    const robotsMaps = (await Promise.all(origins.map((o) => getRobots(o)))).flatMap((r) => r?.sitemaps || []);
-    const queue = Array.from(new Set([...listed.map((s) => s.path), ...robotsMaps]));
-    const optional = new Set<string>();
-    for (const o of origins) {
-      const f = `${o}/sitemap.xml`;
-      if (!queue.includes(f)) {
-        queue.push(f);
-        optional.add(f);
-      }
-    }
-
-    const seen = new Set<string>();
-    const read: { path: string; urls: number }[] = [];
-    const urls = new Map<string, { url: string; sources: Set<string>; lastmod?: string }>();
-    const errors: { sitemap: string; error: string }[] = [];
-    let outside = 0;
-    let timedOut = false;
-    const add = (raw: string, source: string, lastmod?: string) => {
-      const url = normalizeUrl(raw);
-      if (!urlInProperty(siteUrl, url)) {
-        outside++;
-        return;
-      }
-      const e = urls.get(url) || { url, sources: new Set<string>() };
-      e.sources.add(source);
-      if (lastmod && (!e.lastmod || lastmod > e.lastmod)) e.lastmod = lastmod;
-      urls.set(url, e);
-    };
-
-    const started = Date.now();
-    while (queue.length && seen.size < MAX_FILES && urls.size < MAX_URLS) {
-      if (Date.now() - started > BUDGET_MS) {
-        timedOut = true;
-        break;
-      }
-      const batch: string[] = [];
-      while (queue.length && batch.length < PARALLEL) {
-        const sm = queue.shift()!;
-        if (!seen.has(sm)) {
-          seen.add(sm);
-          batch.push(sm);
-        }
-      }
-      await Promise.all(
-        batch.map(async (sm) => {
-          try {
-            const xml = await readXml(sm, allowHost);
-            if (/<sitemapindex\b/i.test(xml)) {
-              for (const m of xml.matchAll(/<sitemap\b[^>]*>([\s\S]*?)<\/sitemap>/gi)) {
-                const loc = tag(m[1], "loc");
-                if (loc && !seen.has(loc)) queue.push(loc);
-              }
-              read.push({ path: sm, urls: 0 });
-            } else {
-              let n = 0;
-              for (const m of xml.matchAll(/<url\b[^>]*>([\s\S]*?)<\/url>/gi)) {
-                const loc = tag(m[1], "loc");
-                if (loc) {
-                  add(loc, "sitemap", tag(m[1], "lastmod") || undefined);
-                  n++;
-                }
-              }
-              read.push({ path: sm, urls: n });
-            }
-          } catch (e) {
-            if (!optional.has(sm)) errors.push({ sitemap: sm, error: e instanceof Error ? e.message : "Failed" });
-          }
-        })
-      );
-    }
-    const unread = queue.filter((q) => !seen.has(q)).length;
-    if (timedOut || unread) {
-      errors.push({ sitemap: `${unread} more sitemap file(s)`, error: timedOut ? "not read: 35-second time limit" : "not read: file or URL limit reached" });
-    }
-
-    // Every page with impressions in the last 90 days (ending on the latest final day).
-    const end = await latestFinalDate(token, siteUrl);
-    const perf = await searchAnalyticsAll(token, siteUrl, { startDate: addDays(end, -89), endDate: end, dimensions: ["page"] }, MAX_ROWS);
-    for (const r of perf) add(r.keys[0], "search");
-
-    return NextResponse.json({
-      sitemaps: read.map((r) => r.path),
-      sitemapStatus: listed.map((s) => ({
-        path: s.path,
-        errors: Number(s.errors || 0),
-        warnings: Number(s.warnings || 0),
-        isPending: !!s.isPending,
-        lastDownloaded: s.lastDownloaded || "",
-        lastSubmitted: s.lastSubmitted || "",
-        readByDashboard: read.find((r) => r.path === s.path)?.urls ?? null,
-      })),
-      errors,
-      outsideProperty: outside,
-      urls: Array.from(urls.values())
-        .slice(0, MAX_URLS)
-        .map((e) => ({ url: e.url, sources: Array.from(e.sources), ...(e.lastmod ? { lastmod: e.lastmod } : {}) })),
-    });
+export async function POST(req: NextRequest) {
+  try {
+    const token = await getGoogleAccessToken(req);
+    const body = await req.json().catch(() => ({}));
+    const siteUrl = typeof body.site === "string" ? body.site : "";
+    await assertSiteAccess(token, siteUrl);
+    const raw: unknown[] = Array.isArray(body.sitemaps) ? body.sitemaps : [];
+    const chosen = Array.from(new Set(raw.filter((s): s is string => typeof s === "string" && /^https?:\/\//i.test(s)))).slice(0, MAX_FILES);
+    const includeSearch = body.includeSearch === true;
+    if (!chosen.length && !includeSearch) throw new HttpError(400, "Choose at least one sitemap, or include pages with search impressions.");
+    return NextResponse.json(await collect(token, siteUrl, chosen, includeSearch));
   } catch (e) {
     return fail(e);
   }
