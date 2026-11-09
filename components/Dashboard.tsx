@@ -12,6 +12,7 @@ import Overview from "./Overview";
 import Rankings from "./Rankings";
 import Indexing from "./Indexing";
 import IndexMonitor from "./IndexMonitor";
+import CrawlActivity from "./CrawlActivity";
 import Queries from "./Queries";
 import QueryGrowth from "./QueryGrowth";
 import Audience from "./Audience";
@@ -19,13 +20,14 @@ import CtaSection from "./CtaSection";
 import ChannelDrilldown from "./ChannelDrilldown";
 import Audit from "./Audit";
 
-type Tab = "overview" | "rankings" | "indexing" | "monitor" | "queries" | "growth" | "audience" | "cta" | "audit";
+type Tab = "overview" | "rankings" | "indexing" | "monitor" | "crawl" | "queries" | "growth" | "audience" | "cta" | "audit";
 
 const BASE_TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "rankings", label: "Rankings" },
   { id: "indexing", label: "Indexing" },
   { id: "monitor", label: "Live index monitor" },
+  { id: "crawl", label: "Crawl activity" },
   { id: "queries", label: "Queries" },
   { id: "growth", label: "Query growth" },
   { id: "audience", label: "Traffic & geography" },
@@ -200,7 +202,7 @@ export default function Dashboard() {
       <header className="topbar">
         <div className="topbar-inner">
           <div className="brand">
-            Search & traffic dashboard
+            Search &amp; traffic dashboard
             <small>{session?.user?.email}</small>
           </div>
 
@@ -292,6 +294,7 @@ export default function Dashboard() {
           {gsc && tab === "rankings" && <Rankings gsc={gsc} />}
           {site && tab === "indexing" && <Indexing site={site} onChange={bumpIndex} />}
           {site && tab === "monitor" && <IndexMonitor site={site} />}
+          {site && tab === "crawl" && <CrawlActivity site={site} />}
           {gsc && tab === "queries" && <Queries gsc={gsc} />}
           {site && tab === "growth" && <QueryGrowth site={site} days={days} compare={compare} />}
 
