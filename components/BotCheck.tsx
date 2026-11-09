@@ -6,9 +6,11 @@ type Flag = {
   sessions: number;
   engRate: number;
   avgEng: number;
-  level: 'High' | 'Medium';
+  level: 'Suspect bot' | 'High' | 'Medium';
   reasons: string[];
 };
+
+const PILL: Record<Flag['level'], string> = { 'Suspect bot': 'no', High: 'no', Medium: 'warn' };
 
 function FlagTable({ title, rows, empty }: { title: string; rows: Flag[]; empty: string }) {
   return (
@@ -24,8 +26,8 @@ function FlagTable({ title, rows, empty }: { title: string; rows: Flag[]; empty:
                 <th>Segment</th>
                 <th className="num">Sessions</th>
                 <th className="num">Engaged</th>
-                <th className="num">Avg time</th>
-                <th>Risk</th>
+                <th className="num">Avg time / session</th>
+                <th>Label</th>
                 <th>Why</th>
               </tr>
             </thead>
@@ -35,8 +37,8 @@ function FlagTable({ title, rows, empty }: { title: string; rows: Flag[]; empty:
                   <td className="url">{r.label}</td>
                   <td className="num">{r.sessions.toLocaleString()}</td>
                   <td className="num">{Math.round(r.engRate * 100)}%</td>
-                  <td className="num">{r.avgEng.toFixed(1)}s</td>
-                  <td><span className={`pill ${r.level === 'High' ? 'no' : 'warn'}`}>{r.level}</span></td>
+                  <td className="num">{r.avgEng.toFixed(2)}s</td>
+                  <td><span className={`pill ${PILL[r.level]}`}>{r.level}</span></td>
                   <td className="muted">{r.reasons.join(' · ')}</td>
                 </tr>
               ))}
@@ -62,15 +64,16 @@ export default function BotCheck({ propertyId, days, scope }: { propertyId: stri
   }, [propertyId, days, scope]);
 
   const what = scope === 'cta' ? 'CTA page' : 'site';
+  const threshold = data?.threshold ?? 0.7;
 
   return (
     <div className="section" style={{ marginTop: 28 }}>
       <h2>Bot check{scope === 'cta' ? ' (CTA pages)' : ''}</h2>
       <p className="lede">
-        GA4 already removes known bots. This flags {what} traffic that still behaves like automation: almost no
-        engagement, data-centre locations, headless-browser screen sizes, missing browser language and sudden
-        hourly spikes. It's an estimate. GA4 doesn't expose IP addresses, so confirm anything serious in your
-        server or Cloudflare logs.
+        GA4 already removes known bots. This flags {what} traffic that still behaves like automation. Any segment whose sessions average
+        under {threshold} seconds of engagement is labelled <b>Suspect bot</b>: a person can't read a page that fast. Other signs (almost no
+        engagement, data-centre locations, headless-browser screen sizes, missing browser language, sudden hourly spikes) are labelled High or
+        Medium risk. It's an estimate: GA4 doesn't expose IP addresses, so confirm anything serious in your server or Cloudflare logs.
       </p>
 
       {err && <div className="notice error">Couldn't run the bot check: {err}</div>}
@@ -82,15 +85,21 @@ export default function BotCheck({ propertyId, days, scope }: { propertyId: stri
             <div className="kpi">
               <div className="label">Sessions checked</div>
               <div className="value">{data.totals.sessions.toLocaleString()}</div>
+              {data.window && <div className="sub">{data.window.startDate} to {data.window.endDate}</div>}
+            </div>
+            <div className="kpi">
+              <div className="label">Suspect bot sessions</div>
+              <div className="value">{data.totals.suspectBotSessions.toLocaleString()}</div>
+              <div className="sub">
+                {(data.totals.suspectBotShare * 100).toFixed(1)}% of sessions · locations averaging under {threshold}s
+              </div>
             </div>
             <div className="kpi">
               <div className="label">Likely bot sessions</div>
               <div className="value">{data.totals.suspiciousSessions.toLocaleString()}</div>
-              <div className="sub">high-risk locations only</div>
-            </div>
-            <div className="kpi">
-              <div className="label">Share of traffic</div>
-              <div className="value">{(data.totals.suspiciousShare * 100).toFixed(1)}%</div>
+              <div className="sub">
+                {(data.totals.suspiciousShare * 100).toFixed(1)}% of sessions · Suspect bot + High-risk locations
+              </div>
             </div>
             <div className="kpi">
               <div className="label">Spike hours</div>
