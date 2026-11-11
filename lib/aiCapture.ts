@@ -2,10 +2,10 @@
 "use client";
 /**
  * One-click "Copy AI impressions" bookmark.
- * Clicked on Search Console's Generative AI features report, it reads the daily impressions and the Pages table from the
- * page (in your signed-in browser), then opens the dashboard, which checks that the days add up to the page's
- * "Total impressions" and saves them for everyone. It depends on how Search Console's pages hold their data,
- * which Google can change; the export import stays as the fallback.
+ * Clicked on Search Console's Generative AI features report, it reads the daily impressions and the Pages list from the
+ * page, opens the Countries and Devices tabs to read those tables too, then opens the dashboard, which checks that the
+ * days add up to the page's "Total impressions" and saves everything for everyone. It depends on how Search Console's
+ * pages hold their data, which Google can change; the export import stays as the fallback.
  */
 import type { AiParsed } from "./aiStore";
 import { AI_MAX_PAGES } from "./aiStore";
@@ -87,17 +87,34 @@ if(c==='['||c==='{')d++;else if(c===']'||c==='}'){d--;if(d===0)break;}}
 try{out.push(JSON.parse(t.slice(s,e+1)));}catch(x){}
 k=e+1;}
 return out;}
-var table=[],trs=document.querySelectorAll('tr,[role=row]');
-for(var t=0;t<trs.length&&table.length<1000;t++){var cells=trs[t].querySelectorAll('td,[role=cell],[role=gridcell]');if(cells.length<2)continue;
-var u=(cells[0].innerText||'').trim(),n=(cells[cells.length-1].innerText||'').replace(/[,\s]/g,'');
-if(/^https?:\/\/\S+$/.test(u)&&/^\d+$/.test(n))table.push([u,Number(n)]);}
+function rowsNow(){var out=[],trs=document.querySelectorAll('tr,[role=row]');
+for(var t=0;t<trs.length&&out.length<1000;t++){var cells=trs[t].querySelectorAll('td,[role=cell],[role=gridcell]');if(cells.length<2)continue;
+var a=(cells[0].innerText||'').trim(),n=(cells[cells.length-1].innerText||'').replace(/[,\s]/g,'');
+if(a&&/^\d+$/.test(n))out.push([a,Number(n)]);}
+return out;}
+var DEV=/^(desktop|mobile|tablet)$/i;
+function isUrl(l){return /^https?:\/\/\S+$/.test(l);}
+function tabEl(name){var els=document.querySelectorAll('[role=tab]');
+for(var i=0;i<els.length;i++)if((els[i].innerText||'').trim().toUpperCase()===name)return els[i];
+els=document.querySelectorAll('button,a,span,div');
+for(var j=0;j<els.length;j++){var e=els[j];if(e.children.length<=2&&e.offsetParent!==null&&(e.innerText||'').trim().toUpperCase()===name)return e;}
+return null;}
+function viaTab(name,ok){return new Promise(function(res){var el=tabEl(name);if(!el){res([]);return;}
+try{el.click();}catch(x){res([]);return;}
+var n=0;(function wait(){n++;var rows=rowsNow().filter(function(r){return ok(r[0]);});if(rows.length||n>24)res(rows);else setTimeout(wait,250);})();});}
+var table=rowsNow().filter(function(r){return isUrl(r[0]);});
 var dom=[],ss=document.getElementsByTagName('script');
 for(var m=0;m<ss.length;m++){var st=ss[m].textContent||'';if(st.indexOf('AF_initDataCallback')>=0)dom=dom.concat(grab(st));}
-fetch(location.href,{credentials:'include'}).then(function(r){return r.ok?r.text():'';}).catch(function(){return '';}).then(function(h){
+var countries=[],devices=[];
+viaTab('COUNTRIES',function(l){return !isUrl(l)&&!DEV.test(l);})
+.then(function(c){countries=c;return viaTab('DEVICES',function(l){return DEV.test(l);});})
+.then(function(d){devices=d;var p=tabEl('PAGES');if(p){try{p.click();}catch(x){}}})
+.then(function(){return fetch(location.href,{credentials:'include'}).then(function(r){return r.ok?r.text():'';}).catch(function(){return '';});})
+.then(function(h){
 var blobs=dom.concat(h?grab(h):[]);
 var series=seriesIn(blobs),pages=pagesIn(blobs);
 if(!series.length){if(w)w.close();stop('no daily AI impressions were found on this page. Reload it (F5), wait for the chart, and click the bookmark again. If it keeps failing, use Export > Download CSV and import the file instead.');return;}
-var json=JSON.stringify({v:1,src:'gsc-ai-impressions',site:site,url:location.href,capturedAt:new Date().toISOString(),tiles:{impressions:tm[1].replace(/\s+/g,'')},series:series,pages:pages,table:table});
+var json=JSON.stringify({v:2,src:'gsc-ai-impressions',site:site,url:location.href,capturedAt:new Date().toISOString(),tiles:{impressions:tm[1].replace(/\s+/g,'')},series:series,pages:pages,table:table,countries:countries,devices:devices});
 if(w&&!w.closed){w.location.href=DASH+'/#aistats='+encodeURIComponent(json);return;}
 var ok=T+'copied. Open the dashboard (Overview tab) and paste it under "Paste AI impressions".';
 function legacy(s){var ta=document.createElement('textarea');ta.value=s;document.body.appendChild(ta);ta.select();var done=false;try{done=document.execCommand('copy');}catch(e){}ta.remove();if(done)alert(ok);else prompt('Copy this text (Ctrl+C), then paste it into the dashboard:',s);}
@@ -121,9 +138,13 @@ type Capture = {
   series?: Rows[];
   pages?: Rows[];
   table?: [string, number][];
+  countries?: [string, number][];
+  devices?: [string, number][];
 };
 
 export type AiCaptureResult = { item: AiParsed; verified: boolean; summary: string };
+
+const DEVICE = /^(desktop|mobile|tablet)$/i;
 
 /** "87.5k" → 87,500 ± 50 (half of the last digit shown). */
 function shown(s?: string): Shown | null {
@@ -136,10 +157,23 @@ function shown(s?: string): Shown | null {
 }
 const near = (x: number, t: Shown, slack: number) => Math.abs(x - t.value) <= t.tol + t.value * slack;
 
+/** Label → impressions pairs read from a visible table. */
+function pairs(list: unknown, keep: (label: string) => boolean): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!Array.isArray(list)) return out;
+  for (const r of list) {
+    if (!Array.isArray(r) || typeof r[0] !== "string") continue;
+    const k = r[0].trim();
+    const v = Number(r[1]);
+    if (k && k.length <= 80 && Number.isInteger(v) && v >= 0 && keep(k)) out[k] = v;
+  }
+  return out;
+}
+
 const BAD =
   "That doesn't look like data from the “Copy AI impressions” bookmark. Click the bookmark on the Generative AI features report in Search Console.";
 
-/** Reads what the bookmark sent, picks the daily impressions that add up to the page's total, and the page list. */
+/** Reads what the bookmark sent, picks the daily impressions that add up to the page's total, and the page, country and device lists. */
 export function parseAiCapture(text: string, site: string): AiCaptureResult {
   let cap: Capture;
   try {
@@ -148,7 +182,9 @@ export function parseAiCapture(text: string, site: string): AiCaptureResult {
     throw new Error(BAD);
   }
   if (!cap || cap.src !== "gsc-ai-impressions" || !Array.isArray(cap.series)) throw new Error(BAD);
-  if (cap.v !== 1) throw new Error("This came from a different version of the “Copy AI impressions” bookmark. Drag the current one from the Overview tab.");
+  if (cap.v !== 1 && cap.v !== 2) {
+    throw new Error("This came from a different version of the “Copy AI impressions” bookmark. Drag the current one from the Overview tab.");
+  }
   const norm = (s: string) => s.trim().toLowerCase().replace(/\/+$/, "");
   if (cap.site && site && norm(cap.site) !== norm(site)) {
     throw new Error(`This was copied from ${cap.site}, but the dashboard is showing ${site}, and your account can't open ${cap.site} here.`);
@@ -230,6 +266,17 @@ export function parseAiCapture(text: string, site: string): AiCaptureResult {
   }
   pages = Object.fromEntries(Object.entries(pages).sort((a, b) => b[1] - a[1]).slice(0, AI_MAX_PAGES));
 
+  // Countries and devices: read from their tabs by the bookmark (rows visible in each table).
+  const countries = pairs(cap.countries, (k) => !/^https?:\/\//i.test(k) && !DEVICE.test(k));
+  const devices = pairs(cap.devices, (k) => DEVICE.test(k));
+  const nC = Object.keys(countries).length, nD = Object.keys(devices).length;
+  const splitNote =
+    nC || nD
+      ? ` ${nC} countries and ${nD} devices (the rows visible in those tabs).`
+      : cap.v === 1
+        ? " Countries and devices need the updated bookmark: drag it from the Overview tab again."
+        : " The Countries and Devices tabs couldn't be read; export the report to get them.";
+
   const when = new Date(cap.capturedAt).toLocaleString();
   const total = dates.reduce((n, d) => n + days[d], 0);
   let summary = `Copied ${when}: ${total.toLocaleString()} AI impressions, ${dates[0]} to ${dates[dates.length - 1]}.`;
@@ -238,7 +285,7 @@ export function parseAiCapture(text: string, site: string): AiCaptureResult {
     : tile
       ? ` The days add up to ${total.toLocaleString()}, not the page's Total impressions (${cap.tiles?.impressions}), so they weren't saved automatically. Check the date range on the report and click the bookmark again, or save anyway.`
       : " The page's Total impressions couldn't be read, so the numbers weren't checked or saved automatically.";
-  summary += pagesNote;
+  summary += pagesNote + splitNote;
 
   return {
     item: {
@@ -247,8 +294,8 @@ export function parseAiCapture(text: string, site: string): AiCaptureResult {
       to: dates[dates.length - 1],
       days,
       pages,
-      countries: {},
-      devices: {},
+      countries,
+      devices,
     },
     verified,
     summary,
