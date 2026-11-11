@@ -4,7 +4,8 @@
  * One-click "Copy AI impressions" bookmark.
  * Clicked on Search Console's Generative AI features report, it reads the daily impressions and the Pages list from the
  * page, opens the Countries and Devices tabs to read those tables too, then opens the dashboard, which checks that the
- * days add up to the page's "Total impressions" and saves everything for everyone. It depends on how Search Console's
+ * days add up to the page's "Total impressions" and saves everything for everyone. Search Console keeps earlier pages
+ * hidden in the background, so the bookmark only uses visible tabs and tables. It depends on how Search Console's
  * pages hold their data, which Google can change; the export import stays as the fallback.
  */
 import type { AiParsed } from "./aiStore";
@@ -87,17 +88,19 @@ if(c==='['||c==='{')d++;else if(c===']'||c==='}'){d--;if(d===0)break;}}
 try{out.push(JSON.parse(t.slice(s,e+1)));}catch(x){}
 k=e+1;}
 return out;}
+function vis(e){try{return !!e&&e.getClientRects().length>0&&getComputedStyle(e).visibility!=='hidden';}catch(x){return false;}}
 function rowsNow(){var out=[],trs=document.querySelectorAll('tr,[role=row]');
-for(var t=0;t<trs.length&&out.length<1000;t++){var cells=trs[t].querySelectorAll('td,[role=cell],[role=gridcell]');if(cells.length<2)continue;
+for(var t=0;t<trs.length&&out.length<1000;t++){if(!vis(trs[t]))continue;
+var cells=trs[t].querySelectorAll('td,[role=cell],[role=gridcell]');if(cells.length<2)continue;
 var a=(cells[0].innerText||'').trim(),n=(cells[cells.length-1].innerText||'').replace(/[,\s]/g,'');
 if(a&&/^\d+$/.test(n))out.push([a,Number(n)]);}
 return out;}
 var DEV=/^(desktop|mobile|tablet)$/i;
 function isUrl(l){return /^https?:\/\/\S+$/.test(l);}
 function tabEl(name){var els=document.querySelectorAll('[role=tab]');
-for(var i=0;i<els.length;i++)if((els[i].innerText||'').trim().toUpperCase()===name)return els[i];
+for(var i=0;i<els.length;i++)if(vis(els[i])&&(els[i].innerText||'').trim().toUpperCase()===name)return els[i];
 els=document.querySelectorAll('button,a,span,div');
-for(var j=0;j<els.length;j++){var e=els[j];if(e.children.length<=2&&e.offsetParent!==null&&(e.innerText||'').trim().toUpperCase()===name)return e;}
+for(var j=0;j<els.length;j++){var e=els[j];if(e.children.length<=2&&vis(e)&&(e.innerText||'').trim().toUpperCase()===name)return e;}
 return null;}
 function viaTab(name,ok){return new Promise(function(res){var el=tabEl(name);if(!el){res([]);return;}
 try{el.click();}catch(x){res([]);return;}
