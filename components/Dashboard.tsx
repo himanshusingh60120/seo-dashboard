@@ -6,12 +6,11 @@ import type { GscData, Ga4Data, Properties, Sources } from "@/lib/types";
 import { indexScanSource, loadIndexCache, peekIndexCache } from "@/lib/indexCache";
 import { downloadJson, fileSafe } from "@/lib/evidence";
 import { DEFAULT_DAYS, WINDOWS, yoyAllowed, type Compare } from "@/lib/dates";
-import { getMonitor, monitorPrefs } from "@/lib/monitor";
 import { SourcesProvider } from "./ui";
 import Overview from "./Overview";
 import Rankings from "./Rankings";
 import Indexing from "./Indexing";
-import IndexMonitor from "./IndexMonitor";
+import IndexReport from "./IndexReport";
 import CrawlActivity from "./CrawlActivity";
 import Queries from "./Queries";
 import QueryGrowth from "./QueryGrowth";
@@ -20,13 +19,12 @@ import CtaSection from "./CtaSection";
 import ChannelDrilldown from "./ChannelDrilldown";
 import Audit from "./Audit";
 
-type Tab = "overview" | "rankings" | "indexing" | "monitor" | "crawl" | "queries" | "growth" | "audience" | "cta" | "audit";
+type Tab = "overview" | "rankings" | "indexing" | "crawl" | "queries" | "growth" | "audience" | "cta" | "audit";
 
 const BASE_TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "rankings", label: "Rankings" },
   { id: "indexing", label: "Indexing" },
-  { id: "monitor", label: "Live index monitor" },
   { id: "crawl", label: "Crawl activity" },
   { id: "queries", label: "Queries" },
   { id: "growth", label: "Query growth" },
@@ -54,7 +52,7 @@ function readPrefs(): Record<string, any> {
   }
 }
 
-/** Property a bookmark copy came from (both bookmarks send JSON with a "site" field). */
+/** Property a bookmark copy came from (every bookmark sends JSON with a "site" field). */
 function siteOf(raw: string | null): string {
   try {
     return raw ? String(JSON.parse(raw)?.site || "") : "";
@@ -83,12 +81,15 @@ export default function Dashboard() {
   const reqId = useRef(0);
   const [indexVersion, setIndexVersion] = useState(0);
   const bumpIndex = useCallback(() => setIndexVersion((v) => v + 1), []);
-  // Crawl stats sent by the "Copy crawl stats" bookmark (arrives in the URL after #)
-  const [inbox, setInbox] = useState<string | null>(null);
+  // Data sent by the bookmarks (arrives in the URL after #)
+  const [inbox, setInbox] = useState<string | null>(null); // Copy crawl stats
   const [inboxWaiting, setInboxWaiting] = useState(false);
-  // NEW: AI impressions sent by the "Copy AI impressions" bookmark (arrives in the URL after #)
-  const [aiInbox, setAiInbox] = useState<string | null>(null);
+  const [aiInbox, setAiInbox] = useState<string | null>(null); // Copy AI impressions
   const [aiWaiting, setAiWaiting] = useState(false);
+  const [idxInbox, setIdxInbox] = useState<string | null>(null); // Copy page indexing
+  const [idxWaiting, setIdxWaiting] = useState(false);
+  // "Check specific URLs" (URL Inspection) loads only when asked for
+  const [showChecks, setShowChecks] = useState(false);
 
   // Every source behind the numbers on screen, so any "Source" button can explain itself
   const sources = useMemo<Sources>(() => {
@@ -99,16 +100,8 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (site) loadIndexCache(site).then(bumpIndex);
+    setShowChecks(false);
   }, [site, bumpIndex]);
-
-  // Live index monitor: resume it for this property if it was left on; stop it when switching away.
-  useEffect(() => {
-    if (!site) return;
-    const m = getMonitor();
-    const p = monitorPrefs();
-    if (p.on[site]) m.start(site, p.budget);
-    else if (m.get().running && m.get().site !== site) m.stop();
-  }, [site]);
 
   // The audit tab is shown only to the audit account; every audit API route checks the account again.
   useEffect(() => {
@@ -120,7 +113,8 @@ export default function Dashboard() {
 
   // Receive data from the bookmarks. Each opens this page with a "wait" hash first, then the data:
   //   Copy crawl stats:    #crawl-wait, then #crawlstats=<data>
-  //   Copy AI impressions: #ai-wait,    then #aistats=<data>   (NEW)
+  //   Copy AI impressions: #ai-wait,    then #aistats=<data>
+  //   Copy page indexing:  #idx-wait,   then #idxstats=<data>
   useEffect(() => {
     const take = () => {
       const h = window.location.hash;
@@ -132,34 +126,29 @@ export default function Dashboard() {
           return "";
         }
       };
-
-      // NEW: AI impressions
-      if (h.startsWith("#ai-wait") || h.startsWith("#aistats=")) {
-        setTab("overview");
-        if (h.startsWith("#ai-wait")) {
-          setAiWaiting(true);
+      const handle = (
+        waitHash: string,
+        dataHash: string,
+        toTab: Tab,
+        setWait: (v: boolean) => void,
+        setData: (v: string) => void
+      ) => {
+        if (!h.startsWith(waitHash) && !h.startsWith(dataHash)) return false;
+        setTab(toTab);
+        if (h.startsWith(waitHash)) {
+          setWait(true);
           clean();
-          return;
+          return true;
         }
-        const raw = read("#aistats=");
+        const raw = read(dataHash);
         clean();
-        if (raw) setAiInbox(raw);
-        setAiWaiting(false);
-        return;
-      }
-
-      // Crawl stats (unchanged behaviour)
-      if (!h.startsWith("#crawl-wait") && !h.startsWith("#crawlstats=")) return;
-      setTab("crawl");
-      if (h.startsWith("#crawl-wait")) {
-        setInboxWaiting(true);
-        clean();
-        return;
-      }
-      const raw = read("#crawlstats=");
-      clean();
-      if (raw) setInbox(raw);
-      setInboxWaiting(false);
+        if (raw) setData(raw);
+        setWait(false);
+        return true;
+      };
+      if (handle("#idx-wait", "#idxstats=", "indexing", setIdxWaiting, setIdxInbox)) return;
+      if (handle("#ai-wait", "#aistats=", "overview", setAiWaiting, setAiInbox)) return;
+      handle("#crawl-wait", "#crawlstats=", "crawl", setInboxWaiting, setInbox);
     };
     take();
     window.addEventListener("hashchange", take);
@@ -167,31 +156,31 @@ export default function Dashboard() {
   }, []);
 
   const inboxSite = useMemo(() => siteOf(inbox), [inbox]);
-  const aiInboxSite = useMemo(() => siteOf(aiInbox), [aiInbox]); // NEW
+  const aiInboxSite = useMemo(() => siteOf(aiInbox), [aiInbox]);
+  const idxInboxSite = useMemo(() => siteOf(idxInbox), [idxInbox]);
 
-  // Switch to the property the crawl stats were copied from, if this account has it.
+  // Switch to the property the bookmark data was copied from, if this account has it.
   useEffect(() => {
-    if (!inboxSite || !props || inboxSite === site) return;
-    if (props.gsc.some((x) => x.siteUrl === inboxSite)) changeSite(inboxSite);
+    const from = idxInboxSite || aiInboxSite || inboxSite;
+    if (!from || !props || from === site) return;
+    if (props.gsc.some((x) => x.siteUrl === from)) changeSite(from);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inboxSite, props]);
-
-  // NEW: same for AI impressions
-  useEffect(() => {
-    if (!aiInboxSite || !props || aiInboxSite === site) return;
-    if (props.gsc.some((x) => x.siteUrl === aiInboxSite)) changeSite(aiInboxSite);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [aiInboxSite, props]);
+  }, [inboxSite, aiInboxSite, idxInboxSite, props]);
 
   // Hand the data over once the right property is showing (or if this account can't open that property, so it can say so).
   const readyFor = (raw: string | null, from: string) =>
     !!raw && (!from || from === site || (!!props && !props.gsc.some((x) => x.siteUrl === from)));
   const inboxReady = readyFor(inbox, inboxSite);
-  const aiInboxReady = readyFor(aiInbox, aiInboxSite); // NEW
+  const aiInboxReady = readyFor(aiInbox, aiInboxSite);
+  const idxInboxReady = readyFor(idxInbox, idxInboxSite);
   const aiInboxHandled = useCallback(() => {
     setAiInbox(null);
     setAiWaiting(false);
-  }, []); // NEW
+  }, []);
+  const idxInboxHandled = useCallback(() => {
+    setIdxInbox(null);
+    setIdxWaiting(false);
+  }, []);
 
   const downloadEvidence = () => {
     downloadJson(`evidence-${fileSafe(site)}-${new Date().toISOString().slice(0, 10)}.json`, {
@@ -384,7 +373,6 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* CHANGED: Overview also receives data from the "Copy AI impressions" bookmark */}
           {gsc && tab === "overview" && (
             <Overview
               gsc={gsc}
@@ -398,8 +386,32 @@ export default function Dashboard() {
             />
           )}
           {gsc && tab === "rankings" && <Rankings gsc={gsc} site={site} />}
-          {site && tab === "indexing" && <Indexing site={site} onChange={bumpIndex} />}
-          {site && tab === "monitor" && <IndexMonitor site={site} />}
+
+          {site && tab === "indexing" && (
+            <>
+              <IndexReport
+                site={site}
+                inbox={idxInboxReady ? idxInbox : null}
+                waiting={idxWaiting || (!!idxInbox && !idxInboxReady)}
+                onInboxHandled={idxInboxHandled}
+              />
+              <section className="section">
+                <h2>Check specific URLs</h2>
+                <p className="lede">
+                  Look up individual pages with Google&apos;s URL Inspection API: whether each one is indexed, when it was last crawled, and why
+                  not. Useful for new or changed pages; the numbers above are the complete counts.
+                </p>
+                {showChecks ? (
+                  <Indexing site={site} onChange={bumpIndex} />
+                ) : (
+                  <button className="btn" onClick={() => setShowChecks(true)}>
+                    Show URL checks
+                  </button>
+                )}
+              </section>
+            </>
+          )}
+
           {site && tab === "crawl" && (
             <CrawlActivity
               site={site}
