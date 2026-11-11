@@ -89,18 +89,7 @@ export default function Overview({
 
   return (
     <>
-      <Section title="Search performance" lede={`Google Search, ${gsc.range.startDate} to ${gsc.range.endDate}, compared with the ${gsc.previousRange.startDate} to ${gsc.previousRange.endDate} period.`}>
-        <Kpis items={search} />
-        <div className="grid-2" style={{ marginTop: 16 }}>
-          <div className="panel"><PanelTitle source={["gsc.trend"]}>Clicks and impressions</PanelTitle><SearchTrend data={gsc.trend} /></div>
-          <div className="panel"><PanelTitle source={["gsc.trend"]}>Average position and CTR</PanelTitle><PositionTrend data={gsc.trend} /></div>
-        </div>
-      </Section>
-
-      <AiOverview site={site} gsc={gsc} inbox={aiInbox} waiting={aiWaiting} onInboxHandled={onAiInboxHandled} />
-
-      <AiTraffic site={site} ga4={ga4} days={days} compare={compare} />
-
+      {/* 1. Everyone who came, from every channel (GA4) */}
       <Section
         title="Site traffic"
         lede={
@@ -118,6 +107,21 @@ export default function Overview({
           </>
         )}
       </Section>
+
+      {/* 2. How Google Search is doing (Search Console) */}
+      <Section title="Search performance" lede={`Google Search, ${gsc.range.startDate} to ${gsc.range.endDate}, compared with the ${gsc.previousRange.startDate} to ${gsc.previousRange.endDate} period.`}>
+        <Kpis items={search} />
+        <div className="grid-2" style={{ marginTop: 16 }}>
+          <div className="panel"><PanelTitle source={["gsc.trend"]}>Clicks and impressions</PanelTitle><SearchTrend data={gsc.trend} /></div>
+          <div className="panel"><PanelTitle source={["gsc.trend"]}>Average position and CTR</PanelTitle><PositionTrend data={gsc.trend} /></div>
+        </div>
+      </Section>
+
+      {/* 3. Shown inside Google's AI Overviews and AI Mode (Search Console) */}
+      <AiOverview site={site} gsc={gsc} inbox={aiInbox} waiting={aiWaiting} onInboxHandled={onAiInboxHandled} />
+
+      {/* 4. Visits sent by AI assistants outside Google (GA4) */}
+      <AiTraffic site={site} ga4={ga4} days={days} compare={compare} />
     </>
   );
 }
