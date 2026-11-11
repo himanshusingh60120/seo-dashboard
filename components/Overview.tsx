@@ -5,6 +5,7 @@ import type { GscData, Ga4Data } from "@/lib/types";
 import { Kpis, Delta, Section, PanelTitle, num, pct, pos, KpiItem } from "./ui";
 import { SearchTrend, PositionTrend, TrafficTrend } from "./Charts";
 import { loadIndexCache, classify } from "@/lib/indexCache";
+import AiOverview from "./AiImpressions"; // NEW: Google AI Overviews / AI Mode impressions section
 
 export default function Overview({ gsc, ga, gaError, hasGa4, site }: { gsc: GscData; ga: Ga4Data | null; gaError: string | null; hasGa4: boolean; site: string }) {
   const c = gsc.totals.current, p = gsc.totals.previous;
@@ -57,6 +58,9 @@ export default function Overview({ gsc, ga, gaError, hasGa4, site }: { gsc: GscD
           <div className="panel"><PanelTitle source={["gsc.trend"]}>Average position and CTR</PanelTitle><PositionTrend data={gsc.trend} /></div>
         </div>
       </Section>
+
+      {/* NEW: site-wide AI impressions (imported Generative AI report) */}
+      <AiOverview site={site} gsc={gsc} />
 
       <Section
         title="Site traffic"
