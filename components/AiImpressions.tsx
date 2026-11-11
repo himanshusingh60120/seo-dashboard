@@ -316,9 +316,17 @@ export default function AiOverview({
                 </div>
                 <div className="panel">
                   <PanelTitle source={["client.aiImport"]}>Countries</PanelTitle>
-                  {Object.keys(snap.countries).length ? <Bars items={top(snap.countries, 10)} color="#5e35b1" /> : <p className="muted">Only in exports.</p>}
+                  {Object.keys(snap.countries).length ? (
+                    <Bars items={top(snap.countries, 10)} color="#5e35b1" />
+                  ) : (
+                    <p className="muted">Not in the latest update. Click the bookmark again.</p>
+                  )}
                   <PanelTitle source={["client.aiImport"]}>Devices</PanelTitle>
-                  {Object.keys(snap.devices).length ? <Bars items={top(snap.devices, 5)} color="#9bb0d9" /> : <p className="muted">Only in exports.</p>}
+                  {Object.keys(snap.devices).length ? (
+                    <Bars items={top(snap.devices, 5)} color="#9bb0d9" />
+                  ) : (
+                    <p className="muted">Not in the latest update. Click the bookmark again.</p>
+                  )}
                 </div>
               </div>
             )}
@@ -339,7 +347,7 @@ export default function AiOverview({
               <button type="button" className="btn small" onClick={copyCode}>
                 {codeCopied ? "Copied" : "copy its code"}
               </button>{" "}
-              and create a bookmark with that code as the URL).
+              and create a bookmark with that code as the URL). Replace any older “Copy AI impressions” bookmark.
             </li>
             <li>
               Open{" "}
@@ -347,7 +355,8 @@ export default function AiOverview({
                 Performance for this property
               </a>
               , click <strong>Open report</strong> in the generative AI box, choose the longest date range, wait for the chart, then click the
-              bookmark. The dashboard opens in a new tab, checks that the days add up to Total impressions, and saves them for everyone.
+              bookmark. It reads the Pages, Countries and Devices tabs; the dashboard opens in a new tab, checks that the days add up to Total
+              impressions, and saves everything for everyone.
             </li>
           </ol>
 
