@@ -13,7 +13,14 @@ import { DataTable, Delta, Kpis, PanelTitle, Section, SourcesProvider, SubTabs, 
 const axis = { fontSize: 12, fill: "#5b6573" };
 const DAY = 864e5;
 const SRC = ["client.idxImport"];
-const WINDOWS: [number, string][] = [[90, "Last 90 days"], [180, "Last 180 days"], [0, "Everything saved"]];
+/** 0 = everything saved. Ranges longer than the saved history are disabled in the dropdown. */
+const WINDOWS: [number, string][] = [
+  [28, "Last 28 days"],
+  [90, "Last 90 days"],
+  [180, "Last 180 days"],
+  [365, "Last 12 months"],
+  [0, "Everything saved"],
+];
 
 type ReasonRow = { reason: string; source: string; validation: string; pages: number; share: number; prev: number | null; change: number | null };
 
@@ -71,6 +78,8 @@ export default function IndexReport({
   const last = store?.imports.length ? store.imports[store.imports.length - 1] : null;
   const hasData = !!store && IDX_VIEWS.some((v) => Object.keys(store.views[v]?.days || {}).length);
   const dates = useMemo(() => Object.keys(vd?.days || {}).sort(), [vd]);
+  /** Days from the first to the latest saved day, inclusive. */
+  const span = dates.length && L ? Math.round((Date.parse(L.date) - Date.parse(dates[0])) / DAY) + 1 : 0;
 
   // Compare with the saved day closest to 28 days before the latest one.
   const ref = useMemo(() => {
@@ -297,11 +306,22 @@ export default function IndexReport({
                 <div className="panel" style={{ marginTop: 16 }}>
                   <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
                     <PanelTitle source={SRC}>{`Indexed and not indexed pages per day · ${IDX_LABEL[view]}`}</PanelTitle>
-                    <select value={win} onChange={(e) => setWin(Number(e.target.value))} aria-label="Days to show">
-                      {WINDOWS.map(([d, label]) => (
-                        <option key={d} value={d}>{label}</option>
-                      ))}
-                    </select>
+                    <div className="row" style={{ gap: 8 }}>
+                      <span className="muted">
+                        Saved: {dates[0]} to {L.date} ({num(span)} days); grows with each update
+                      </span>
+                      <select value={win} onChange={(e) => setWin(Number(e.target.value))} aria-label="Days to show">
+                        {WINDOWS.map(([d, label]) => {
+                          const tooLong = d !== 0 && d > span && d !== 28;
+                          return (
+                            <option key={d} value={d} disabled={tooLong}>
+                              {label}
+                              {tooLong ? " (not enough history yet)" : ""}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </div>
                   </div>
                   <ResponsiveContainer width="100%" height={260}>
                     <ComposedChart data={chart} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
