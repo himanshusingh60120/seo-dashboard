@@ -1,12 +1,13 @@
 // components/AiImpressions.tsx
 "use client";
-// Overview section: Google AI Overviews + AI Mode impressions for the whole site, from imported
-// Search Console "Generative AI features" exports (the report has no API).
-import { useMemo, useRef, useState } from "react";
+// Overview section: Google AI Overviews + AI Mode impressions for the whole site. The data comes from Search Console's
+// Generative AI features report (no API): one-click "Copy AI impressions" bookmark, paste, or the report's export files.
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CartesianGrid, ComposedChart, Legend, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { GscData, Source, Sources } from "@/lib/types";
 import { AI_HOW_TO, clearAi, parseAiFiles, saveAi, useAiStore } from "@/lib/aiImpressions";
-import { aiSum, latestAiSnapshot } from "@/lib/aiStore";
+import { aiBookmarkletFor, parseAiCapture } from "@/lib/aiCapture";
+import { aiSum, latestAiSnapshot, type AiParsed } from "@/lib/aiStore";
 import { Bars, DataTable, Delta, Kpis, PanelTitle, Section, SourcesProvider, num, pct, useSources, type Col, type KpiItem } from "./ui";
 
 const axis = { fontSize: 12, fill: "#5b6573" };
@@ -26,7 +27,7 @@ const HISTORY_COLS: Col<HistoryRow>[] = [
   { key: "dates", label: "Dates" },
   { key: "days", label: "Days", num: true },
   { key: "pages", label: "Pages", num: true },
-  { key: "file", label: "File" },
+  { key: "file", label: "Source" },
 ];
 
 const top = (m: Record<string, number> | undefined, n: number) =>
@@ -35,12 +36,30 @@ const top = (m: Record<string, number> | undefined, n: number) =>
     .slice(0, n)
     .map(([label, value]) => ({ label, value }));
 
-export default function AiOverview({ site, gsc }: { site: string; gsc: GscData }) {
+export default function AiOverview({
+  site,
+  gsc,
+  inbox = null,
+  waiting = false,
+  onInboxHandled,
+}: {
+  site: string;
+  gsc: GscData;
+  /** Data sent by the "Copy AI impressions" bookmark. */
+  inbox?: string | null;
+  waiting?: boolean;
+  onInboxHandled?: () => void;
+}) {
   const outer = useSources();
   const state = useAiStore(site);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
+  const [pending, setPending] = useState<AiParsed | null>(null);
+  const [paste, setPaste] = useState("");
+  const [codeCopied, setCodeCopied] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const bmRef = useRef<HTMLAnchorElement>(null);
+  const handled = useRef<string | null>(null);
 
   const store = state?.store ?? null;
   const snap = latestAiSnapshot(store);
@@ -50,6 +69,66 @@ export default function AiOverview({ site, gsc }: { site: string; gsc: GscData }
   const cur = aiSum(store, gsc.range.startDate, gsc.range.endDate);
   const prev = aiSum(store, gsc.previousRange.startDate, gsc.previousRange.endDate);
   const searchImpr = gsc.totals.current.impressions;
+  const reportUrl = `https://search.google.com/search-console/performance/search-analytics?resource_id=${encodeURIComponent(site)}`;
+
+  // Set the bookmark's address directly (React warns about javascript: links in JSX).
+  useEffect(() => {
+    bmRef.current?.setAttribute("href", aiBookmarkletFor(window.location.origin));
+  }, []);
+
+  const takeCapture = useCallback(
+    async (text: string) => {
+      setBusy(true);
+      setMsg(null);
+      setPending(null);
+      try {
+        const r = parseAiCapture(text, site);
+        if (r.verified) {
+          const s = await saveAi(site, [r.item]);
+          setMsg({ text: `${r.summary} Saved ${s.shared ? "for everyone" : "in this browser only"}.` });
+          setPaste("");
+        } else {
+          setPending(r.item);
+          setMsg({ text: r.summary, error: true });
+        }
+      } catch (e) {
+        setMsg({ text: e instanceof Error ? e.message : "Couldn't read the data", error: true });
+      }
+      setBusy(false);
+    },
+    [site]
+  );
+
+  // Data arriving from the bookmark (via the dashboard URL).
+  useEffect(() => {
+    if (!inbox || !state || handled.current === inbox) return;
+    handled.current = inbox;
+    takeCapture(inbox).finally(() => onInboxHandled?.());
+  }, [inbox, state, takeCapture, onInboxHandled]);
+
+  const savePending = async () => {
+    if (!pending) return;
+    setBusy(true);
+    try {
+      const s = await saveAi(site, [pending]);
+      setMsg({ text: `Saved anyway ${s.shared ? "for everyone" : "in this browser only"}. Compare the chart with Search Console to be sure.` });
+      setPending(null);
+      setPaste("");
+    } catch (e) {
+      setMsg({ text: e instanceof Error ? e.message : "Saving failed", error: true });
+    }
+    setBusy(false);
+  };
+
+  const copyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(aiBookmarkletFor(window.location.origin));
+      setCodeCopied(true);
+      setTimeout(() => setCodeCopied(false), 1500);
+    } catch {
+      setMsg({ text: "Couldn't copy. Right-click the button and copy the link address instead.", error: true });
+    }
+  };
 
   const trend = useMemo(
     () =>
@@ -91,16 +170,17 @@ export default function AiOverview({ site, gsc }: { site: string; gsc: GscData }
     const imported = {
       id: "client.aiImport",
       label: "Google AI impressions (Generative AI features report)",
-      system: `Search Console Generative AI performance report (Beta), imported from its export and saved ${state?.shared ? "in shared storage" : "in this browser"}`,
+      system: `Search Console Generative AI performance report (Beta), copied from the report page or its export and saved ${state?.shared ? "in shared storage" : "in this browser"}`,
       range: { startDate: saved[0], endDate: saved[saved.length - 1] },
       fetchedAt: last?.at || new Date().toISOString(),
       rowCount: saved.length,
       formula:
-        "Daily impressions come from the export's chart data and are merged by date across imports; a newer import replaces the same dates. " +
-        "Page, country and device totals come from the most recent export and cover only that export's dates, because the export doesn't split them by day.",
-      verifyUrl: `https://search.google.com/search-console/performance/search-analytics?resource_id=${encodeURIComponent(site)}`,
+        "Daily impressions come from the report's chart and are merged by date across updates; a newer update replaces the same dates. " +
+        "Bookmark copies are saved automatically only when the days add up to the report's Total impressions. " +
+        "Page, country and device totals come from the most recent update and cover only its dates, because the report doesn't split them by day.",
+      verifyUrl: reportUrl,
       verifyLabel: "Open Performance in Search Console",
-      verifyHow: "Search Console → Performance → Generative AI features (Beta). Set the same dates; the daily chart should match day for day.",
+      verifyHow: "Search Console → Performance → Open report (Generative AI features). Set the same dates; the daily chart should match day for day.",
     } as Source;
     const share = {
       id: "calc.aiShare",
@@ -113,12 +193,13 @@ export default function AiOverview({ site, gsc }: { site: string; gsc: GscData }
       derivedFrom: ["client.aiImport", "gsc.trend"],
     } as Source;
     return { ...outer, [imported.id]: imported, [share.id]: share };
-  }, [outer, saved, last, state?.shared, site]);
+  }, [outer, saved, last, state?.shared, reportUrl]);
 
   const onFiles = async (list: FileList | null) => {
     if (!list?.length) return;
     setBusy(true);
     setMsg(null);
+    setPending(null);
     try {
       const { parsed, skipped } = await parseAiFiles(Array.from(list));
       if (!parsed.length) throw new Error(`Nothing to import. ${AI_HOW_TO}`);
@@ -148,6 +229,7 @@ export default function AiOverview({ site, gsc }: { site: string; gsc: GscData }
     try {
       await clearAi(site);
       setMsg({ text: "Saved AI data deleted." });
+      setPending(null);
     } catch (e) {
       setMsg({ text: e instanceof Error ? e.message : "Delete failed", error: true });
     }
@@ -161,7 +243,7 @@ export default function AiOverview({ site, gsc }: { site: string; gsc: GscData }
           source: ["client.aiImport"],
           value: cur.covered ? num(cur.total) : "–",
           delta: cur.complete && prev.complete ? <Delta cur={cur.total} prev={prev.total} /> : undefined,
-          sub: cur.complete ? `${gsc.range.startDate} to ${gsc.range.endDate}` : `${cur.covered} of ${cur.expected} days in this period imported`,
+          sub: cur.complete ? `${gsc.range.startDate} to ${gsc.range.endDate}` : `${cur.covered} of ${cur.expected} days in this period saved`,
         },
         {
           label: "Share of Search impressions",
@@ -173,7 +255,7 @@ export default function AiOverview({ site, gsc }: { site: string; gsc: GscData }
           label: "Pages linked by AI",
           source: ["client.aiImport"],
           value: snap ? num(Object.keys(snap.pages).length) : "–",
-          sub: snap ? `latest export, ${snap.from} to ${snap.to}` : "import an export that includes its Pages table",
+          sub: snap ? `latest update, ${snap.from} to ${snap.to}` : "no page list saved yet",
         },
         {
           label: "Days saved",
@@ -189,14 +271,15 @@ export default function AiOverview({ site, gsc }: { site: string; gsc: GscData }
       <Section
         title="AI visibility in Google Search"
         source={saved.length ? ["client.aiImport"] : undefined}
-        lede="How often Google's AI Overviews and AI Mode linked to this site, from Search Console's Generative AI features report (Beta). Google offers this report only in the Search Console interface, not through its API, so it's imported from the report's export. It counts impressions only: Google doesn't share clicks or the questions asked."
+        lede="How often Google's AI Overviews and AI Mode linked to this site, from Search Console's Generative AI features report (Beta). Google offers this report only in the Search Console interface, not through its API, so it's copied from the report page or its export. It counts impressions only: Google doesn't share clicks or the questions asked."
       >
+        {waiting && <div className="notice">Waiting for data from the “Copy AI impressions” bookmark…</div>}
         {state?.note && <div className="notice error">{state.note}</div>}
         {state && !state.shared && !state.note && (
-          <div className="notice">Shared storage isn&apos;t set up, so imported AI data is saved only in this browser.</div>
+          <div className="notice">Shared storage isn&apos;t set up, so AI data is saved only in this browser.</div>
         )}
         {!state && <p className="muted">Loading saved AI impressions…</p>}
-        {state && !saved.length && <div className="notice">No Generative AI report has been imported for this property yet. {AI_HOW_TO}</div>}
+        {state && !saved.length && <div className="notice">No AI impressions saved for this property yet. Use the bookmark below, or import an export.</div>}
 
         {saved.length > 0 && (
           <>
@@ -220,7 +303,7 @@ export default function AiOverview({ site, gsc }: { site: string; gsc: GscData }
               </ResponsiveContainer>
               {!cur.complete && (
                 <p className="muted" style={{ marginBottom: 0 }}>
-                  {cur.expected - cur.covered} days in this period have no imported data. Import a newer or longer export to fill them.
+                  {cur.expected - cur.covered} days in this period have no saved data. Update with the bookmark or a longer export to fill them.
                 </p>
               )}
             </div>
@@ -233,9 +316,9 @@ export default function AiOverview({ site, gsc }: { site: string; gsc: GscData }
                 </div>
                 <div className="panel">
                   <PanelTitle source={["client.aiImport"]}>Countries</PanelTitle>
-                  {Object.keys(snap.countries).length ? <Bars items={top(snap.countries, 10)} color="#5e35b1" /> : <p className="muted">Not in this export.</p>}
+                  {Object.keys(snap.countries).length ? <Bars items={top(snap.countries, 10)} color="#5e35b1" /> : <p className="muted">Only in exports.</p>}
                   <PanelTitle source={["client.aiImport"]}>Devices</PanelTitle>
-                  {Object.keys(snap.devices).length ? <Bars items={top(snap.devices, 5)} color="#9bb0d9" /> : <p className="muted">Not in this export.</p>}
+                  {Object.keys(snap.devices).length ? <Bars items={top(snap.devices, 5)} color="#9bb0d9" /> : <p className="muted">Only in exports.</p>}
                 </div>
               </div>
             )}
@@ -243,9 +326,49 @@ export default function AiOverview({ site, gsc }: { site: string; gsc: GscData }
         )}
 
         <div className="panel" style={{ marginTop: 16 }}>
-          <PanelTitle>Import the Generative AI report</PanelTitle>
-          <p className="muted" style={{ marginTop: 0 }}>{AI_HOW_TO}</p>
-          <div className="row">
+          <PanelTitle>Update AI impressions</PanelTitle>
+
+          <h4 style={{ margin: "4px 0 8px" }}>Update with one click (no export)</h4>
+          <ol style={{ marginTop: 0, paddingLeft: 20 }}>
+            <li>
+              One time only: drag this button to your browser&apos;s bookmarks bar{" "}
+              <a ref={bmRef} className="btn" onClick={(e) => e.preventDefault()} title="Drag me to the bookmarks bar">
+                Copy AI impressions
+              </a>{" "}
+              (if dragging doesn&apos;t work,{" "}
+              <button type="button" className="btn small" onClick={copyCode}>
+                {codeCopied ? "Copied" : "copy its code"}
+              </button>{" "}
+              and create a bookmark with that code as the URL).
+            </li>
+            <li>
+              Open{" "}
+              <a href={reportUrl} target="_blank" rel="noreferrer">
+                Performance for this property
+              </a>
+              , click <strong>Open report</strong> in the generative AI box, choose the longest date range, wait for the chart, then click the
+              bookmark. The dashboard opens in a new tab, checks that the days add up to Total impressions, and saves them for everyone.
+            </li>
+          </ol>
+
+          <details>
+            <summary>The browser blocked the new tab? Paste instead</summary>
+            <textarea
+              value={paste}
+              onChange={(e) => setPaste(e.target.value)}
+              rows={4}
+              style={{ width: "100%", marginTop: 8 }}
+              placeholder="Paste what the bookmark copied"
+              aria-label="Paste AI impressions"
+            />
+            <button className="btn" disabled={busy || !paste.trim() || !state} onClick={() => takeCapture(paste)}>
+              Paste AI impressions
+            </button>
+          </details>
+
+          <details style={{ marginTop: 8 }}>
+            <summary>Or import Search Console export files</summary>
+            <p className="muted">{AI_HOW_TO}</p>
             <input
               ref={fileRef}
               type="file"
@@ -255,7 +378,15 @@ export default function AiOverview({ site, gsc }: { site: string; gsc: GscData }
               onChange={(e) => onFiles(e.target.files)}
               aria-label="Choose Generative AI report export files"
             />
+          </details>
+
+          <div className="row" style={{ marginTop: 12 }}>
             {busy && <span className="muted">Working…</span>}
+            {pending && (
+              <button className="btn" onClick={savePending} disabled={busy}>
+                Save anyway
+              </button>
+            )}
             {saved.length > 0 && (
               <button className="btn" onClick={clearAll} disabled={busy}>
                 Delete saved AI data
@@ -269,7 +400,7 @@ export default function AiOverview({ site, gsc }: { site: string; gsc: GscData }
           )}
           {history.length > 0 && (
             <div style={{ marginTop: 12 }}>
-              <DataTable rows={history} cols={HISTORY_COLS} pageSize={5} empty="No imports yet." />
+              <DataTable rows={history} cols={HISTORY_COLS} pageSize={5} empty="No updates yet." />
             </div>
           )}
         </div>
