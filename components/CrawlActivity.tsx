@@ -132,7 +132,10 @@ export default function CrawlActivity({
           setMsg({ text: `${res.summary} Saved${shared ? " for everyone" : " in this browser"}.` });
         } else {
           addPending(res.items);
-          setMsg({ text: `${res.summary} Check the numbers below against Search Console, then click Save.`, error: true });
+          setMsg({
+            text: `${res.summary} Check the numbers in “Update crawl stats” at the bottom of this page against Search Console, then click Save.`,
+            error: true,
+          });
         }
       } catch (e) {
         setMsg({ text: e instanceof Error ? e.message : "Couldn't read the crawl data", error: true });
@@ -382,9 +385,11 @@ export default function CrawlActivity({
           </p>
         )}
 
-        <div className="notice" style={{ marginBottom: 16 }}>
-          <strong>Where these numbers come from</strong>
-          <ul style={{ margin: "8px 0 0", paddingLeft: 18 }}>
+        <details className="notice" style={{ marginBottom: 16 }}>
+          <summary>
+            <strong>Where these numbers come from</strong>
+          </summary>
+          <ul style={{ margin: "0", paddingLeft: 18 }}>
             <li>
               <strong>Google has no API for the Crawl stats report</strong>, so no app can fetch it on its own. Someone signed in to Search Console
               clicks the “Copy crawl stats” bookmark on the report (about once a week), and the numbers are saved here for everyone. They are
@@ -397,95 +402,17 @@ export default function CrawlActivity({
               <strong>It covers Google's crawlers only</strong> (Googlebot smartphone, desktop, image and so on), not other bots.
             </li>
           </ul>
-        </div>
-
-        <div className="panel">
-          <PanelTitle>Update crawl stats</PanelTitle>
-
-          {all.length > 0 && !pending ? (
-            <details>
-              <summary>How to update</summary>
-              <div style={{ marginTop: 8 }}>{howTo}</div>
-            </details>
-          ) : (
-            howTo
-          )}
-
-          {store && store.imports.length > 0 && !pending && (
-            <div className="row" style={{ marginTop: 12 }}>
-              <button className="btn" onClick={clearAll}>Delete saved crawl data</button>
-            </div>
-          )}
-
-          {pending && (
-            <div style={{ marginTop: 14 }}>
-              <p style={{ margin: "0 0 8px" }}>
-                <b>Check each item, then save.</b> Change the type if it's wrong.
-              </p>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Source</th>
-                      <th>This is</th>
-                      <th>Dates</th>
-                      <th className="num">Days</th>
-                      <th className="num">Crawl requests</th>
-                      <th className="num">Example URLs</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pending.map((p, i) => (
-                      <tr key={`${p.file}-${i}`}>
-                        <td className="url">
-                          {p.file}
-                          {p.note && <div className="muted">{p.note}</div>}
-                        </td>
-                        <td>
-                          <select
-                            value={p.choice}
-                            onChange={(e) => setPending((prev) => prev!.map((x, j) => (j === i ? { ...x, choice: e.target.value as SeriesKind } : x)))}
-                          >
-                            {KINDS.map((kd) => (
-                              <option key={kd} value={kd}>{KIND_LABEL[kd]}</option>
-                            ))}
-                          </select>
-                          {p.choice === "other" && (
-                            <input
-                              style={{ marginLeft: 6, width: 160 }}
-                              value={p.otherLabel}
-                              placeholder="e.g. OK (200)"
-                              onChange={(e) => setPending((prev) => prev!.map((x, j) => (j === i ? { ...x, otherLabel: e.target.value } : x)))}
-                              aria-label="Name of this breakdown"
-                            />
-                          )}
-                        </td>
-                        <td>{p.from ? `${p.from} to ${p.to}` : "–"}</td>
-                        <td className="num">{num(Object.keys(p.days).length)}</td>
-                        <td className="num">{num(p.total)}</td>
-                        <td className="num">{num(p.urls.length)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <div className="row" style={{ marginTop: 10 }}>
-                <button className="btn primary" onClick={confirmImport}>Save</button>
-                <button className="btn" onClick={() => setPending(null)}>Cancel</button>
-              </div>
-            </div>
-          )}
-        </div>
+        </details>
 
         {store && all.length === 0 && !pending && (
-          <div className="notice" style={{ marginTop: 16 }}>
-            No crawl data saved for this property yet. Open Crawl stats in Search Console and click the “Copy crawl stats” bookmark.
+          <div className="notice">
+            No crawl data saved for this property yet. Follow the steps in “Update crawl stats” at the bottom of this page.
           </div>
         )}
 
         {all.length > 0 && (
           <>
-            <div className="row" style={{ marginTop: 16, alignItems: "center" }}>
+            <div className="row" style={{ alignItems: "center" }}>
               <label className="control" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
                 Show
                 <select value={win} onChange={(e) => setWin(Number(e.target.value))}>
@@ -577,10 +504,10 @@ export default function CrawlActivity({
       <Section
         title="How recently pages were crawled"
         source={recency ? ["client.indexScan"] : undefined}
-        lede="From the URL Inspection results saved in this browser (Indexing tab and Live index monitor): the last time Googlebot crawled each inspected page. Updates automatically as more pages are inspected; it covers inspected pages only and shows the last crawl, not how many times."
+        lede="From the URL Inspection results saved in this browser: the last time Googlebot crawled each inspected page. It covers inspected pages only and shows the last crawl, not how many times."
       >
         {!recency || recency.inspected === 0 ? (
-          <div className="notice">No inspected pages yet in this browser. Inspect pages in the Indexing tab, or start the Live index monitor.</div>
+          <div className="notice">No inspected pages saved in this browser yet.</div>
         ) : (
           <>
             <Kpis
@@ -673,6 +600,84 @@ export default function CrawlActivity({
             />
           </div>
         )}
+      </Section>
+
+      <Section title="Update crawl stats">
+        <div className="panel">
+          {all.length > 0 && !pending ? (
+            <details>
+              <summary>How to update</summary>
+              <div style={{ marginTop: 8 }}>{howTo}</div>
+            </details>
+          ) : (
+            howTo
+          )}
+
+          {store && store.imports.length > 0 && !pending && (
+            <div className="row" style={{ marginTop: 12 }}>
+              <button className="btn" onClick={clearAll}>Delete saved crawl data</button>
+            </div>
+          )}
+
+          {pending && (
+            <div style={{ marginTop: 14 }}>
+              <p style={{ margin: "0 0 8px" }}>
+                <b>Check each item, then save.</b> Change the type if it's wrong.
+              </p>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Source</th>
+                      <th>This is</th>
+                      <th>Dates</th>
+                      <th className="num">Days</th>
+                      <th className="num">Crawl requests</th>
+                      <th className="num">Example URLs</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pending.map((p, i) => (
+                      <tr key={`${p.file}-${i}`}>
+                        <td className="url">
+                          {p.file}
+                          {p.note && <div className="muted">{p.note}</div>}
+                        </td>
+                        <td>
+                          <select
+                            value={p.choice}
+                            onChange={(e) => setPending((prev) => prev!.map((x, j) => (j === i ? { ...x, choice: e.target.value as SeriesKind } : x)))}
+                          >
+                            {KINDS.map((kd) => (
+                              <option key={kd} value={kd}>{KIND_LABEL[kd]}</option>
+                            ))}
+                          </select>
+                          {p.choice === "other" && (
+                            <input
+                              style={{ marginLeft: 6, width: 160 }}
+                              value={p.otherLabel}
+                              placeholder="e.g. OK (200)"
+                              onChange={(e) => setPending((prev) => prev!.map((x, j) => (j === i ? { ...x, otherLabel: e.target.value } : x)))}
+                              aria-label="Name of this breakdown"
+                            />
+                          )}
+                        </td>
+                        <td>{p.from ? `${p.from} to ${p.to}` : "–"}</td>
+                        <td className="num">{num(Object.keys(p.days).length)}</td>
+                        <td className="num">{num(p.total)}</td>
+                        <td className="num">{num(p.urls.length)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="row" style={{ marginTop: 10 }}>
+                <button className="btn primary" onClick={confirmImport}>Save</button>
+                <button className="btn" onClick={() => setPending(null)}>Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
       </Section>
     </SourcesProvider>
   );
