@@ -305,4 +305,26 @@ export function parseAiCapture(text: string, site: string): AiCaptureResult {
 
   const summary =
     `${total.toLocaleString()} AI impressions, ${dates[0]} to ${dates[dates.length - 1]}` +
-    ` ·
+    ` · ${nP.toLocaleString()} pages · ${nC} countries · ${nD} devices`;
+  const problem = verified
+    ? undefined
+    : tile
+      ? `The days add up to ${total.toLocaleString()}, not the report's Total impressions (${cap.tiles?.impressions}), so nothing was saved. Check the date range on the report and click the bookmark again, or save anyway.`
+      : "The report's Total impressions couldn't be read, so the numbers couldn't be checked and nothing was saved. Click the bookmark again, or save anyway.";
+
+  return {
+    item: {
+      file: `Bookmark, ${new Date(cap.capturedAt).toLocaleString()}`,
+      from: dates[0],
+      to: dates[dates.length - 1],
+      days,
+      pages,
+      countries,
+      devices,
+    },
+    verified,
+    summary,
+    notes,
+    problem,
+  };
+}
