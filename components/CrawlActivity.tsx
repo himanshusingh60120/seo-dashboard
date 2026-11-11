@@ -344,6 +344,22 @@ export default function CrawlActivity({
     };
   }, [cache]);
 
+  /** Bookmark, paste and export steps: shown open until data is saved, folded away under "How to update" after that. */
+  const howTo = (
+    <>
+      <CrawlPaste statsUrl={crawlStatsUrl(site)} onText={handleCapture} />
+
+      <details style={{ marginTop: 14 }}>
+        <summary className="muted">Or import Search Console export files</summary>
+        <p className="muted">{HOW_TO_EXPORT}</p>
+        <div className="row" style={{ alignItems: "center" }}>
+          <input ref={fileRef} type="file" accept=".zip,.csv" multiple onChange={(e) => onFiles(e.target.files)} disabled={busy} aria-label="Choose Crawl stats export files" />
+          {busy && <span className="muted">Reading files…</span>}
+        </div>
+      </details>
+    </>
+  );
+
   return (
     <SourcesProvider value={merged}>
       <Section
@@ -386,16 +402,14 @@ export default function CrawlActivity({
         <div className="panel">
           <PanelTitle>Update crawl stats</PanelTitle>
 
-          <CrawlPaste statsUrl={crawlStatsUrl(site)} onText={handleCapture} />
-
-          <details style={{ marginTop: 14 }}>
-            <summary className="muted">Or import Search Console export files</summary>
-            <p className="muted">{HOW_TO_EXPORT}</p>
-            <div className="row" style={{ alignItems: "center" }}>
-              <input ref={fileRef} type="file" accept=".zip,.csv" multiple onChange={(e) => onFiles(e.target.files)} disabled={busy} aria-label="Choose Crawl stats export files" />
-              {busy && <span className="muted">Reading files…</span>}
-            </div>
-          </details>
+          {all.length > 0 && !pending ? (
+            <details>
+              <summary>How to update</summary>
+              <div style={{ marginTop: 8 }}>{howTo}</div>
+            </details>
+          ) : (
+            howTo
+          )}
 
           {store && store.imports.length > 0 && !pending && (
             <div className="row" style={{ marginTop: 12 }}>
