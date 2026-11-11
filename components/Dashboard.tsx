@@ -9,8 +9,8 @@ import { DEFAULT_DAYS, WINDOWS, yoyAllowed, type Compare } from "@/lib/dates";
 import { SourcesProvider } from "./ui";
 import Overview from "./Overview";
 import Rankings from "./Rankings";
-import Indexing from "./Indexing";
 import IndexReport from "./IndexReport";
+import UrlCheck from "./UrlCheck";
 import CrawlActivity from "./CrawlActivity";
 import Queries from "./Queries";
 import QueryGrowth from "./QueryGrowth";
@@ -88,8 +88,6 @@ export default function Dashboard() {
   const [aiWaiting, setAiWaiting] = useState(false);
   const [idxInbox, setIdxInbox] = useState<string | null>(null); // Copy page indexing
   const [idxWaiting, setIdxWaiting] = useState(false);
-  // "Check specific URLs" (URL Inspection) loads only when asked for
-  const [showChecks, setShowChecks] = useState(false);
 
   // Every source behind the numbers on screen, so any "Source" button can explain itself
   const sources = useMemo<Sources>(() => {
@@ -100,7 +98,6 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (site) loadIndexCache(site).then(bumpIndex);
-    setShowChecks(false);
   }, [site, bumpIndex]);
 
   // The audit tab is shown only to the audit account; every audit API route checks the account again.
@@ -395,20 +392,7 @@ export default function Dashboard() {
                 waiting={idxWaiting || (!!idxInbox && !idxInboxReady)}
                 onInboxHandled={idxInboxHandled}
               />
-              <section className="section">
-                <h2>Check specific URLs</h2>
-                <p className="lede">
-                  Look up individual pages with Google&apos;s URL Inspection API: whether each one is indexed, when it was last crawled, and why
-                  not. Useful for new or changed pages; the numbers above are the complete counts.
-                </p>
-                {showChecks ? (
-                  <Indexing site={site} onChange={bumpIndex} />
-                ) : (
-                  <button className="btn" onClick={() => setShowChecks(true)}>
-                    Show URL checks
-                  </button>
-                )}
-              </section>
+              <UrlCheck site={site} />
             </>
           )}
 
