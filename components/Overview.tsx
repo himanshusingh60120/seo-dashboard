@@ -2,12 +2,14 @@
 "use client";
 import { useEffect, useState } from "react";
 import type { GscData, Ga4Data } from "@/lib/types";
+import type { Compare } from "@/lib/dates";
 import { Kpis, Delta, Section, PanelTitle, num, pct, pos, KpiItem } from "./ui";
 import { SearchTrend, PositionTrend, TrafficTrend } from "./Charts";
 import { loadIndexCache, classify } from "@/lib/indexCache";
 import { useIdxStore } from "@/lib/indexCapture";
 import { latestIdxDay } from "@/lib/indexStats";
 import AiOverview from "./AiImpressions";
+import AiTraffic from "./AiTraffic";
 
 export default function Overview({
   gsc,
@@ -15,6 +17,9 @@ export default function Overview({
   gaError,
   hasGa4,
   site,
+  ga4,
+  days,
+  compare,
   aiInbox = null,
   aiWaiting = false,
   onAiInboxHandled,
@@ -24,6 +29,10 @@ export default function Overview({
   gaError: string | null;
   hasGa4: boolean;
   site: string;
+  /** GA4 property id chosen in the top bar ("" when none). */
+  ga4: string;
+  days: number;
+  compare: Compare;
   /** Data sent by the "Copy AI impressions" bookmark. */
   aiInbox?: string | null;
   aiWaiting?: boolean;
@@ -89,6 +98,8 @@ export default function Overview({
       </Section>
 
       <AiOverview site={site} gsc={gsc} inbox={aiInbox} waiting={aiWaiting} onInboxHandled={onAiInboxHandled} />
+
+      <AiTraffic site={site} ga4={ga4} days={days} compare={compare} />
 
       <Section
         title="Site traffic"
