@@ -420,6 +420,9 @@ export default function Dashboard() {
               gaError={gaError}
               hasGa4={!!ga4}
               site={site}
+              ga4={ga4} // NEW: for "Visits from AI assistants"
+              days={days} // NEW
+              compare={compare} // NEW
               aiInbox={aiInboxReady ? aiInbox : null}
               aiWaiting={aiWaiting || (!!aiInbox && !aiInboxReady)}
               onAiInboxHandled={aiInboxHandled}
