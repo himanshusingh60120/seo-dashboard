@@ -7,13 +7,13 @@ import { CartesianGrid, ComposedChart, Legend, Line, ResponsiveContainer, Toolti
 import type { GscData, Source, Sources } from "@/lib/types";
 import { AI_HOW_TO, clearAi, parseAiFiles, saveAi, useAiStore } from "@/lib/aiImpressions";
 import { aiBookmarkletFor, parseAiCapture } from "@/lib/aiCapture";
-import { aiSum, latestAiSnapshot, type AiParsed } from "@/lib/aiStore";
+import { AI_MAX_PAGES, aiSum, latestAiSnapshot, type AiParsed } from "@/lib/aiStore";
 import { Bars, DataTable, Delta, Kpis, PanelTitle, Section, SourcesProvider, num, pct, useSources, type Col, type KpiItem } from "./ui";
 
 const axis = { fontSize: 12, fill: "#5b6573" };
+const DAY = 864e5;
 
 type PageAiRow = { url: string; impressions: number; share: number };
-type HistoryRow = { at: string; by: string; file: string; dates: string; days: number; pages: number };
 
 const PAGE_COLS: Col<PageAiRow>[] = [
   { key: "url", label: "Page", url: true },
@@ -21,20 +21,19 @@ const PAGE_COLS: Col<PageAiRow>[] = [
   { key: "share", label: "Share of listed", num: true, render: (r) => pct(r.share) },
 ];
 
-const HISTORY_COLS: Col<HistoryRow>[] = [
-  { key: "at", label: "Imported" },
-  { key: "by", label: "By" },
-  { key: "dates", label: "Dates" },
-  { key: "days", label: "Days", num: true },
-  { key: "pages", label: "Pages", num: true },
-  { key: "file", label: "Source" },
-];
-
 const top = (m: Record<string, number> | undefined, n: number) =>
   Object.entries(m || {})
     .sort((a, b) => b[1] - a[1])
     .slice(0, n)
     .map(([label, value]) => ({ label, value }));
+
+const ago = (iso: string) => {
+  const t = Date.parse(iso);
+  if (isNaN(t)) return "";
+  const d = (Date.now() - t) / DAY;
+  if (d < 1 / 24) return "just now";
+  return d < 1 ? `${Math.max(1, Math.round(d * 24))} h ago` : `${Math.round(d)} day${Math.round(d) === 1 ? "" : "s"} ago`;
+};
 
 export default function AiOverview({
   site,
@@ -83,13 +82,14 @@ export default function AiOverview({
       setPending(null);
       try {
         const r = parseAiCapture(text, site);
+        const notes = r.notes.length ? ` ${r.notes.join(" ")}` : "";
         if (r.verified) {
-          const s = await saveAi(site, [r.item]);
-          setMsg({ text: `${r.summary} Saved ${s.shared ? "for everyone" : "in this browser only"}.` });
+          await saveAi(site, [r.item]);
+          setMsg({ text: `Updated: ${r.summary}.${notes}` });
           setPaste("");
         } else {
           setPending(r.item);
-          setMsg({ text: r.summary, error: true });
+          setMsg({ text: `${r.problem}${notes}`, error: true });
         }
       } catch (e) {
         setMsg({ text: e instanceof Error ? e.message : "Couldn't read the data", error: true });
@@ -110,8 +110,8 @@ export default function AiOverview({
     if (!pending) return;
     setBusy(true);
     try {
-      const s = await saveAi(site, [pending]);
-      setMsg({ text: `Saved anyway ${s.shared ? "for everyone" : "in this browser only"}. Compare the chart with Search Console to be sure.` });
+      await saveAi(site, [pending]);
+      setMsg({ text: "Saved anyway. Compare the chart with Search Console to be sure." });
       setPending(null);
       setPaste("");
     } catch (e) {
@@ -148,22 +148,6 @@ export default function AiOverview({
     const tot = Object.values(snap.pages).reduce((a, b) => a + b, 0) || 1;
     return Object.entries(snap.pages).map(([url, impressions]) => ({ url, impressions, share: impressions / tot }));
   }, [snap]);
-
-  const history = useMemo<HistoryRow[]>(
-    () =>
-      (store?.imports || [])
-        .slice()
-        .reverse()
-        .map((i) => ({
-          at: new Date(i.at).toLocaleString(),
-          by: i.by || "this browser",
-          file: i.file,
-          dates: `${i.from} to ${i.to}`,
-          days: i.days,
-          pages: i.pages,
-        })),
-    [store]
-  );
 
   const sources = useMemo<Sources>(() => {
     if (!saved.length) return outer;
@@ -203,19 +187,14 @@ export default function AiOverview({
     try {
       const { parsed, skipped } = await parseAiFiles(Array.from(list));
       if (!parsed.length) throw new Error(`Nothing to import. ${AI_HOW_TO}`);
-      const s = await saveAi(site, parsed);
+      await saveAi(site, parsed);
       const summary = parsed
         .map((p) => {
           const total = Object.values(p.days).reduce((a, b) => a + b, 0);
-          return `${p.file}: ${p.from} to ${p.to}, ${num(total)} AI impressions, ${num(Object.keys(p.pages).length)} pages`;
+          return `${num(total)} AI impressions, ${p.from} to ${p.to} · ${num(Object.keys(p.pages).length)} pages · ${Object.keys(p.countries).length} countries · ${Object.keys(p.devices).length} devices`;
         })
         .join("; ");
-      setMsg({
-        text:
-          `Imported into ${site}. ${summary}.` +
-          (skipped.length ? ` Skipped ${skipped.join(", ")} (only ZIP and CSV files are read).` : "") +
-          ` Saved ${s.shared ? "for everyone" : "in this browser only"}.`,
-      });
+      setMsg({ text: `Imported: ${summary}.${skipped.length ? ` Skipped ${skipped.join(", ")} (only ZIP and CSV files are read).` : ""}` });
     } catch (e) {
       setMsg({ text: e instanceof Error ? e.message : "Couldn't read the files", error: true });
     }
@@ -281,6 +260,13 @@ export default function AiOverview({
         {!state && <p className="muted">Loading saved AI impressions…</p>}
         {state && !saved.length && <div className="notice">No AI impressions saved for this property yet. Use the bookmark below, or import an export.</div>}
 
+        {last && (
+          <p className="muted" style={{ marginTop: 0 }}>
+            Last updated {new Date(last.at).toLocaleString()} ({ago(last.at)}){last.by ? ` by ${last.by}` : ""}
+            {state?.shared ? " · saved for everyone" : ""}.
+          </p>
+        )}
+
         {saved.length > 0 && (
           <>
             <Kpis items={kpis} />
@@ -309,10 +295,20 @@ export default function AiOverview({
             </div>
 
             {snap && (
-              <div className="grid-2" style={{ marginTop: 16 }}>
-                <div className="panel">
+              <div className="grid-2" style={{ marginTop: 16, alignItems: "stretch" }}>
+                {/* Pages: fills the height set by the Countries/Devices panel and scrolls inside. */}
+                <div className="panel" style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
                   <PanelTitle source={["client.aiImport"]}>{`Pages linked by AI, ${snap.from} to ${snap.to}`}</PanelTitle>
-                  <DataTable rows={pageRows} cols={PAGE_COLS} initialSort="impressions" pageSize={10} csvName="ai-impressions-pages.csv" source={["client.aiImport"]} />
+                  <div style={{ flex: "1 1 0", minHeight: 320, overflowY: "auto" }}>
+                    <DataTable
+                      rows={pageRows}
+                      cols={PAGE_COLS}
+                      initialSort="impressions"
+                      pageSize={AI_MAX_PAGES}
+                      csvName="ai-impressions-pages.csv"
+                      source={["client.aiImport"]}
+                    />
+                  </div>
                 </div>
                 <div className="panel">
                   <PanelTitle source={["client.aiImport"]}>Countries</PanelTitle>
@@ -321,12 +317,14 @@ export default function AiOverview({
                   ) : (
                     <p className="muted">Not in the latest update. Click the bookmark again.</p>
                   )}
-                  <PanelTitle source={["client.aiImport"]}>Devices</PanelTitle>
-                  {Object.keys(snap.devices).length ? (
-                    <Bars items={top(snap.devices, 5)} color="#9bb0d9" />
-                  ) : (
-                    <p className="muted">Not in the latest update. Click the bookmark again.</p>
-                  )}
+                  <div style={{ marginTop: 16 }}>
+                    <PanelTitle source={["client.aiImport"]}>Devices</PanelTitle>
+                    {Object.keys(snap.devices).length ? (
+                      <Bars items={top(snap.devices, 5)} color="#9bb0d9" />
+                    ) : (
+                      <p className="muted">Not in the latest update. Click the bookmark again.</p>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
@@ -354,9 +352,8 @@ export default function AiOverview({
               <a href={reportUrl} target="_blank" rel="noreferrer">
                 Performance for this property
               </a>
-              , click <strong>Open report</strong> in the generative AI box, choose the longest date range, wait for the chart, then click the
-              bookmark. It reads the Pages, Countries and Devices tabs; the dashboard opens in a new tab, checks that the days add up to Total
-              impressions, and saves everything for everyone.
+              , click <strong>Open report</strong> in the generative AI box, wait for the chart, then click the bookmark. It reads the Pages,
+              Countries and Devices tabs, then the dashboard opens in a new tab, checks the numbers and saves them for everyone.
             </li>
           </ol>
 
@@ -406,11 +403,6 @@ export default function AiOverview({
             <p className={msg.error ? "notice error" : "muted"} style={{ marginBottom: 0 }}>
               {msg.text}
             </p>
-          )}
-          {history.length > 0 && (
-            <div style={{ marginTop: 12 }}>
-              <DataTable rows={history} cols={HISTORY_COLS} pageSize={5} empty="No updates yet." />
-            </div>
           )}
         </div>
       </Section>
