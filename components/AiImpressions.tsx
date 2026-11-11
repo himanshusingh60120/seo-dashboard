@@ -245,6 +245,63 @@ export default function AiOverview({
       ]
     : [];
 
+  /** Bookmark, paste and export steps: shown open when nothing is saved yet, folded away under "How to update" otherwise. */
+  const howTo = (
+    <>
+      <h4 style={{ margin: "4px 0 8px" }}>Update with one click (no export)</h4>
+      <ol style={{ marginTop: 0, paddingLeft: 20 }}>
+        <li>
+          One time only: drag this button to your browser&apos;s bookmarks bar{" "}
+          <a ref={bmRef} className="btn" onClick={(e) => e.preventDefault()} title="Drag me to the bookmarks bar">
+            Copy AI impressions
+          </a>{" "}
+          (if dragging doesn&apos;t work,{" "}
+          <button type="button" className="btn small" onClick={copyCode}>
+            {codeCopied ? "Copied" : "copy its code"}
+          </button>{" "}
+          and create a bookmark with that code as the URL). Replace any older “Copy AI impressions” bookmark.
+        </li>
+        <li>
+          Open{" "}
+          <a href={reportUrl} target="_blank" rel="noreferrer">
+            Performance for this property
+          </a>
+          , click <strong>Open report</strong> in the generative AI box, press F5 to reload it, wait for the chart, then click the bookmark. It
+          reads the Pages, Countries and Devices tabs, then the dashboard opens in a new tab, checks the numbers and saves them for everyone.
+        </li>
+      </ol>
+
+      <details>
+        <summary>The browser blocked the new tab? Paste instead</summary>
+        <textarea
+          value={paste}
+          onChange={(e) => setPaste(e.target.value)}
+          rows={4}
+          style={{ width: "100%", marginTop: 8 }}
+          placeholder="Paste what the bookmark copied"
+          aria-label="Paste AI impressions"
+        />
+        <button className="btn" disabled={busy || !paste.trim() || !state} onClick={() => takeCapture(paste)}>
+          Paste AI impressions
+        </button>
+      </details>
+
+      <details style={{ marginTop: 8 }}>
+        <summary>Or import Search Console export files</summary>
+        <p className="muted">{AI_HOW_TO}</p>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".zip,.csv"
+          multiple
+          disabled={busy || !state}
+          onChange={(e) => onFiles(e.target.files)}
+          aria-label="Choose Generative AI report export files"
+        />
+      </details>
+    </>
+  );
+
   return (
     <SourcesProvider value={sources}>
       <Section
@@ -258,14 +315,7 @@ export default function AiOverview({
           <div className="notice">Shared storage isn&apos;t set up, so AI data is saved only in this browser.</div>
         )}
         {!state && <p className="muted">Loading saved AI impressions…</p>}
-        {state && !saved.length && <div className="notice">No AI impressions saved for this property yet. Use the bookmark below, or import an export.</div>}
-
-        {last && (
-          <p className="muted" style={{ marginTop: 0 }}>
-            Last updated {new Date(last.at).toLocaleString()} ({ago(last.at)}){last.by ? ` by ${last.by}` : ""}
-            {state?.shared ? " · saved for everyone" : ""}.
-          </p>
-        )}
+        {state && !saved.length && <div className="notice">No AI impressions saved for this property yet. Follow the steps below to add them.</div>}
 
         {saved.length > 0 && (
           <>
@@ -334,57 +384,27 @@ export default function AiOverview({
         <div className="panel" style={{ marginTop: 16 }}>
           <PanelTitle>Update AI impressions</PanelTitle>
 
-          <h4 style={{ margin: "4px 0 8px" }}>Update with one click (no export)</h4>
-          <ol style={{ marginTop: 0, paddingLeft: 20 }}>
-            <li>
-              One time only: drag this button to your browser&apos;s bookmarks bar{" "}
-              <a ref={bmRef} className="btn" onClick={(e) => e.preventDefault()} title="Drag me to the bookmarks bar">
-                Copy AI impressions
-              </a>{" "}
-              (if dragging doesn&apos;t work,{" "}
-              <button type="button" className="btn small" onClick={copyCode}>
-                {codeCopied ? "Copied" : "copy its code"}
-              </button>{" "}
-              and create a bookmark with that code as the URL). Replace any older “Copy AI impressions” bookmark.
-            </li>
-            <li>
-              Open{" "}
-              <a href={reportUrl} target="_blank" rel="noreferrer">
-                Performance for this property
-              </a>
-              , click <strong>Open report</strong> in the generative AI box, wait for the chart, then click the bookmark. It reads the Pages,
-              Countries and Devices tabs, then the dashboard opens in a new tab, checks the numbers and saves them for everyone.
-            </li>
-          </ol>
+          {last && (
+            <p style={{ marginTop: 0 }}>
+              Last updated <strong>{new Date(last.at).toLocaleString()}</strong> ({ago(last.at)})
+              {last.by ? (
+                <>
+                  {" "}
+                  by <strong>{last.by}</strong>
+                </>
+              ) : null}
+              <span className="muted">{state?.shared ? " · saved for everyone" : " · saved in this browser"}</span>
+            </p>
+          )}
 
-          <details>
-            <summary>The browser blocked the new tab? Paste instead</summary>
-            <textarea
-              value={paste}
-              onChange={(e) => setPaste(e.target.value)}
-              rows={4}
-              style={{ width: "100%", marginTop: 8 }}
-              placeholder="Paste what the bookmark copied"
-              aria-label="Paste AI impressions"
-            />
-            <button className="btn" disabled={busy || !paste.trim() || !state} onClick={() => takeCapture(paste)}>
-              Paste AI impressions
-            </button>
-          </details>
-
-          <details style={{ marginTop: 8 }}>
-            <summary>Or import Search Console export files</summary>
-            <p className="muted">{AI_HOW_TO}</p>
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".zip,.csv"
-              multiple
-              disabled={busy || !state}
-              onChange={(e) => onFiles(e.target.files)}
-              aria-label="Choose Generative AI report export files"
-            />
-          </details>
+          {saved.length > 0 ? (
+            <details>
+              <summary>How to update</summary>
+              <div style={{ marginTop: 8 }}>{howTo}</div>
+            </details>
+          ) : (
+            howTo
+          )}
 
           <div className="row" style={{ marginTop: 12 }}>
             {busy && <span className="muted">Working…</span>}
