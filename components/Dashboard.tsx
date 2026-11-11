@@ -6,11 +6,13 @@ import type { GscData, Ga4Data, Properties, Sources } from "@/lib/types";
 import { indexScanSource, loadIndexCache, peekIndexCache } from "@/lib/indexCache";
 import { downloadJson, fileSafe } from "@/lib/evidence";
 import { DEFAULT_DAYS, WINDOWS, yoyAllowed, type Compare } from "@/lib/dates";
+import { urlInProperty } from "@/lib/url";
 import { SourcesProvider } from "./ui";
 import Overview from "./Overview";
 import Rankings from "./Rankings";
 import IndexReport from "./IndexReport";
 import UrlCheck from "./UrlCheck";
+import UrlReport from "./UrlReport";
 import CrawlActivity from "./CrawlActivity";
 import Queries from "./Queries";
 import QueryGrowth from "./QueryGrowth";
@@ -88,6 +90,11 @@ export default function Dashboard() {
   const [aiWaiting, setAiWaiting] = useState(false);
   const [idxInbox, setIdxInbox] = useState<string | null>(null); // Copy page indexing
   const [idxWaiting, setIdxWaiting] = useState(false);
+  // "Look up a URL" in the top bar
+  const [lookupText, setLookupText] = useState("");
+  const [lookup, setLookup] = useState<string | null>(null);
+  const [lookupErr, setLookupErr] = useState<string | null>(null);
+  const closeLookup = useCallback(() => setLookup(null), []);
 
   // Every source behind the numbers on screen, so any "Source" button can explain itself
   const sources = useMemo<Sources>(() => {
@@ -98,6 +105,8 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (site) loadIndexCache(site).then(bumpIndex);
+    setLookup(null);
+    setLookupErr(null);
   }, [site, bumpIndex]);
 
   // The audit tab is shown only to the audit account; every audit API route checks the account again.
@@ -178,6 +187,21 @@ export default function Dashboard() {
     setIdxInbox(null);
     setIdxWaiting(false);
   }, []);
+
+  /** "Look up a URL": accepts a full URL, a path like /blog/x, or a URL without https://. */
+  const openLookup = (e: React.FormEvent) => {
+    e.preventDefault();
+    const raw = lookupText.trim();
+    if (!raw || !site) return;
+    const base = site.startsWith("sc-domain:") ? `https://${site.slice(10)}` : site.replace(/\/$/, "");
+    const u = /^https?:\/\//i.test(raw) ? raw : raw.startsWith("/") ? base + raw : `https://${raw}`;
+    if (!urlInProperty(site, u)) {
+      setLookupErr(`${u} isn't part of ${site.replace(/\/$/, "")}. Paste a page from this property, or switch property first.`);
+      return;
+    }
+    setLookupErr(null);
+    setLookup(u);
+  };
 
   const downloadEvidence = () => {
     downloadJson(`evidence-${fileSafe(site)}-${new Date().toISOString().slice(0, 10)}.json`, {
@@ -328,6 +352,23 @@ export default function Dashboard() {
             </select>
           </label>
 
+          <form className="control" onSubmit={openLookup}>
+            Look up a URL
+            <div style={{ display: "flex", gap: 6 }}>
+              <input
+                type="search"
+                value={lookupText}
+                onChange={(e) => setLookupText(e.target.value)}
+                placeholder="Paste a page URL from this site"
+                aria-label="Page URL to look up"
+                style={{ minWidth: 260 }}
+              />
+              <button className="btn" type="submit" disabled={!site || !lookupText.trim()}>
+                Look up
+              </button>
+            </div>
+          </form>
+
           <button className="btn" onClick={load} disabled={loading || !site}>{loading ? "Refreshing…" : "Refresh"}</button>
           <button className="btn" onClick={downloadEvidence} disabled={!gsc} title="Download every number with the exact Google API request behind it">
             Download evidence
@@ -350,6 +391,8 @@ export default function Dashboard() {
       <SourcesProvider value={sources}>
         <main>
           {error && <div className="notice error">{error}</div>}
+          {lookupErr && <div className="notice error">{lookupErr}</div>}
+          {lookup && !gsc && <div className="notice">Loading Search Console data before opening {lookup}…</div>}
           {props && props.gsc.length === 0 && (
             <div className="notice">This Google account has no verified Search Console properties. Sign in with an account that has access.</div>
           )}
@@ -439,6 +482,10 @@ export default function Dashboard() {
           {site && tab === "audit" && canAudit && <Audit site={site} />}
         </main>
       </SourcesProvider>
+
+      {lookup && gsc && (
+        <UrlReport site={site} url={lookup} gsc={gsc} ga4={ga4} days={days} compare={compare} onClose={closeLookup} />
+      )}
     </>
   );
 }
