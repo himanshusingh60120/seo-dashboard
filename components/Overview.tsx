@@ -5,6 +5,8 @@ import type { GscData, Ga4Data } from "@/lib/types";
 import { Kpis, Delta, Section, PanelTitle, num, pct, pos, KpiItem } from "./ui";
 import { SearchTrend, PositionTrend, TrafficTrend } from "./Charts";
 import { loadIndexCache, classify } from "@/lib/indexCache";
+import { useIdxStore } from "@/lib/indexCapture";
+import { latestIdxDay } from "@/lib/indexStats";
 import AiOverview from "./AiImpressions";
 
 export default function Overview({
@@ -29,6 +31,8 @@ export default function Overview({
 }) {
   const c = gsc.totals.current, p = gsc.totals.previous;
   const [index, setIndex] = useState<{ indexed: number; notIndexed: number } | null>(null);
+  const idx = useIdxStore(site);
+  const gscIdx = latestIdxDay(idx?.store.views.ALL_URLS);
 
   useEffect(() => {
     let live = true;
@@ -48,12 +52,18 @@ export default function Overview({
     { label: "CTR", source: ["gsc.totals.current", "gsc.totals.previous"], value: pct(c.ctr, 2), delta: <Delta cur={c.ctr * 100} prev={p.ctr * 100} asPoints /> },
     { label: "Avg. position", source: ["gsc.totals.current", "gsc.totals.previous"], value: pos(c.position), delta: <Delta cur={c.position} prev={p.position} invert asPoints /> },
     { label: "Pages in top 10", source: ["calc.buckets"], value: num(gsc.buckets.top10), sub: `of ${num(gsc.pageCount)} pages with impressions` },
-    {
-      label: "Indexed / not indexed",
-      source: index ? ["client.indexScan"] : undefined,
-      value: index ? `${num(index.indexed)} / ${num(index.notIndexed)}` : "–",
-      sub: index ? "from the Indexing tab scan" : "run a scan in the Indexing tab",
-    },
+    gscIdx
+      ? {
+          label: "Indexed / not indexed",
+          value: `${num(gscIdx.indexed)} / ${num(gscIdx.notIndexed)}`,
+          sub: `Search Console, all known pages, ${gscIdx.date}`,
+        }
+      : {
+          label: "Indexed / not indexed",
+          source: index ? ["client.indexScan"] : undefined,
+          value: index ? `${num(index.indexed)} / ${num(index.notIndexed)}` : "–",
+          sub: index ? "estimate from URL checks" : "update it in the Indexing tab",
+        },
   ];
 
   const g = ga?.totals;
