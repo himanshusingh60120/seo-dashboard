@@ -556,30 +556,6 @@ export default function CrawlActivity({
                 />
               </div>
             )}
-
-            {store && store.imports.length > 0 && (
-              <div className="panel" style={{ marginTop: 16 }}>
-                <PanelTitle>Update history</PanelTitle>
-                <DataTable
-                  rows={[...store.imports].reverse().map((x) => ({
-                    ...x,
-                    at: new Date(x.at).toLocaleString(),
-                    by: (x as CrawlImport & { by?: string }).by || "",
-                  }))}
-                  cols={[
-                    { key: "at", label: "Saved" },
-                    { key: "by", label: "By" },
-                    { key: "label", label: "Type" },
-                    { key: "from", label: "From" },
-                    { key: "to", label: "To" },
-                    { key: "days", label: "Days", num: true },
-                    { key: "file", label: "Source" },
-                  ]}
-                  pageSize={10}
-                  empty="Nothing saved yet."
-                />
-              </div>
-            )}
           </>
         )}
       </Section>
