@@ -2,12 +2,11 @@
 "use client";
 /**
  * One-click "Copy AI impressions" bookmark.
- * Clicked on Search Console's Generative AI features report, it reads the daily impressions and the Pages list from the
- * page, opens the Countries and Devices tabs to read those tables too, then opens the dashboard, which checks that the
- * days add up to the page's "Total impressions" and saves everything for everyone.
- * Search Console keeps earlier pages (and their data) in the background, so the bookmark only uses visible tabs and
- * tables, and picks the page list whose numbers match the rows visible on screen.
- * It depends on how Search Console's pages hold their data, which Google can change; the export import stays as the fallback.
+ * Clicked on Search Console's Generative AI features report, it reads the daily impressions, the full Pages list
+ * (from the data in the page, or by paging through the table when that isn't available), and the Countries and Devices
+ * tabs, then opens the dashboard, which checks that the days add up to the page's "Total impressions" and saves
+ * everything for everyone. Search Console keeps earlier pages in the background, so the bookmark only uses visible
+ * tabs and tables. It depends on how Search Console's pages work, which Google can change; the export import stays as the fallback.
  */
 import type { AiParsed } from "./aiStore";
 import { AI_MAX_PAGES } from "./aiStore";
@@ -98,32 +97,73 @@ if(a&&/^\d+$/.test(n))out.push([a,Number(n)]);}
 return out;}
 var DEVW=/\b(desktop|mobile|tablet)\b/i;
 function isUrl(l){return /^https?:\/\/\S+$/.test(l);}
+function urlRowsNow(){return rowsNow().filter(function(r){return isUrl(r[0]);});}
+function sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
+function press(e){['mousedown','mouseup','click'].forEach(function(t){try{e.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));}catch(x){}});}
 function tabEl(name){var els=document.querySelectorAll('[role=tab]');
 for(var i=0;i<els.length;i++)if(vis(els[i])&&(els[i].innerText||'').trim().toUpperCase()===name)return els[i];
 els=document.querySelectorAll('button,a,span,div');
 for(var j=0;j<els.length;j++){var e=els[j];if(e.children.length<=2&&vis(e)&&(e.innerText||'').trim().toUpperCase()===name)return e;}
 return null;}
-function viaTab(name,ok){return new Promise(function(res){var el=tabEl(name);if(!el){res(null);return;}
-try{el.click();}catch(x){res(null);return;}
-var n=0;(function wait(){n++;var rows=rowsNow().filter(function(r){return ok(r[0]);});if(rows.length||n>48)res(rows);else setTimeout(wait,250);})();});}
-var table=rowsNow().filter(function(r){return isUrl(r[0]);});
+function viaTab(name,ok){if(!tabEl(name))return Promise.resolve(null);
+var n=0;return sleep(700).then(function(){return new Promise(function(res){
+(function wait(){if(n%8===0){var t=tabEl(name);if(t){try{t.click();}catch(x){}}}
+n++;var rows=rowsNow().filter(function(r){return ok(r[0]);});
+if(rows.length){sleep(400).then(function(){res(rowsNow().filter(function(r){return ok(r[0]);}));});return;}
+if(n>60){res([]);return;}
+setTimeout(wait,250);})();});});}
+function btnBy(re){var els=document.querySelectorAll('[aria-label]');
+for(var i=0;i<els.length;i++){var e=els[i];if(vis(e)&&re.test(e.getAttribute('aria-label')||''))return e;}return null;}
+function setPageSize(){return new Promise(function(res){
+var els=document.querySelectorAll('div,span,label'),lab=null;
+for(var i=0;i<els.length;i++){var e=els[i];if(e.children.length===0&&vis(e)&&/^Rows per page/i.test((e.innerText||'').trim())){lab=e;break;}}
+if(!lab){res();return;}
+var box=lab.parentElement,dd=null;
+for(var k=0;k<3&&box&&!dd;k++){dd=box.querySelector('select,[role=listbox],[aria-haspopup]');box=box.parentElement;}
+if(!dd){res();return;}
+if(dd.tagName==='SELECT'){var mx=null;for(var s=0;s<dd.options.length;s++){if(!mx||Number(dd.options[s].value)>Number(mx.value))mx=dd.options[s];}
+if(mx){dd.value=mx.value;dd.dispatchEvent(new Event('change',{bubbles:true}));}sleep(1500).then(res);return;}
+press(dd);
+sleep(600).then(function(){var opts=document.querySelectorAll('[role=option]'),best=null,bv=0;
+for(var j=0;j<opts.length;j++){var o=opts[j];if(!vis(o))continue;var v=parseInt((o.innerText||'').replace(/[^\d]/g,''),10);if(v>bv&&v<=1000){bv=v;best=o;}}
+if(best){press(best);sleep(2000).then(res);}
+else{try{document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));}catch(x){}res();}});});}
+function pageThrough(){var all={};
+function take(){var rows=urlRowsNow();for(var i=0;i<rows.length;i++)all[rows[i][0]]=rows[i][1];return rows.length?rows[0][0]:'';}
+return setPageSize().then(function(){return new Promise(function(res){
+var first=take(),pages=0;
+(function next(){var b=btnBy(/next page/i);
+if(Object.keys(all).length>=1000||!b||b.disabled||b.getAttribute('aria-disabled')==='true'){res({all:all,done:true});return;}
+if(pages>=200){res({all:all,done:false});return;}
+try{b.click();}catch(x){res({all:all,done:false});return;}pages++;
+var tries=0;(function wait(){var f=urlRowsNow(),sig=f.length?f[0][0]:'';
+if(sig&&sig!==first){sleep(200).then(function(){first=take();next();});}
+else if(++tries>40){res({all:all,done:false});}
+else setTimeout(wait,150);})();})();});});}
+var table=urlRowsNow(),tableComplete=false;
 var tmap={};for(var q=0;q<table.length;q++)tmap[table[q][0]]=table[q][1];
 function agree(c){var n=0;for(var j=0;j<c.rows.length;j++){var r=c.rows[j],v=tmap[r[0]];if(v!=null&&r.indexOf(v,1)>0)n++;}return n;}
 var dom=[],ss=document.getElementsByTagName('script');
 for(var m=0;m<ss.length;m++){var st=ss[m].textContent||'';if(st.indexOf('AF_initDataCallback')>=0)dom=dom.concat(grab(st));}
-var countries=[],devices=[],debug={};
-viaTab('COUNTRIES',function(l){return !isUrl(l)&&!DEVW.test(l);})
+var series=[],pages=[],countries=[],devices=[],debug={};
+fetch(location.href,{credentials:'include'}).then(function(r){return r.ok?r.text():'';}).catch(function(){return '';})
+.then(function(h){
+var blobs=dom.concat(h?grab(h):[]);
+series=seriesIn(blobs);
+if(!series.length)return 'stop';
+pages=pagesIn(blobs).map(function(c){c.agree=agree(c);return c;}).sort(function(a,b){return b.agree-a.agree||b.rows.length-a.rows.length;}).slice(0,2);
+if((pages.length&&pages[0].agree>0)||!table.length)return null;
+return pageThrough().then(function(p){var list=[];for(var u in p.all)list.push([u,p.all[u]]);
+if(list.length>=table.length){table=list;tableComplete=p.done;}debug.pagedRows=list.length;});})
+.then(function(x){if(x==='stop')return 'stop';
+return viaTab('COUNTRIES',function(l){return !isUrl(l)&&!DEVW.test(l);})
 .then(function(c){if(c===null)debug.countriesTab='not found';countries=c||[];return viaTab('DEVICES',function(l){return DEVW.test(l);});})
 .then(function(d){if(d===null)debug.devicesTab='not found';devices=d||[];
 if(!devices.length)debug.devicesSeen=rowsNow().slice(0,5).map(function(r){return r[0];});
-var p=tabEl('PAGES');if(p){try{p.click();}catch(x){}}})
-.then(function(){return fetch(location.href,{credentials:'include'}).then(function(r){return r.ok?r.text():'';}).catch(function(){return '';});})
-.then(function(h){
-var blobs=dom.concat(h?grab(h):[]);
-var series=seriesIn(blobs);
-var pages=pagesIn(blobs).map(function(c){c.agree=agree(c);return c;}).sort(function(a,b){return b.agree-a.agree||b.rows.length-a.rows.length;}).slice(0,2);
-if(!series.length){if(w)w.close();stop('no daily AI impressions were found on this page. Reload it (F5), wait for the chart, and click the bookmark again. If it keeps failing, use Export > Download CSV and import the file instead.');return;}
-var json=JSON.stringify({v:2,src:'gsc-ai-impressions',site:site,url:location.href,capturedAt:new Date().toISOString(),tiles:{impressions:tm[1].replace(/\s+/g,'')},series:series,pages:pages,table:table,countries:countries,devices:devices,debug:debug});
+var p=tabEl('PAGES');if(p){try{p.click();}catch(x){}}});})
+.then(function(x){
+if(x==='stop'){if(w)w.close();stop('no daily AI impressions were found on this page. Reload it (F5), wait for the chart, and click the bookmark again. If it keeps failing, use Export > Download CSV and import the file instead.');return;}
+var json=JSON.stringify({v:2,src:'gsc-ai-impressions',site:site,url:location.href,capturedAt:new Date().toISOString(),tiles:{impressions:tm[1].replace(/\s+/g,'')},series:series,pages:pages,table:table,tableComplete:tableComplete,countries:countries,devices:devices,debug:debug});
 if(w&&!w.closed){w.location.href=DASH+'/#aistats='+encodeURIComponent(json);return;}
 var ok=T+'copied. Open the dashboard (Overview tab) and paste it under "Paste AI impressions".';
 function legacy(s){var ta=document.createElement('textarea');ta.value=s;document.body.appendChild(ta);ta.select();var done=false;try{done=document.execCommand('copy');}catch(e){}ta.remove();if(done)alert(ok);else prompt('Copy this text (Ctrl+C), then paste it into the dashboard:',s);}
@@ -147,9 +187,11 @@ type Capture = {
   series?: Rows[];
   pages?: Rows[];
   table?: [string, number][];
+  /** True when the bookmark paged through the whole Pages table. */
+  tableComplete?: boolean;
   countries?: [string, number][];
   devices?: [string, number][];
-  debug?: { countriesTab?: string; devicesTab?: string; devicesSeen?: string[] };
+  debug?: { countriesTab?: string; devicesTab?: string; devicesSeen?: string[]; pagedRows?: number };
 };
 
 export type AiCaptureResult = {
@@ -232,7 +274,7 @@ export function parseAiCapture(text: string, site: string): AiCaptureResult {
   for (const d of dates) days[d] = pick.map.get(d)!;
   const total = dates.reduce((n, d) => n + days[d], 0);
 
-  // Pages: the column that agrees with the rows visible in the table; otherwise just the visible rows.
+  // Pages: the hidden list whose numbers agree with the table; otherwise the table rows the bookmark read (all of them when it paged through).
   const notes: string[] = [];
   const inProp = (u: string) => {
     try {
@@ -266,11 +308,13 @@ export function parseAiCapture(text: string, site: string): AiCaptureResult {
     }
   }
   let pages: Record<string, number> = {};
-  if (best && (best.agree > 0 || !table.size)) {
+  if (best && (best.agree > 0 || !table.size) && best.n >= table.size) {
     pages = best.rows;
   } else if (table.size) {
     pages = Object.fromEntries(table);
-    notes.push(`Only the ${table.size} page rows visible on screen were found; open the report directly (not from the Performance page) and click the bookmark again for the full list.`);
+    if (!cap.tableComplete) {
+      notes.push(`Only ${table.size} pages could be read from the table; reload the report (F5) and click the bookmark again for the full list.`);
+    }
   } else {
     notes.push("No page list was found.");
   }
