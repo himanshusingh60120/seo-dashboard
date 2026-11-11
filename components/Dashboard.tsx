@@ -340,7 +340,8 @@ export default function Dashboard() {
           {!gsc && !error && needsGsc && <div className="notice">Loading data for {site || "your properties"}…</div>}
 
           {gsc && tab === "overview" && <Overview gsc={gsc} ga={ga} gaError={gaError} hasGa4={!!ga4} site={site} />}
-          {gsc && tab === "rankings" && <Rankings gsc={gsc} />}
+          {/* CHANGED: Rankings now gets the site, for the query panel and AI impressions */}
+          {gsc && tab === "rankings" && <Rankings gsc={gsc} site={site} />}
           {site && tab === "indexing" && <Indexing site={site} onChange={bumpIndex} />}
           {site && tab === "monitor" && <IndexMonitor site={site} />}
           {site && tab === "crawl" && (
