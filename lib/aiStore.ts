@@ -1,7 +1,7 @@
 // lib/aiStore.ts
 // Shared by the browser and the server. Saved data from Search Console's Generative AI report (AI Overviews + AI Mode):
-// daily site-wide AI impressions merged by date, plus page / country / device totals kept per import,
-// because the export only gives those for its whole date range.
+// daily site-wide AI impressions merged by date, plus page / country / device totals kept per update,
+// because the report only gives those for its whole date range.
 import { addDays } from "./dates";
 
 export type AiSnapshot = {
@@ -16,7 +16,7 @@ export type AiSnapshot = {
 };
 export type AiImport = { file: string; at: string; by?: string; from: string; to: string; days: number; pages: number };
 export type AiStore = { days: Record<string, number>; snapshots: AiSnapshot[]; imports: AiImport[] };
-/** What one parsed export contains. */
+/** What one parsed export or bookmark copy contains. */
 export type AiParsed = {
   file: string;
   from: string;
@@ -66,24 +66,34 @@ export function sanitizeAiParsed(v: any): AiParsed | null {
   };
 }
 
-/** Adds one export. Newer imports replace the same dates; an export with the same date range replaces its older split. */
+const size = (m: Record<string, number>) => Object.keys(m).length;
+
+/** Adds one update. Newer updates replace the same dates; an update with the same date range replaces its older split,
+ *  but keeps the older country / device split if the new one has none. */
 export function mergeAi(store: AiStore, p: AiParsed, by?: string): AiStore {
   const at = new Date().toISOString();
   const days = { ...store.days, ...p.days };
   const keep = Object.keys(days).sort().slice(-AI_MAX_DAYS);
-  const hasSplit = Object.keys(p.pages).length > 0 || Object.keys(p.countries).length > 0 || Object.keys(p.devices).length > 0;
+  const hasSplit = size(p.pages) > 0 || size(p.countries) > 0 || size(p.devices) > 0;
+  const old = store.snapshots.find((s) => s.from === p.from && s.to === p.to);
   const snap: AiSnapshot = {
-    file: p.file, from: p.from, to: p.to, importedAt: at, ...(by ? { by } : {}),
-    pages: p.pages, countries: p.countries, devices: p.devices,
+    file: p.file,
+    from: p.from,
+    to: p.to,
+    importedAt: at,
+    ...(by ? { by } : {}),
+    pages: size(p.pages) >= size(old?.pages || {}) ? p.pages : old!.pages,
+    countries: size(p.countries) ? p.countries : old?.countries || {},
+    devices: size(p.devices) ? p.devices : old?.devices || {},
   };
   const snapshots = hasSplit
-    ? [...store.snapshots.filter((s) => !(s.from === p.from && s.to === p.to)), snap]
+    ? [...store.snapshots.filter((s) => s !== old), snap]
         .sort((a, b) => a.to.localeCompare(b.to) || b.from.localeCompare(a.from))
         .slice(-AI_MAX_SNAPSHOTS)
     : store.snapshots;
   const entry: AiImport = {
     file: p.file, at, ...(by ? { by } : {}), from: p.from, to: p.to,
-    days: Object.keys(p.days).length, pages: Object.keys(p.pages).length,
+    days: size(p.days), pages: size(p.pages),
   };
   return {
     days: Object.fromEntries(keep.map((d) => [d, days[d]])),
@@ -92,13 +102,17 @@ export function mergeAi(store: AiStore, p: AiParsed, by?: string): AiStore {
   };
 }
 
-/** The most recent export's page / country / device split (latest end date; the longer range if two end together). */
+/** The split to show: the latest end date; when two end together, the one with the fuller page list, then the longer range. */
 export function latestAiSnapshot(store: AiStore | null): AiSnapshot | null {
   if (!store?.snapshots.length) return null;
-  return store.snapshots.reduce((best, s) => (s.to > best.to || (s.to === best.to && s.from < best.from) ? s : best));
+  return store.snapshots.reduce((best, s) => {
+    if (s.to !== best.to) return s.to > best.to ? s : best;
+    if (size(s.pages) !== size(best.pages)) return size(s.pages) > size(best.pages) ? s : best;
+    return s.from < best.from ? s : best;
+  });
 }
 
-/** AI impressions between two dates (inclusive), and how many of those days have imported data. */
+/** AI impressions between two dates (inclusive), and how many of those days have saved data. */
 export function aiSum(store: AiStore | null, from: string, to: string) {
   let total = 0, covered = 0, expected = 0;
   for (let d = from; d <= to && expected < 1000; d = addDays(d, 1)) {
