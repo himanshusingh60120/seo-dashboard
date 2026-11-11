@@ -5,9 +5,28 @@ import type { GscData, Ga4Data } from "@/lib/types";
 import { Kpis, Delta, Section, PanelTitle, num, pct, pos, KpiItem } from "./ui";
 import { SearchTrend, PositionTrend, TrafficTrend } from "./Charts";
 import { loadIndexCache, classify } from "@/lib/indexCache";
-import AiOverview from "./AiImpressions"; // NEW: Google AI Overviews / AI Mode impressions section
+import AiOverview from "./AiImpressions";
 
-export default function Overview({ gsc, ga, gaError, hasGa4, site }: { gsc: GscData; ga: Ga4Data | null; gaError: string | null; hasGa4: boolean; site: string }) {
+export default function Overview({
+  gsc,
+  ga,
+  gaError,
+  hasGa4,
+  site,
+  aiInbox = null,
+  aiWaiting = false,
+  onAiInboxHandled,
+}: {
+  gsc: GscData;
+  ga: Ga4Data | null;
+  gaError: string | null;
+  hasGa4: boolean;
+  site: string;
+  /** Data sent by the "Copy AI impressions" bookmark. */
+  aiInbox?: string | null;
+  aiWaiting?: boolean;
+  onAiInboxHandled?: () => void;
+}) {
   const c = gsc.totals.current, p = gsc.totals.previous;
   const [index, setIndex] = useState<{ indexed: number; notIndexed: number } | null>(null);
 
@@ -59,8 +78,7 @@ export default function Overview({ gsc, ga, gaError, hasGa4, site }: { gsc: GscD
         </div>
       </Section>
 
-      {/* NEW: site-wide AI impressions (imported Generative AI report) */}
-      <AiOverview site={site} gsc={gsc} />
+      <AiOverview site={site} gsc={gsc} inbox={aiInbox} waiting={aiWaiting} onInboxHandled={onAiInboxHandled} />
 
       <Section
         title="Site traffic"
