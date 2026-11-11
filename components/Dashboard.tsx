@@ -54,6 +54,15 @@ function readPrefs(): Record<string, any> {
   }
 }
 
+/** Property a bookmark copy came from (both bookmarks send JSON with a "site" field). */
+function siteOf(raw: string | null): string {
+  try {
+    return raw ? String(JSON.parse(raw)?.site || "") : "";
+  } catch {
+    return "";
+  }
+}
+
 export default function Dashboard() {
   const { data: session } = useSession();
   const [props, setProps] = useState<Properties | null>(null);
@@ -77,6 +86,9 @@ export default function Dashboard() {
   // Crawl stats sent by the "Copy crawl stats" bookmark (arrives in the URL after #)
   const [inbox, setInbox] = useState<string | null>(null);
   const [inboxWaiting, setInboxWaiting] = useState(false);
+  // NEW: AI impressions sent by the "Copy AI impressions" bookmark (arrives in the URL after #)
+  const [aiInbox, setAiInbox] = useState<string | null>(null);
+  const [aiWaiting, setAiWaiting] = useState(false);
 
   // Every source behind the numbers on screen, so any "Source" button can explain itself
   const sources = useMemo<Sources>(() => {
@@ -106,24 +118,45 @@ export default function Dashboard() {
       .catch(() => {});
   }, []);
 
-  // Receive data from the "Copy crawl stats" bookmark: it opens this page with #crawl-wait, then #crawlstats=<data>.
+  // Receive data from the bookmarks. Each opens this page with a "wait" hash first, then the data:
+  //   Copy crawl stats:    #crawl-wait, then #crawlstats=<data>
+  //   Copy AI impressions: #ai-wait,    then #aistats=<data>   (NEW)
   useEffect(() => {
     const take = () => {
       const h = window.location.hash;
-      if (!h.startsWith("#crawl-wait") && !h.startsWith("#crawlstats=")) return;
       const clean = () => window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      const read = (prefix: string) => {
+        try {
+          return decodeURIComponent(h.slice(prefix.length));
+        } catch {
+          return "";
+        }
+      };
+
+      // NEW: AI impressions
+      if (h.startsWith("#ai-wait") || h.startsWith("#aistats=")) {
+        setTab("overview");
+        if (h.startsWith("#ai-wait")) {
+          setAiWaiting(true);
+          clean();
+          return;
+        }
+        const raw = read("#aistats=");
+        clean();
+        if (raw) setAiInbox(raw);
+        setAiWaiting(false);
+        return;
+      }
+
+      // Crawl stats (unchanged behaviour)
+      if (!h.startsWith("#crawl-wait") && !h.startsWith("#crawlstats=")) return;
       setTab("crawl");
       if (h.startsWith("#crawl-wait")) {
         setInboxWaiting(true);
         clean();
         return;
       }
-      let raw = "";
-      try {
-        raw = decodeURIComponent(h.slice("#crawlstats=".length));
-      } catch {
-        raw = "";
-      }
+      const raw = read("#crawlstats=");
       clean();
       if (raw) setInbox(raw);
       setInboxWaiting(false);
@@ -133,13 +166,8 @@ export default function Dashboard() {
     return () => window.removeEventListener("hashchange", take);
   }, []);
 
-  const inboxSite = useMemo(() => {
-    try {
-      return inbox ? String(JSON.parse(inbox)?.site || "") : "";
-    } catch {
-      return "";
-    }
-  }, [inbox]);
+  const inboxSite = useMemo(() => siteOf(inbox), [inbox]);
+  const aiInboxSite = useMemo(() => siteOf(aiInbox), [aiInbox]); // NEW
 
   // Switch to the property the crawl stats were copied from, if this account has it.
   useEffect(() => {
@@ -148,9 +176,22 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inboxSite, props]);
 
+  // NEW: same for AI impressions
+  useEffect(() => {
+    if (!aiInboxSite || !props || aiInboxSite === site) return;
+    if (props.gsc.some((x) => x.siteUrl === aiInboxSite)) changeSite(aiInboxSite);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiInboxSite, props]);
+
   // Hand the data over once the right property is showing (or if this account can't open that property, so it can say so).
-  const inboxReady =
-    !!inbox && (!inboxSite || inboxSite === site || (!!props && !props.gsc.some((x) => x.siteUrl === inboxSite)));
+  const readyFor = (raw: string | null, from: string) =>
+    !!raw && (!from || from === site || (!!props && !props.gsc.some((x) => x.siteUrl === from)));
+  const inboxReady = readyFor(inbox, inboxSite);
+  const aiInboxReady = readyFor(aiInbox, aiInboxSite); // NEW
+  const aiInboxHandled = useCallback(() => {
+    setAiInbox(null);
+    setAiWaiting(false);
+  }, []); // NEW
 
   const downloadEvidence = () => {
     downloadJson(`evidence-${fileSafe(site)}-${new Date().toISOString().slice(0, 10)}.json`, {
@@ -337,10 +378,25 @@ export default function Dashboard() {
             </p>
           )}
 
-          {!gsc && !error && needsGsc && <div className="notice">Loading data for {site || "your properties"}…</div>}
+          {!gsc && !error && needsGsc && (
+            <div className="notice">
+              {aiWaiting || aiInbox ? "Receiving AI impressions from the bookmark… " : ""}Loading data for {site || "your properties"}…
+            </div>
+          )}
 
-          {gsc && tab === "overview" && <Overview gsc={gsc} ga={ga} gaError={gaError} hasGa4={!!ga4} site={site} />}
-          {/* CHANGED: Rankings now gets the site, for the query panel and AI impressions */}
+          {/* CHANGED: Overview also receives data from the "Copy AI impressions" bookmark */}
+          {gsc && tab === "overview" && (
+            <Overview
+              gsc={gsc}
+              ga={ga}
+              gaError={gaError}
+              hasGa4={!!ga4}
+              site={site}
+              aiInbox={aiInboxReady ? aiInbox : null}
+              aiWaiting={aiWaiting || (!!aiInbox && !aiInboxReady)}
+              onAiInboxHandled={aiInboxHandled}
+            />
+          )}
           {gsc && tab === "rankings" && <Rankings gsc={gsc} site={site} />}
           {site && tab === "indexing" && <Indexing site={site} onChange={bumpIndex} />}
           {site && tab === "monitor" && <IndexMonitor site={site} />}
