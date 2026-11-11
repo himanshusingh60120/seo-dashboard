@@ -22,17 +22,20 @@ function Change({ v }: { v: number | null | undefined }) {
   return <span className={`delta ${cls}`}>{v > 0 ? `▼ ${v.toFixed(1)}` : v < 0 ? `▲ ${Math.abs(v).toFixed(1)}` : "0.0"}</span>;
 }
 
-/** Page name opens the query panel; the arrow opens the page itself. */
+/** Plain link, as before. A normal click opens the query panel; Ctrl/Cmd-click or middle-click opens the page in a new tab. */
 function PageCell({ url, onOpen }: { url: string; onOpen: (url: string) => void }) {
   return (
-    <span className="page-cell">
-      <button type="button" className="linkish" onClick={() => onOpen(url)} title="Show the queries this page ranked for">
-        {shortUrl(url)}
-      </button>
-      <a href={url} target="_blank" rel="noreferrer" title="Open the page" aria-label={`Open ${url} in a new tab`}>
-        ↗
-      </a>
-    </span>
+    <a
+      href={url}
+      title="Show the queries this page ranked for"
+      onClick={(e) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return; // let the browser open the page
+        e.preventDefault();
+        onOpen(url);
+      }}
+    >
+      {shortUrl(url)}
+    </a>
   );
 }
 
@@ -50,7 +53,7 @@ export default function Rankings({ gsc, site }: { gsc: GscData; site: string }) 
   const total = b.top10 + b.top20 + b.top30 + b.beyond || 1;
 
   function pageCol<T extends { key: string }>(): Col<T> {
-    return { key: "key" as keyof T & string, label: "Page", render: (r) => <PageCell url={r.key} onOpen={setOpen} /> };
+    return { key: "key" as keyof T & string, label: "Page", url: true, render: (r) => <PageCell url={r.key} onOpen={setOpen} /> };
   }
   function aiCols<T extends Ai>(): Col<T>[] {
     return snap ? [{ key: "ai" as keyof T & string, label: "AI impr.", num: true, render: (r) => (r.ai == null ? "–" : num(r.ai)) }] : [];
@@ -81,12 +84,12 @@ export default function Rankings({ gsc, site }: { gsc: GscData; site: string }) 
 
   const aiNote = snap ? (
     <p className="muted" style={{ marginBottom: 0 }}>
-      AI impr. = impressions in Google&apos;s AI Overviews and AI Mode for {snap.from} to {snap.to}, from the latest imported Generative AI report
-      (Overview tab). It covers that export&apos;s dates, not the period above.
+      AI impr. = impressions in Google&apos;s AI Overviews and AI Mode for {snap.from} to {snap.to}, from the latest saved Generative AI report
+      (Overview tab). It covers those dates, not the period above.
     </p>
   ) : (
     <p className="muted" style={{ marginBottom: 0 }}>
-      Import a Generative AI report in the Overview tab to add AI impressions per page.
+      Save a Generative AI report in the Overview tab to add AI impressions per page.
     </p>
   );
 
