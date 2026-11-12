@@ -180,3 +180,21 @@ export async function appendRows(title: string, rows: Row[]) {
 export async function clearRange(title: string, range: string) {
   await call(`/values/${enc(a1(title, range))}:clear`, { method: "POST", body: "{}" });
 }
+
+
+
+/** Reads several ranges in one request. Tabs that don't exist yet come back empty. */
+export async function batchRead(blocks: { title: string; range: string }[]): Promise<Row[][]> {
+  const have = await tabs();
+  const present = blocks.map((b, i) => ({ b, i })).filter((x) => have.has(x.b.title));
+  const out: Row[][] = blocks.map(() => []);
+  if (!present.length) return out;
+  const q = present.map((x) => `ranges=${enc(a1(x.b.title, x.b.range))}`).join("&");
+  const d = await call<{ valueRanges?: { values?: Row[] }[] }>(
+    `/values:batchGet?${q}&valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING`
+  );
+  present.forEach((x, k) => {
+    out[x.i] = d.valueRanges?.[k]?.values || [];
+  });
+  return out;
+}
