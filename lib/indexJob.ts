@@ -1,17 +1,20 @@
 // lib/indexJob.ts
 // Daily index checks for enrolled properties, stored in the Google Sheet (INDEX_SHEET_ID).
 //
-// Each property has its own tab with one row per URL. Two scheduled jobs keep it current:
+// Each property has ONE row in _Jobs and ONE tab with one row per URL, whoever started it, so URLs already checked
+// and sitemaps already read are shared and never repeated. Two scheduled jobs keep it current:
 //   plan (hourly; acts once per Pacific day per property, after Google's quota resets): reads the sitemaps and
 //     Search Console impressions (both free), adds new URLs, marks pages with impressions as indexed, spots pages
 //     whose impressions suddenly stopped, and queues up to the daily budget of URLs for URL Inspection.
 //   run (every 10 minutes): inspects queued URLs in small batches and writes each result to its row.
-// Status changes (dropped, newly indexed, impressions stopped…) are also written to the _Changes tab.
-// Rows are only ever added at the bottom, never moved, so the queued row numbers stay valid.
+// Search Console is read as the service account when it has been added to the property; otherwise as the person who
+// started the checks (their saved Google sign-in, see lib/userCredential.ts). The Sheet is always the service account.
+// Status changes are also written to the _Changes tab. Rows are only added at the bottom, never moved.
 import { serviceAccountToken } from "./serviceAccount";
+import { userAccessToken } from "./userCredential";
 import {
   appendRows, batchRead, clearRange, colLetter, ensureSize, ensureTab, readRange, readRanges, safeTitle, sheetUrl,
-  writeRange, writeRanges, type Row,
+  tabs, writeRange, writeRanges, type Row,
 } from "./sheets";
 import { collect } from "./sitemapReader";
 import { HttpError } from "./token";
@@ -25,6 +28,8 @@ export const JOBS_TAB = "_Jobs";
 export const SITEMAPS_TAB = "_Sitemaps";
 export const LOG_TAB = "_Log";
 export const CHANGES_TAB = "_Changes";
+/** Value of the "Runs as" column when Search Console is read as the service account. */
+export const SA_LABEL = "Service account";
 
 /** Inspections per property per day for this job. Google allows 2,000; the rest is left for people using the dashboard. */
 export const DEFAULT_BUDGET = Math.min(1900, Math.max(1, Math.floor(Number(process.env.INDEX_DAILY_BUDGET) || 1800)));
@@ -49,7 +54,7 @@ const C = {
 
 export const JOB_HEADERS = [
   "Property", "Tab", "Enabled", "Daily budget", "Added by", "Added at", "Plan day", "Plan status", "Planned at",
-  "Queue (row numbers)", "Checked today", "Last run", "Last message",
+  "Queue (row numbers)", "Checked today", "Last run", "Last message", "Runs as",
 ];
 export const SITEMAP_HEADERS = ["Property", "Sitemap", "URLs", "Verified", "Indexed", "Not indexed", "Errors", "Not checked yet", "% verified", "Updated"];
 export const LOG_HEADERS = ["Time", "Property", "Step", "Inspections used", "Indexed", "Not indexed", "Errors", "Drops confirmed", "Note"];
@@ -98,12 +103,14 @@ async function pool<T, R>(items: T[], size: number, fn: (t: T) => Promise<R>): P
 export type Job = {
   row: number; site: string; tab: string; enabled: boolean; budget: number;
   planDay: string; planStatus: string; plannedAt: string; queue: number[];
-  checkedToday: number; lastRun: string; message: string;
+  checkedToday: number; lastRun: string; message: string; runAs: string;
 };
 
 export async function readJobs(): Promise<Job[]> {
   await ensureTab(JOBS_TAB, JOB_HEADERS);
-  const rows = await readRange(JOBS_TAB, "A2:M");
+  const t = (await tabs()).get(JOBS_TAB);
+  if (t && t.cols < JOB_HEADERS.length) await ensureTab(JOBS_TAB, JOB_HEADERS, true); // adds the "Runs as" column to older sheets
+  const rows = await readRange(JOBS_TAB, "A2:N");
   return rows
     .map(
       (r, i): Job => ({
@@ -122,6 +129,7 @@ export async function readJobs(): Promise<Job[]> {
         checkedToday: n(r[10]),
         lastRun: s(r[11]),
         message: s(r[12]),
+        runAs: s(r[13]).trim() || SA_LABEL,
       })
     )
     .filter((j) => j.site);
@@ -129,9 +137,14 @@ export async function readJobs(): Promise<Job[]> {
 
 async function saveJob(j: Job) {
   await writeRange(JOBS_TAB, `B${j.row}:B${j.row}`, [[j.tab]]);
-  await writeRange(JOBS_TAB, `G${j.row}:M${j.row}`, [
-    [j.planDay, j.planStatus, j.plannedAt, j.queue.join(","), j.checkedToday, j.lastRun, j.message.slice(0, 500)],
+  await writeRange(JOBS_TAB, `G${j.row}:N${j.row}`, [
+    [j.planDay, j.planStatus, j.plannedAt, j.queue.join(","), j.checkedToday, j.lastRun, j.message.slice(0, 500), j.runAs],
   ]);
+}
+
+/** The Search Console access token for this job: the service account, or the saved sign-in of the person in "Runs as". */
+function jobToken(j: Job): Promise<string> {
+  return !j.runAs || j.runAs === SA_LABEL ? serviceAccountToken() : userAccessToken(j.runAs);
 }
 
 type Counts = { used: number; indexed: number; notIndexed: number; errors: number; drops: number };
@@ -166,20 +179,27 @@ export async function serviceAccountCanRead(site: string) {
   return sites.some((x) => x.siteUrl === site);
 }
 
-/** Starts (adds the property's tab and a _Jobs row) or pauses daily checks for a property. */
-export async function setEnabled(site: string, enabled: boolean, by: string) {
+/**
+ * Starts or pauses daily checks for a property. Starting a property that isn't in the Sheet yet adds its _Jobs row
+ * and its tab; starting one that is already there reuses them (nothing is checked twice).
+ */
+export async function setEnabled(site: string, enabled: boolean, by: string, runAs: string = SA_LABEL) {
   const jobs = await readJobs();
   const j = jobs.find((x) => x.site === site);
   if (j) {
     await writeRange(JOBS_TAB, `C${j.row}:C${j.row}`, [[enabled]]);
-    if (enabled) await ensureTab(j.tab, URL_HEADERS);
+    if (enabled) {
+      await writeRange(JOBS_TAB, `N${j.row}:N${j.row}`, [[runAs]]);
+      if (j.planStatus === "error") await writeRange(JOBS_TAB, `H${j.row}:H${j.row}`, [["waiting"]]);
+      await ensureTab(j.tab, URL_HEADERS);
+    }
     return;
   }
   if (!enabled) return;
   const tab = tabFor(site);
   await ensureTab(tab, URL_HEADERS);
   await appendRows(JOBS_TAB, [
-    [site, tab, true, DEFAULT_BUDGET, by, new Date().toISOString(), "", "waiting", "", "", 0, "", "Added. The first daily plan runs within the hour."],
+    [site, tab, true, DEFAULT_BUDGET, by, new Date().toISOString(), "", "waiting", "", "", 0, "", "Added. The first daily plan runs within the hour.", runAs],
   ]);
 }
 
@@ -204,7 +224,7 @@ export async function propertyStatus(site: string) {
   return {
     job: job && {
       tab: job.tab, enabled: job.enabled, budget: job.budget, planDay: job.planDay, planStatus: job.planStatus,
-      queued: job.queue.length, checkedToday: job.checkedToday, lastRun: job.lastRun, message: job.message,
+      queued: job.queue.length, checkedToday: job.checkedToday, lastRun: job.lastRun, message: job.message, runAs: job.runAs,
     },
     sitemaps,
     changes,
@@ -265,9 +285,18 @@ export async function planProperty(job: Job, day: string): Promise<string> {
   job.planStatus = "planning";
   job.plannedAt = new Date().toISOString();
   job.message = "Planning today's checks…";
-  await saveJob(job);
 
-  const token = await serviceAccountToken();
+  // Prefer the service account; fall back to the saved sign-in of the person who started the checks.
+  const saOk = await serviceAccountCanRead(job.site).catch(() => false);
+  if (saOk) job.runAs = SA_LABEL;
+  else if (!job.runAs || job.runAs === SA_LABEL) {
+    await saveJob(job);
+    throw new Error(
+      "The service account can't open this property and nobody's Google sign-in is saved for it. Anyone who can open it in Search Console can open the Index checks tab and click “Use my Google sign-in”."
+    );
+  }
+  await saveJob(job);
+  const token = await jobToken(job);
   await ensureTab(job.tab, URL_HEADERS, true);
 
   // 1. Free signals: sitemaps, and Search Console impressions per page.
@@ -414,7 +443,7 @@ export async function planProperty(job: Job, day: string): Promise<string> {
     `${stoppedCount} with impressions that stopped · ${queue.length.toLocaleString()} queued for URL Inspection today` +
     (sm.errors.length ? ` · ${sm.errors.length} sitemap problem(s)` : "");
   await saveJob(job);
-  await log(job.site, "plan", {}, job.message);
+  await log(job.site, "plan", {}, `${job.message} · runs as ${job.runAs}`);
   return job.message;
 }
 
@@ -501,10 +530,11 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
   if (data.length) await writeRanges(job.tab, data);
   await recordChanges(changes);
 
+  const who = job.runAs === SA_LABEL ? "the service account" : job.runAs;
   const stop = quota
     ? "Google's daily URL Inspection limit for this property was reached (people using the dashboard share it). Checks continue after tomorrow's plan."
     : forbidden
-      ? `The service account lost access to this property: ${forbidden}`
+      ? `The Google account used for these checks (${who}) can't open this property any more. Anyone who can open it can click “Use my Google sign-in” in the Index checks tab. (${forbidden})`
       : rateLimited
         ? "Google asked to slow down; continuing in the next run."
         : "";
@@ -519,7 +549,7 @@ export async function runChecks(deadline: number) {
   );
   if (!jobs.length) return { day, used: 0, note: "Nothing queued right now." };
 
-  const token = await serviceAccountToken();
+  const tokens = new Map<Job, string>();
   const stopped = new Set<Job>();
   const timeLeft = () => Date.now() < deadline - 15_000;
   let used = 0;
@@ -530,6 +560,11 @@ export async function runChecks(deadline: number) {
     for (const j of active) {
       if (!timeLeft()) break;
       try {
+        let token = tokens.get(j);
+        if (!token) {
+          token = await jobToken(j);
+          tokens.set(j, token);
+        }
         const size = Math.min(BATCH, j.budget - j.checkedToday);
         const r = await checkBatch(j, j.queue.slice(0, size), token, day);
         j.queue = j.queue.filter((row) => !r.done.has(row));
@@ -550,7 +585,7 @@ export async function runChecks(deadline: number) {
         if (!j.queue.length && timeLeft()) await refreshSummary(j).catch(() => {});
       } catch (e) {
         stopped.add(j);
-        j.message = `Check run failed: ${e instanceof Error ? e.message : "error"}`.slice(0, 500);
+        j.message = `Checks paused: ${e instanceof Error ? e.message : "error"}`.slice(0, 500);
         j.lastRun = new Date().toISOString();
         await saveJob(j).catch(() => {});
         await log(j.site, "check", {}, j.message);
