@@ -20,13 +20,15 @@ import Audience from "./Audience";
 import CtaSection from "./CtaSection";
 import ChannelDrilldown from "./ChannelDrilldown";
 import Audit from "./Audit";
+import IndexChecks from "./IndexChecks";
 
-type Tab = "overview" | "rankings" | "indexing" | "crawl" | "queries" | "growth" | "audience" | "cta" | "audit";
+type Tab = "overview" | "rankings" | "indexing" | "checks" | "crawl" | "queries" | "growth" | "audience" | "cta" | "audit";
 
 const BASE_TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "rankings", label: "Rankings" },
   { id: "indexing", label: "Indexing" },
+  { id: "checks", label: "Index checks" },
   { id: "crawl", label: "Crawl activity" },
   { id: "queries", label: "Queries" },
   { id: "growth", label: "Query growth" },
@@ -420,9 +422,9 @@ export default function Dashboard() {
               gaError={gaError}
               hasGa4={!!ga4}
               site={site}
-              ga4={ga4} // NEW: for "Visits from AI assistants"
-              days={days} // NEW
-              compare={compare} // NEW
+              ga4={ga4} // for "Visits from AI assistants"
+              days={days}
+              compare={compare}
               aiInbox={aiInboxReady ? aiInbox : null}
               aiWaiting={aiWaiting || (!!aiInbox && !aiInboxReady)}
               onAiInboxHandled={aiInboxHandled}
@@ -441,6 +443,8 @@ export default function Dashboard() {
               <UrlCheck site={site} />
             </>
           )}
+
+          {site && tab === "checks" && <IndexChecks site={site} />}
 
           {site && tab === "crawl" && (
             <CrawlActivity
