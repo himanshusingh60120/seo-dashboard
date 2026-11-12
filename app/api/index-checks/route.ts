@@ -1,13 +1,17 @@
 // app/api/index-checks/route.ts
-//   GET  ?site=…             → this property's daily index checks (job, per-sitemap summary, status changes) and the
-//                              last weekly capture of each Search Console report (Chrome extension or bookmark).
-//   POST { site, enabled }   → start (adds the property's tab to the Sheet) or pause daily index checks.
-// The signed-in person must have access to the property, and so must the service account.
+//   GET  ?site=…                        → this property's daily index checks (job, per-sitemap summary, status changes)
+//                                          and the last weekly capture of each Search Console report.
+//   POST { site, enabled, useMine? }     → start or pause daily checks. Anyone who can open the property in Search
+//                                          Console can start them. If the service account hasn't been added to the
+//                                          property, the checks run with the starter's own Google sign-in (saved
+//                                          encrypted in Upstash Redis). useMine: switch an existing job to your sign-in.
+// One row in _Jobs and one tab per property, whoever starts it, so nothing is checked twice.
 import { NextRequest, NextResponse } from "next/server";
 import { getGoogleAccessToken, HttpError, requireUser } from "@/lib/token";
 import { assertSiteAccess } from "@/lib/google";
 import { serviceAccountEmail, serviceAccountReady } from "@/lib/serviceAccount";
-import { propertyStatus, serviceAccountCanRead, setEnabled } from "@/lib/indexJob";
+import { SA_LABEL, propertyStatus, serviceAccountCanRead, setEnabled } from "@/lib/indexJob";
+import { saveUserCredential } from "@/lib/userCredential";
 import { batchRead } from "@/lib/sheets";
 import { fail } from "@/lib/api";
 
@@ -34,8 +38,12 @@ async function captureStatus(site: string) {
 }
 
 async function everything(site: string) {
-  const [status, captures] = await Promise.all([propertyStatus(site), captureStatus(site)]);
-  return { configured: true, serviceAccount: serviceAccountEmail(), ...status, captures };
+  const [status, captures, saCanRead] = await Promise.all([
+    propertyStatus(site),
+    captureStatus(site),
+    serviceAccountCanRead(site).catch(() => false),
+  ]);
+  return { configured: true, serviceAccount: serviceAccountEmail(), saCanRead, ...status, captures };
 }
 
 export async function GET(req: NextRequest) {
@@ -57,17 +65,18 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     const site = typeof body.site === "string" ? body.site : "";
     const enabled = body.enabled !== false;
-    await assertSiteAccess(token, site);
+    await assertSiteAccess(token, site); // the person must be able to open this property in Search Console
     if (!serviceAccountReady()) {
       throw new HttpError(503, "Index checks aren't set up yet: add GOOGLE_SERVICE_ACCOUNT_JSON and INDEX_SHEET_ID in Vercel.");
     }
-    if (enabled && !(await serviceAccountCanRead(site))) {
-      throw new HttpError(
-        400,
-        `Add ${serviceAccountEmail()} as a user of this property in Search Console (Settings → Users and permissions), then try again.`
-      );
+    if (!enabled) {
+      await setEnabled(site, false, email);
+      return NextResponse.json(await everything(site));
     }
-    await setEnabled(site, enabled, email);
+    const saOk = await serviceAccountCanRead(site).catch(() => false);
+    let runAs = SA_LABEL;
+    if (!saOk || body.useMine === true) runAs = await saveUserCredential(req);
+    await setEnabled(site, true, email, runAs);
     return NextResponse.json(await everything(site));
   } catch (e) {
     return fail(e);
