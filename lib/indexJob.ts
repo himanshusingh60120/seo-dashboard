@@ -1,11 +1,20 @@
 // lib/indexJob.ts
 // Daily index checks for enrolled properties, stored in the Google Sheet (INDEX_SHEET_ID).
 //
-// Each property has ONE row in _Jobs and ONE tab with one row per URL, whoever started it, so URLs already checked
-// and sitemaps already read are shared and never repeated. Two scheduled jobs keep it current:
-//   plan (hourly; acts once per Pacific day per property, after Google's quota resets): reads the sitemaps and
-//     Search Console impressions (both free), adds new URLs, marks pages with impressions as indexed, spots pages
-//     whose impressions suddenly stopped, and queues up to the daily budget of URLs for URL Inspection.
+// Only Google's URL Inspection decides whether a URL is Indexed or Not indexed. Search impressions are used only to
+// decide what to check first. Every tracked URL goes through a rotation within the daily budget (oldest result first),
+// so each URL is re-checked about every (URLs ÷ daily budget) days, automatically.
+//
+// Each property has ONE row in _Jobs and ONE tab with one row per URL, whoever started it, so nothing is checked twice.
+//   plan (hourly; acts once per Pacific day per property, after Google's quota resets): reads the sitemaps and the
+//     Search Console impressions per page (both free), adds new URLs and builds today's queue:
+//       1. pages with no impressions for 4+ days that had impressions before (up to half the budget),
+//       2. "Not indexed" pages that have impressions again,
+//       3. URLs never checked (taking turns across sitemaps),
+//       4. pages whose sitemap lastmod is newer than their last check,
+//       5. failed checks,
+//       6. pages that were quiet and now have impressions again (confirmation),
+//       7. everything else, oldest result first (the rotation).
 //   run (every 10 minutes): inspects queued URLs in small batches and writes each result to its row.
 // Search Console is read as the service account when it has been added to the property; otherwise as the person who
 // started the checks (their saved Google sign-in, see lib/userCredential.ts). The Sheet is always the service account.
@@ -33,10 +42,16 @@ export const SA_LABEL = "Service account";
 
 /** Inspections per property per day for this job. Google allows 2,000; the rest is left for people using the dashboard. */
 export const DEFAULT_BUDGET = Math.min(1900, Math.max(1, Math.floor(Number(process.env.INDEX_DAILY_BUDGET) || 1800)));
-/** Pages are inspected again after this many days unless something makes them due sooner. */
-const RECHECK_DAYS = 30;
-/** "Impressions suddenly stopped": at least this many in the 14 days before, and none in the last 3 days. */
-const DROP_MIN_IMPRESSIONS = 14;
+/** "Quiet": no impressions on the latest 4 complete days… */
+const QUIET_DAYS = 4;
+/** …after at least this many impressions in the 14 days before. */
+const QUIET_MIN_BEFORE = 3;
+/** A quiet page that was checked and still indexed isn't re-checked for its quiet streak for this many days. */
+const QUIET_COOLDOWN_DAYS = 7;
+/** Quiet pages may use at most this share of the daily budget, so the rotation keeps moving. */
+const QUIET_SHARE = 0.5;
+const FLAG_QUIET = `No impressions for ${QUIET_DAYS}+ days, checking`;
+const FLAG_BACK = "Back in search, checking";
 const BATCH = 40;
 const PARALLEL = 6;
 
@@ -54,7 +69,7 @@ const C = {
 
 export const JOB_HEADERS = [
   "Property", "Tab", "Enabled", "Daily budget", "Added by", "Added at", "Plan day", "Plan status", "Planned at",
-  "Queue (row numbers)", "Checked today", "Last run", "Last message", "Runs as",
+  "Queue (row numbers)", "Checked today", "Last run", "Last message", "Runs as", "Plan stats",
 ];
 export const SITEMAP_HEADERS = ["Property", "Sitemap", "URLs", "Verified", "Indexed", "Not indexed", "Errors", "Not checked yet", "% verified", "Updated"];
 export const LOG_HEADERS = ["Time", "Property", "Step", "Inspections used", "Indexed", "Not indexed", "Errors", "Drops confirmed", "Note"];
@@ -100,17 +115,32 @@ async function pool<T, R>(items: T[], size: number, fn: (t: T) => Promise<R>): P
 
 /* ---------------- _Jobs: one row per property ---------------- */
 
+/** Written by the daily plan: how far the rotation has got. */
+export type PlanStats = {
+  tracked: number; verified: number; unchecked: number; seenInSearch: number; quiet: number;
+  oldest: string; cycleDays: number; firstPassDays: number;
+};
+
 export type Job = {
   row: number; site: string; tab: string; enabled: boolean; budget: number;
   planDay: string; planStatus: string; plannedAt: string; queue: number[];
-  checkedToday: number; lastRun: string; message: string; runAs: string;
+  checkedToday: number; lastRun: string; message: string; runAs: string; stats: PlanStats | null;
+};
+
+const parseStats = (v: unknown): PlanStats | null => {
+  try {
+    const o = JSON.parse(s(v));
+    return o && typeof o === "object" ? (o as PlanStats) : null;
+  } catch {
+    return null;
+  }
 };
 
 export async function readJobs(): Promise<Job[]> {
   await ensureTab(JOBS_TAB, JOB_HEADERS);
   const t = (await tabs()).get(JOBS_TAB);
-  if (t && t.cols < JOB_HEADERS.length) await ensureTab(JOBS_TAB, JOB_HEADERS, true); // adds the "Runs as" column to older sheets
-  const rows = await readRange(JOBS_TAB, "A2:N");
+  if (t && t.cols < JOB_HEADERS.length) await ensureTab(JOBS_TAB, JOB_HEADERS, true); // adds new columns to older sheets
+  const rows = await readRange(JOBS_TAB, "A2:O");
   return rows
     .map(
       (r, i): Job => ({
@@ -130,6 +160,7 @@ export async function readJobs(): Promise<Job[]> {
         lastRun: s(r[11]),
         message: s(r[12]),
         runAs: s(r[13]).trim() || SA_LABEL,
+        stats: parseStats(r[14]),
       })
     )
     .filter((j) => j.site);
@@ -137,8 +168,11 @@ export async function readJobs(): Promise<Job[]> {
 
 async function saveJob(j: Job) {
   await writeRange(JOBS_TAB, `B${j.row}:B${j.row}`, [[j.tab]]);
-  await writeRange(JOBS_TAB, `G${j.row}:N${j.row}`, [
-    [j.planDay, j.planStatus, j.plannedAt, j.queue.join(","), j.checkedToday, j.lastRun, j.message.slice(0, 500), j.runAs],
+  await writeRange(JOBS_TAB, `G${j.row}:O${j.row}`, [
+    [
+      j.planDay, j.planStatus, j.plannedAt, j.queue.join(","), j.checkedToday, j.lastRun, j.message.slice(0, 500), j.runAs,
+      j.stats ? JSON.stringify(j.stats) : "",
+    ],
   ]);
 }
 
@@ -199,7 +233,7 @@ export async function setEnabled(site: string, enabled: boolean, by: string, run
   const tab = tabFor(site);
   await ensureTab(tab, URL_HEADERS);
   await appendRows(JOBS_TAB, [
-    [site, tab, true, DEFAULT_BUDGET, by, new Date().toISOString(), "", "waiting", "", "", 0, "", "Added. The first daily plan runs within the hour.", runAs],
+    [site, tab, true, DEFAULT_BUDGET, by, new Date().toISOString(), "", "waiting", "", "", 0, "", "Added. The first daily plan runs within the hour.", runAs, ""],
   ]);
 }
 
@@ -225,6 +259,7 @@ export async function propertyStatus(site: string) {
     job: job && {
       tab: job.tab, enabled: job.enabled, budget: job.budget, planDay: job.planDay, planStatus: job.planStatus,
       queued: job.queue.length, checkedToday: job.checkedToday, lastRun: job.lastRun, message: job.message, runAs: job.runAs,
+      stats: job.stats,
     },
     sitemaps,
     changes,
@@ -244,8 +279,9 @@ async function writeSitemapSummary(site: string, rows: Row[], problems: { sitema
     const g = groups.get(key) || { urls: 0, indexed: 0, notIndexed: 0, errors: 0, unchecked: 0 };
     g.urls++;
     const st = s(r[C.status]);
-    if (st === "Indexed") g.indexed++;
-    else if (st === "Not indexed") g.notIndexed++;
+    const byInspection = s(r[C.verifiedBy]) === "URL Inspection";
+    if (st === "Indexed" && byInspection) g.indexed++;
+    else if (st === "Not indexed" && byInspection) g.notIndexed++;
     else if (st === "Error") g.errors++;
     else g.unchecked++;
     groups.set(key, g);
@@ -314,8 +350,8 @@ export async function planProperty(job: Job, day: string): Promise<string> {
   };
   const [imp28, recent, before] = await Promise.all([
     byPage(addDays(end, -27), end),
-    byPage(addDays(end, -2), end),
-    byPage(addDays(end, -16), addDays(end, -3)),
+    byPage(addDays(end, -(QUIET_DAYS - 1)), end),
+    byPage(addDays(end, -(QUIET_DAYS + 13)), addDays(end, -QUIET_DAYS)),
   ]);
 
   // 2. Current rows, plus new URLs at the bottom.
@@ -337,12 +373,18 @@ export async function planProperty(job: Job, day: string): Promise<string> {
   for (const u of inSitemap.keys()) if (!at.has(u)) addRow(u);
   for (const [u, v] of imp28) if (v > 0 && !at.has(u)) addRow(u);
 
-  // 3. Decide what needs a URL Inspection today.
+  // 3. Decide what to inspect today. Only URL Inspection sets Indexed / Not indexed.
   const now = new Date().toISOString();
   const changes: Row[] = [];
-  const due: { i: number; p: number; sitemap: string; inspected: string }[] = [];
-  let withImpressions = 0;
-  let stoppedCount = 0;
+  type Due = { i: number; p: number; sitemap: string; inspected: string };
+  const due: Due[] = [];
+  let tracked = 0;
+  let verified = 0;
+  let seenInSearch = 0;
+  let quietCount = 0;
+  let reset = 0;
+  let oldest = "";
+
   rows.forEach((r, i) => {
     const url = s(r[C.url]);
     if (!url) return;
@@ -357,57 +399,73 @@ export async function planProperty(job: Job, day: string): Promise<string> {
     r[C.source] = smu && imp ? "Sitemap + search" : smu ? "Sitemap" : imp ? "Search only" : "No longer listed";
     r[C.imp28] = imp;
     if (rec > 0) r[C.lastSeen] = end;
+    if (r[C.source] === "No longer listed") return;
+    tracked++;
+    if (rec > 0) seenInSearch++;
 
-    const status = s(r[C.status]);
+    // Results that earlier versions took from impressions are cleared: those URLs wait for a real inspection.
+    if (s(r[C.verifiedBy]) === "Impressions") {
+      r[C.status] = "Not checked yet";
+      r[C.verifiedBy] = "";
+      r[C.reason] = "";
+      r[C.inspected] = "";
+      reset++;
+    }
     const inspected = s(r[C.inspected]);
-    const stopped = base >= DROP_MIN_IMPRESSIONS && rec === 0;
-
-    // Impressions are free proof of indexing, unless they just stopped.
-    if (imp > 0 && !stopped) {
-      withImpressions++;
-      if (status !== "Indexed") {
-        if (status === "Not indexed") {
-          r[C.flag] = `Now appearing in search (${end})`;
-          changes.push([now, job.site, url, "Now appearing in search", "Not indexed", "Indexed (has impressions)", s(r[C.link])]);
-        } else r[C.flag] = "";
-        r[C.status] = "Indexed";
-        r[C.verifiedBy] = "Impressions";
-      } else if (s(r[C.flag]) === "New") r[C.flag] = "";
-      r[C.nextCheck] = "Not needed while it gets impressions";
-      return;
+    if (!inspected && s(r[C.status]) !== "Not checked yet") r[C.status] = "Not checked yet";
+    const status = s(r[C.status]);
+    const flag = s(r[C.flag]);
+    const age = ageDays(day, inspected);
+    if (status === "Indexed" || status === "Not indexed") {
+      verified++;
+      if (!oldest || inspected < oldest) oldest = inspected;
     }
 
+    const quiet = rec === 0 && base >= QUIET_MIN_BEFORE;
     let p = 0;
-    if (stopped && ageDays(day, inspected) > 3) {
-      p = 1;
-      stoppedCount++;
-      r[C.flag] = `Impressions stopped (last seen ${s(r[C.lastSeen]) || "earlier"}), checking`;
-      changes.push([now, job.site, url, "Impressions stopped", `${base} impressions in the 14 days before`, "Being checked with URL Inspection", s(r[C.link])]);
-    } else if (r[C.source] === "No longer listed") p = 0;
-    else if (!inspected) p = 2;
-    else if (s(r[C.lastmod]) && s(r[C.lastmod]).slice(0, 10) > inspected.slice(0, 10)) p = 3;
-    else if (status === "Error" && ageDays(day, inspected) >= 1) p = 4;
-    else if (ageDays(day, inspected) >= RECHECK_DAYS) p = status === "Not indexed" ? 5 : 6;
-
-    if (p) {
-      due.push({ i, p, sitemap: s(r[C.sitemap]), inspected });
-      r[C.nextCheck] = day;
-    } else if (r[C.source] === "No longer listed") {
-      r[C.nextCheck] = "Not checked (no longer in a sitemap or search)";
-    } else if (inspected) {
-      r[C.nextCheck] = addDays(inspected.slice(0, 10), status === "Error" ? 1 : RECHECK_DAYS);
+    if (quiet && status !== "Not indexed") {
+      if (age >= QUIET_COOLDOWN_DAYS) {
+        p = 1;
+        quietCount++;
+        if (!flag.startsWith("No impressions")) {
+          changes.push([now, job.site, url, "Impressions stopped", `${base} impressions in the 14 days before`, "Being checked with URL Inspection", s(r[C.link])]);
+        }
+        r[C.flag] = FLAG_QUIET;
+      } else {
+        r[C.flag] = `No impressions for ${QUIET_DAYS}+ days · still indexed when checked on ${inspected.slice(0, 10)}`;
+      }
+    } else if (rec > 0 && status === "Not indexed" && age >= 1) {
+      p = 2;
+      if (!flag.startsWith("Back in search")) {
+        changes.push([now, job.site, url, "Back in search", "Not indexed", "Has impressions again; being checked", s(r[C.link])]);
+      }
+      r[C.flag] = FLAG_BACK;
+    } else if (!inspected) {
+      p = 3;
+    } else if (s(r[C.lastmod]) && s(r[C.lastmod]).slice(0, 10) > inspected.slice(0, 10)) {
+      p = 4;
+    } else if (status === "Error" && age >= 1) {
+      p = 5;
+    } else if (rec > 0 && flag.startsWith("No impressions") && age >= 1) {
+      p = 6;
+      changes.push([now, job.site, url, "Back in search", "No impressions", "Has impressions again; being checked", s(r[C.link])]);
+      r[C.flag] = FLAG_BACK;
+    } else if (age >= 1) {
+      p = 7;
     }
+    if (p) due.push({ i, p, sitemap: s(r[C.sitemap]), inspected });
   });
 
-  // 4. Today's queue: impressions stopped first; never-checked URLs take turns across sitemaps so each sitemap
-  //    gets an early picture; then changed pages, failed checks, and the oldest results.
+  // 4. Today's queue, within the daily budget.
   due.sort((a, b) => a.p - b.p || (a.inspected < b.inspected ? -1 : a.inspected > b.inspected ? 1 : 0));
   const queue: number[] = [];
   const room = () => queue.length < job.budget;
-  for (const d of due) if (d.p === 1 && room()) queue.push(d.i + 2);
-  const fresh = new Map<string, typeof due>();
+  const quietCap = Math.floor(job.budget * QUIET_SHARE);
+  for (const d of due) if (d.p === 1 && queue.length < quietCap) queue.push(d.i + 2);
+  for (const d of due) if (d.p === 2 && room()) queue.push(d.i + 2);
+  const fresh = new Map<string, Due[]>();
   for (const d of due) {
-    if (d.p !== 2) continue;
+    if (d.p !== 3) continue;
     const list = fresh.get(d.sitemap) || [];
     list.push(d);
     fresh.set(d.sitemap, list);
@@ -423,9 +481,20 @@ export async function planProperty(job: Job, day: string): Promise<string> {
     }
     if (!any) break;
   }
-  for (const d of due) if (d.p > 2 && room()) queue.push(d.i + 2);
+  for (const d of due) if (d.p > 3 && room()) queue.push(d.i + 2);
 
-  // 5. Save the tab in chunks so each request stays small.
+  // 5. "Next check" for every row.
+  const queued = new Set(queue);
+  const cycleDays = Math.max(1, Math.ceil(tracked / Math.max(1, job.budget)));
+  rows.forEach((r, i) => {
+    if (!s(r[C.url])) return;
+    if (queued.has(i + 2)) r[C.nextCheck] = day;
+    else if (r[C.source] === "No longer listed") r[C.nextCheck] = "Not checked (no longer in a sitemap or search)";
+    else if (!s(r[C.inspected])) r[C.nextCheck] = "Waiting for its first check";
+    else r[C.nextCheck] = `In rotation (about every ${cycleDays} days)`;
+  });
+
+  // 6. Save the tab in chunks so each request stays small.
   await ensureSize(job.tab, rows.length + 1, W);
   for (let i = 0; i < rows.length; i += 4000) {
     const part = rows.slice(i, i + 4000);
@@ -434,13 +503,26 @@ export async function planProperty(job: Job, day: string): Promise<string> {
   await writeSitemapSummary(job.site, rows, sm.errors);
   await recordChanges(changes);
 
+  const unchecked = tracked - verified;
+  job.stats = {
+    tracked,
+    verified,
+    unchecked,
+    seenInSearch,
+    quiet: quietCount,
+    oldest: unchecked ? "" : oldest,
+    cycleDays,
+    firstPassDays: Math.ceil(unchecked / Math.max(1, job.budget)),
+  };
   job.planDay = day;
   job.planStatus = "ready";
   job.queue = queue;
   job.checkedToday = 0;
   job.message =
-    `${rows.length.toLocaleString()} URLs (${added.toLocaleString()} new) · ${withImpressions.toLocaleString()} proven indexed by impressions · ` +
-    `${stoppedCount} with impressions that stopped · ${queue.length.toLocaleString()} queued for URL Inspection today` +
+    `${tracked.toLocaleString()} URLs tracked (${added.toLocaleString()} new) · ${verified.toLocaleString()} checked with URL Inspection · ` +
+    `${queue.length.toLocaleString()} queued today` +
+    (quietCount ? ` (including ${quietCount.toLocaleString()} with no impressions for ${QUIET_DAYS}+ days)` : "") +
+    (reset ? ` · ${reset.toLocaleString()} earlier impression-based results reset` : "") +
     (sm.errors.length ? ` · ${sm.errors.length} sitemap problem(s)` : "");
   await saveJob(job);
   await log(job.site, "plan", {}, `${job.message} · runs as ${job.runAs}`);
@@ -510,13 +592,13 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
     if (status === "Indexed") c.indexed++;
     else c.notIndexed++;
     let flag = "";
-    if (status === "Not indexed" && (prev === "Indexed" || prevFlag.startsWith("Impressions stopped"))) {
+    if (status === "Not indexed" && (prev === "Indexed" || prevFlag.startsWith("No impressions"))) {
       flag = `Dropped from Google's index (found ${day})`;
       c.drops++;
       changes.push([now, job.site, url, "Dropped from Google's index", prevReason || prev || "Indexed", res.coverageState, res.link]);
-    } else if (status === "Indexed" && prevFlag.startsWith("Impressions stopped")) {
-      flag = "Impressions stopped, but still indexed";
-      changes.push([now, job.site, url, "Impressions stopped, still indexed", "Impressions stopped", res.coverageState, res.link]);
+    } else if (status === "Indexed" && prevFlag.startsWith("No impressions")) {
+      flag = "No recent impressions, but still indexed";
+      changes.push([now, job.site, url, "No impressions, still indexed", "No impressions for 4+ days", res.coverageState, res.link]);
     } else if (status === "Indexed" && prev === "Not indexed") {
       flag = `Newly indexed (found ${day})`;
       changes.push([now, job.site, url, "Newly indexed", prevReason || "Not indexed", res.coverageState, res.link]);
@@ -525,7 +607,7 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
       range: `E${r}:K${r}`,
       values: [[status, "URL Inspection", res.coverageState, res.pageFetchState, res.lastCrawlTime, res.googleCanonical, res.checkedAt]],
     });
-    data.push({ range: `N${r}:P${r}`, values: [[addDays(day, RECHECK_DAYS), flag, res.link]] });
+    data.push({ range: `N${r}:P${r}`, values: [["In rotation", flag, res.link]] });
   }
   if (data.length) await writeRanges(job.tab, data);
   await recordChanges(changes);
@@ -551,6 +633,7 @@ export async function runChecks(deadline: number) {
 
   const tokens = new Map<Job, string>();
   const stopped = new Set<Job>();
+  const touched = new Set<Job>();
   const timeLeft = () => Date.now() < deadline - 15_000;
   let used = 0;
 
@@ -570,6 +653,7 @@ export async function runChecks(deadline: number) {
         j.queue = j.queue.filter((row) => !r.done.has(row));
         j.checkedToday += r.used;
         used += r.used;
+        if (r.used) touched.add(j);
         j.lastRun = new Date().toISOString();
         if (r.stop) {
           stopped.add(j);
@@ -582,7 +666,6 @@ export async function runChecks(deadline: number) {
         }
         await saveJob(j);
         await log(j.site, "check", r, r.stop);
-        if (!j.queue.length && timeLeft()) await refreshSummary(j).catch(() => {});
       } catch (e) {
         stopped.add(j);
         j.message = `Checks paused: ${e instanceof Error ? e.message : "error"}`.slice(0, 500);
@@ -591,6 +674,12 @@ export async function runChecks(deadline: number) {
         await log(j.site, "check", {}, j.message);
       }
     }
+  }
+
+  // Keep the dashboard's counts current: recount each property that got new results in this run.
+  for (const j of touched) {
+    if (Date.now() > deadline - 5_000) break;
+    await refreshSummary(j).catch(() => {});
   }
   return { day, used, jobs: jobs.map((j) => ({ site: j.site, checkedToday: j.checkedToday, queued: j.queue.length })) };
 }
