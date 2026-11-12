@@ -172,7 +172,7 @@ export default function IndexReport({
         {!state && <p className="muted">Loading saved page indexing data…</p>}
         {state && !hasData && (
           <div className="notice">
-            No page indexing data saved for this property yet. The Chrome extension adds it with its weekly update (see the Index checks tab).
+            No page indexing data saved for this property yet. The Chrome extension adds it with its weekly update (see the Weekly captures tab).
           </div>
         )}
 
