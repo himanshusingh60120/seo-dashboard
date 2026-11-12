@@ -1,13 +1,31 @@
+// chrome-extension/options.js
 const $ = (id) => document.getElementById(id);
 const store = chrome.storage.local;
 const KINDS = [["indexing", "Page indexing"], ["crawl", "Crawl stats"], ["ai", "AI impressions"]];
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
+/** Same as background.js: take the address and key from config.json (in the downloaded zip) when it's new. */
+async function seed() {
+  try {
+    const res = await fetch(chrome.runtime.getURL("config.json"), { cache: "no-store" });
+    if (!res.ok) return;
+    const c = await res.json();
+    const { configAt } = await store.get("configAt");
+    if (c.dashUrl && c.key && c.createdAt !== configAt) {
+      await store.set({ dashUrl: c.dashUrl, key: c.key, configAt: c.createdAt, email: c.email || "" });
+    }
+  } catch (e) {
+    /* set up by hand */
+  }
+}
+
 async function load() {
-  const c = await store.get(["dashUrl", "key", "extra"]);
+  await seed();
+  const c = await store.get(["dashUrl", "key", "extra", "email"]);
   $("dash").value = c.dashUrl || "";
   $("key").value = c.key || "";
   $("extra").value = c.extra || "";
+  $("who").textContent = c.email ? `Set up for ${c.email}. Captures are saved under this name.` : "";
   render();
 }
 
@@ -28,7 +46,7 @@ async function render() {
   $("status").innerHTML = sites.length ? h : "";
   $("msg").textContent = all.running
     ? `Working: ${all.now || "…"}`
-    : all.lastError || (all.lastCheck ? `Last checked ${new Date(all.lastCheck).toLocaleString()}` : "");
+    : all.lastError || (all.lastCheck ? `Last checked ${new Date(all.lastCheck).toLocaleString()}` : "Connected. The first capture starts within a few minutes.");
 }
 
 $("save").onclick = async () => {
