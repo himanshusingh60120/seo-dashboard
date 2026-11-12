@@ -1,7 +1,8 @@
 // Once a week (checked every hour while Chrome is open), copies Search Console's Page indexing, Crawl stats and
-// Generative AI reports for every property enabled in the dashboard and sends them to the dashboard, which checks the
-// numbers and saves them in the Google Sheet. It uses this Chrome profile's Google sign-in and works in a small
-// window of its own that closes when it's done.
+// Generative AI reports for every property the dashboard lists (properties with daily index checks, plus those added
+// with "Capture this property now") and sends them to the dashboard, which checks the numbers and saves them in the
+// Google Sheets. The dashboard's button can also ask for one property right away (through bridge.js).
+// It uses this Chrome profile's Google sign-in and works in a small window of its own that closes when it's done.
 // When installed from the dashboard's "Download the extension" button, config.json already holds the dashboard address
 // and the person's key, so no setup is needed.
 import { clickPurpose, openAiReport, scrapeAi, scrapeCrawl, scrapeIndexing } from "./scrapers.js";
@@ -10,6 +11,7 @@ const KINDS = ["indexing", "crawl", "ai"];
 const LABEL = { indexing: "Page indexing", crawl: "Crawl stats", ai: "AI impressions" };
 const WEEK = 6.5 * 24 * 3600e3; // a little under 7 days, so the weekly run doesn't drift later each week
 const RETRY = 12 * 3600e3; // after a failure, try again 12 hours later
+const BUSY_MS = 45 * 60e3;
 const GSC = "https://search.google.com/search-console";
 const store = chrome.storage.local;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -39,6 +41,25 @@ chrome.alarms.onAlarm.addListener((a) => {
 });
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg?.type !== "run") return false;
+  if (msg.site) {
+    // From the dashboard's "Capture this property now" (via bridge.js): start, answer at once, and the page follows
+    // the progress through the saved status.
+    seed()
+      .then(() => store.get(["running", "dashUrl", "key"]))
+      .then(({ running, dashUrl, key }) => {
+        if (!dashUrl || !key) {
+          reply({ ok: false, error: "The extension isn't set up yet. Download it again from the dashboard." });
+          return;
+        }
+        if (running && Date.now() - running < BUSY_MS) {
+          reply({ ok: false, error: "The extension is already capturing. Try again when it has finished." });
+          return;
+        }
+        runAll(true, String(msg.site)).catch(() => {});
+        reply({ ok: true });
+      });
+    return true;
+  }
   runAll(true).then(
     () => reply({ ok: true }),
     (e) => reply({ ok: false, error: String(e?.message || e) })
@@ -65,11 +86,12 @@ async function setStatus(site, kind, patch) {
   await store.set({ [k]: { ...cur, ...patch } });
 }
 
-async function runAll(manual) {
+/** Captures what's due. manual: everything now. only: just this one property (all three reports). */
+async function runAll(manual, only = "") {
   await seed();
   const { dashUrl, key, extra, running } = await store.get(["dashUrl", "key", "extra", "running"]);
   if (!dashUrl || !key) return;
-  if (running && Date.now() - running < 45 * 60e3) return;
+  if (running && Date.now() - running < BUSY_MS) return;
 
   let sites = [];
   try {
@@ -79,9 +101,10 @@ async function runAll(manual) {
     return;
   }
   for (const s of String(extra || "").split(/\s+/)) if (s && !sites.includes(s)) sites.push(s);
+  if (only && !sites.includes(only)) sites.push(only);
 
   const due = [];
-  for (const site of sites) {
+  for (const site of only ? [only] : sites) {
     for (const kind of KINDS) {
       const k = `status:${site}:${kind}`;
       const st = (await store.get(k))[k] || {};
