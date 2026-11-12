@@ -2,6 +2,8 @@
 // Generative AI reports for every property enabled in the dashboard and sends them to the dashboard, which checks the
 // numbers and saves them in the Google Sheet. It uses this Chrome profile's Google sign-in and works in a small
 // window of its own that closes when it's done.
+// When installed from the dashboard's "Download the extension" button, config.json already holds the dashboard address
+// and the person's key, so no setup is needed.
 import { clickPurpose, openAiReport, scrapeAi, scrapeCrawl, scrapeIndexing } from "./scrapers.js";
 
 const KINDS = ["indexing", "crawl", "ai"];
@@ -12,7 +14,24 @@ const GSC = "https://search.google.com/search-console";
 const store = chrome.storage.local;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const schedule = () => chrome.alarms.create("check", { periodInMinutes: 60, delayInMinutes: 3 });
+/** Copies the dashboard address and key from config.json (in the downloaded zip) when it's new. */
+async function seed() {
+  try {
+    const res = await fetch(chrome.runtime.getURL("config.json"), { cache: "no-store" });
+    if (!res.ok) return;
+    const c = await res.json();
+    const { configAt } = await store.get("configAt");
+    if (c.dashUrl && c.key && c.createdAt !== configAt) {
+      await store.set({ dashUrl: c.dashUrl, key: c.key, configAt: c.createdAt, email: c.email || "" });
+    }
+  } catch (e) {
+    /* no config.json: set up by hand in the extension's settings */
+  }
+}
+
+const schedule = () => {
+  seed().finally(() => chrome.alarms.create("check", { periodInMinutes: 60, delayInMinutes: 2 }));
+};
 chrome.runtime.onInstalled.addListener(schedule);
 chrome.runtime.onStartup.addListener(schedule);
 chrome.alarms.onAlarm.addListener((a) => {
@@ -47,6 +66,7 @@ async function setStatus(site, kind, patch) {
 }
 
 async function runAll(manual) {
+  await seed();
   const { dashUrl, key, extra, running } = await store.get(["dashUrl", "key", "extra", "running"]);
   if (!dashUrl || !key) return;
   if (running && Date.now() - running < 45 * 60e3) return;
