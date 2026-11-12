@@ -8,6 +8,7 @@ import type { GscData, Source, Sources } from "@/lib/types";
 import { AI_HOW_TO, clearAi, parseAiFiles, saveAi, useAiStore } from "@/lib/aiImpressions";
 import { aiBookmarkletFor, parseAiCapture } from "@/lib/aiCapture";
 import { AI_MAX_PAGES, aiSum, latestAiSnapshot, type AiParsed } from "@/lib/aiStore";
+import { addDays } from "@/lib/dates";
 import { Bars, DataTable, Delta, Kpis, PanelTitle, Section, SourcesProvider, num, pct, useSources, type Col, type KpiItem } from "./ui";
 
 const axis = { fontSize: 12, fill: "#5b6573" };
@@ -35,6 +36,33 @@ const ago = (iso: string) => {
   return d < 1 ? `${Math.max(1, Math.round(d * 24))} h ago` : `${Math.round(d)} day${Math.round(d) === 1 ? "" : "s"} ago`;
 };
 
+/* ---------- Date range for the AI section ---------- */
+
+type AiRange = "period" | "3m" | "all";
+const RANGE_KEY = "dash:ai:range";
+
+/** "2026-11-10" → "10 Nov 2026" */
+const fmtDate = (iso: string) => {
+  const d = new Date(`${iso}T00:00:00Z`);
+  return isNaN(d.getTime())
+    ? iso
+    : d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+};
+const fmtRange = (from: string, to: string) => `${fmtDate(from)} – ${fmtDate(to)}`;
+const daysBetween = (from: string, to: string) =>
+  Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY) + 1;
+
+/** Start of Search Console's "3 months" ending on `end`: the day after the same date 3 months earlier (10 Nov → 11 Aug). */
+function threeMonthsStart(end: string) {
+  const d = new Date(`${end}T00:00:00Z`);
+  const day = d.getUTCDate();
+  d.setUTCDate(1);
+  d.setUTCMonth(d.getUTCMonth() - 3);
+  const lastDay = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+  d.setUTCDate(Math.min(day, lastDay));
+  return addDays(d.toISOString().slice(0, 10), 1);
+}
+
 export default function AiOverview({
   site,
   gsc,
@@ -56,6 +84,7 @@ export default function AiOverview({
   const [pending, setPending] = useState<AiParsed | null>(null);
   const [paste, setPaste] = useState("");
   const [codeCopied, setCodeCopied] = useState(false);
+  const [range, setRange] = useState<AiRange>("period");
   const fileRef = useRef<HTMLInputElement>(null);
   const bmRef = useRef<HTMLAnchorElement>(null);
   const handled = useRef<string | null>(null);
@@ -65,10 +94,57 @@ export default function AiOverview({
   const saved = useMemo(() => (store ? Object.keys(store.days).sort() : []), [store]);
   const last = store?.imports.length ? store.imports[store.imports.length - 1] : null;
   const web = (gsc.searchType || "web") === "web";
-  const cur = aiSum(store, gsc.range.startDate, gsc.range.endDate);
-  const prev = aiSum(store, gsc.previousRange.startDate, gsc.previousRange.endDate);
-  const searchImpr = gsc.totals.current.impressions;
   const reportUrl = `https://search.google.com/search-console/performance/search-analytics?resource_id=${encodeURIComponent(site)}`;
+  const periodDays = daysBetween(gsc.range.startDate, gsc.range.endDate);
+
+  // Remember the chosen range in this browser.
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(RANGE_KEY);
+      if (v === "period" || v === "3m" || v === "all") setRange(v);
+    } catch {
+      /* storage unavailable: keep the default */
+    }
+  }, []);
+  const pickRange = (r: AiRange) => {
+    setRange(r);
+    try {
+      localStorage.setItem(RANGE_KEY, r);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  /** The dates the cards and chart cover, plus the same-length window before them for the change figure. */
+  const win = useMemo(() => {
+    const end = gsc.range.endDate;
+    if (range === "3m") {
+      const from = threeMonthsStart(end);
+      const n = daysBetween(from, end);
+      return { from, to: end, prevFrom: addDays(from, -n) as string | null, prevTo: addDays(from, -1) as string | null };
+    }
+    if (range === "all" && saved.length) {
+      return { from: saved[0], to: saved[saved.length - 1], prevFrom: null, prevTo: null };
+    }
+    return { from: gsc.range.startDate, to: end, prevFrom: gsc.previousRange.startDate, prevTo: gsc.previousRange.endDate };
+  }, [range, saved, gsc.range.startDate, gsc.range.endDate, gsc.previousRange.startDate, gsc.previousRange.endDate]);
+
+  const cur = aiSum(store, win.from, win.to);
+  const prev = win.prevFrom && win.prevTo ? aiSum(store, win.prevFrom, win.prevTo) : null;
+
+  const searchByDay = useMemo(() => new Map(gsc.trend.map((t) => [t.date, t.impressions])), [gsc.trend]);
+
+  /** All Search impressions for exactly the same days; 0 when the dashboard hasn't loaded every one of those days. */
+  const searchImpr = useMemo(() => {
+    if (range === "period") return gsc.totals.current.impressions;
+    let total = 0;
+    for (let d = win.from, i = 0; d <= win.to && i < 1100; d = addDays(d, 1), i++) {
+      const s = searchByDay.get(d);
+      if (s == null) return 0;
+      total += s;
+    }
+    return total;
+  }, [range, win.from, win.to, searchByDay, gsc.totals.current.impressions]);
 
   // Set the bookmark's address directly (React warns about javascript: links in JSX).
   useEffect(() => {
@@ -130,18 +206,19 @@ export default function AiOverview({
     }
   };
 
-  const trend = useMemo(
-    () =>
-      gsc.trend.map((t) => {
-        const v = store?.days[t.date];
-        return {
-          date: t.date,
-          ai: v ?? null,
-          share: v != null && t.impressions > 0 ? +((v / t.impressions) * 100).toFixed(2) : null,
-        };
-      }),
-    [gsc.trend, store]
-  );
+  const trend = useMemo(() => {
+    const out: { date: string; ai: number | null; share: number | null }[] = [];
+    for (let d = win.from, i = 0; d <= win.to && i < 1100; d = addDays(d, 1), i++) {
+      const v = store?.days[d];
+      const s = searchByDay.get(d);
+      out.push({
+        date: d,
+        ai: v ?? null,
+        share: v != null && s ? +((v / s) * 100).toFixed(2) : null,
+      });
+    }
+    return out;
+  }, [win.from, win.to, store, searchByDay]);
 
   const pageRows = useMemo<PageAiRow[]>(() => {
     if (!snap) return [];
@@ -161,10 +238,12 @@ export default function AiOverview({
       formula:
         "Daily impressions come from the report's chart and are merged by date across updates; a newer update replaces the same dates. " +
         "Bookmark copies are saved automatically only when the days add up to the report's Total impressions. " +
-        "Page, country and device totals come from the most recent update and cover only its dates, because the report doesn't split them by day.",
+        "Page, country and device totals come from the most recent update and cover only its dates, because the report doesn't split them by day. " +
+        "Search Console lists at most 1,000 pages, so a page count of 1,000 means at least 1,000.",
       verifyUrl: reportUrl,
       verifyLabel: "Open Performance in Search Console",
-      verifyHow: "Search Console → Performance → Open report (Generative AI features). Set the same dates; the daily chart should match day for day.",
+      verifyHow:
+        "Search Console → Performance → Open report (Generative AI features). Set the same dates as the card (\"Last 3 months\" here matches Search Console's 3 months); the totals and the daily chart should match.",
     } as Source;
     const share = {
       id: "calc.aiShare",
@@ -172,8 +251,9 @@ export default function AiOverview({
       system: "Calculated in the dashboard",
       fetchedAt: new Date().toISOString(),
       formula:
-        "AI impressions ÷ Search Console impressions (Web search type) for the same days. Google counts AI Overview and AI Mode impressions inside the " +
-        "normal Search totals too, so this is the part of the site's search impressions that came from links in AI answers.",
+        "AI impressions ÷ Search Console impressions (Web search type) for exactly the same days. Google counts AI Overview and AI Mode impressions inside the " +
+        "normal Search totals too, so this is the part of the site's search impressions that came from links in AI answers. " +
+        "Shown only when Search totals are loaded for every day in the range.",
       derivedFrom: ["client.aiImport", "gsc.trend"],
     } as Source;
     return { ...outer, [imported.id]: imported, [share.id]: share };
@@ -215,35 +295,53 @@ export default function AiOverview({
     setBusy(false);
   };
 
+  const winText = fmtRange(win.from, win.to);
+  const pageCount = snap ? Object.keys(snap.pages).length : 0;
+  const pagesCapped = pageCount >= AI_MAX_PAGES;
+
   const kpis: KpiItem[] = saved.length
     ? [
         {
           label: "AI impressions",
           source: ["client.aiImport"],
           value: cur.covered ? num(cur.total) : "–",
-          delta: cur.complete && prev.complete ? <Delta cur={cur.total} prev={prev.total} /> : undefined,
-          sub: cur.complete ? `${gsc.range.startDate} to ${gsc.range.endDate}` : `${cur.covered} of ${cur.expected} days in this period saved`,
+          delta: prev && cur.complete && prev.complete ? <Delta cur={cur.total} prev={prev.total} /> : undefined,
+          sub: cur.complete
+            ? `${winText} · ${cur.expected} days`
+            : `${winText} · only ${cur.covered} of ${cur.expected} days saved`,
         },
         {
           label: "Share of Search impressions",
           source: ["calc.aiShare"],
           value: web && cur.complete && searchImpr ? pct(cur.total / searchImpr) : "–",
-          sub: web ? "AI impressions ÷ all Search impressions" : "only for the Web search type",
+          sub: !web
+            ? "only for the Web search type"
+            : searchImpr
+              ? `${winText} · AI ÷ all Search impressions`
+              : "Search totals aren't loaded for these dates. Choose “Dashboard period” to see it",
         },
         {
           label: "Pages linked by AI",
           source: ["client.aiImport"],
-          value: snap ? num(Object.keys(snap.pages).length) : "–",
-          sub: snap ? `latest update, ${snap.from} to ${snap.to}` : "no page list saved yet",
+          value: snap ? (pagesCapped ? `${num(AI_MAX_PAGES)}+` : num(pageCount)) : "–",
+          sub: snap
+            ? `${fmtRange(snap.from, snap.to)} · latest capture${pagesCapped ? " · Search Console lists 1,000 max" : ""}`
+            : "no page list saved yet",
         },
         {
           label: "Days saved",
           source: ["client.aiImport"],
           value: num(saved.length),
-          sub: `${saved[0]} to ${saved[saved.length - 1]}`,
+          sub: `${fmtRange(saved[0], saved[saved.length - 1])} · all history`,
         },
       ]
     : [];
+
+  const RANGES: { id: AiRange; label: string }[] = [
+    { id: "period", label: `Dashboard period (${periodDays} days)` },
+    { id: "3m", label: "Last 3 months (same as Search Console)" },
+    { id: "all", label: "All saved days" },
+  ];
 
   /** Bookmark, paste and export steps: shown open when nothing is saved yet, folded away under "How to update" otherwise. */
   const howTo = (
@@ -319,11 +417,35 @@ export default function AiOverview({
 
         {saved.length > 0 && (
           <>
+            <div
+              className="row"
+              role="group"
+              aria-label="Date range for AI impressions"
+              style={{ gap: 6, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}
+            >
+              <span className="muted">Showing:</span>
+              {RANGES.map((r) => (
+                <button
+                  key={r.id}
+                  type="button"
+                  className="btn small"
+                  aria-pressed={range === r.id}
+                  style={range === r.id ? { fontWeight: 600, borderColor: "#5e35b1", color: "#5e35b1" } : undefined}
+                  onClick={() => pickRange(r.id)}
+                >
+                  {r.label}
+                </button>
+              ))}
+              <span className="muted">{winText}</span>
+            </div>
+
             <Kpis items={kpis} />
 
             <div className="panel" style={{ marginTop: 16 }}>
               <PanelTitle source={web ? ["client.aiImport", "calc.aiShare"] : ["client.aiImport"]}>
-                {web ? "AI impressions by day, and share of all Search impressions" : "AI impressions by day"}
+                {web
+                  ? `AI impressions by day, and share of all Search impressions · ${winText}`
+                  : `AI impressions by day · ${winText}`}
               </PanelTitle>
               <ResponsiveContainer width="100%" height={240}>
                 <ComposedChart data={trend} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
@@ -339,7 +461,7 @@ export default function AiOverview({
               </ResponsiveContainer>
               {!cur.complete && (
                 <p className="muted" style={{ marginBottom: 0 }}>
-                  {cur.expected - cur.covered} days in this period have no saved data. Update with the bookmark or a longer export to fill them.
+                  {cur.expected - cur.covered} days in this range have no saved data. Update with the bookmark or a longer export to fill them.
                 </p>
               )}
             </div>
@@ -348,7 +470,9 @@ export default function AiOverview({
               <div className="grid-2" style={{ marginTop: 16, alignItems: "stretch" }}>
                 {/* Pages: fills the height set by the Countries/Devices panel and scrolls inside. */}
                 <div className="panel" style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
-                  <PanelTitle source={["client.aiImport"]}>{`Pages linked by AI, ${snap.from} to ${snap.to}`}</PanelTitle>
+                  <PanelTitle source={["client.aiImport"]}>
+                    {`Pages linked by AI · ${fmtRange(snap.from, snap.to)} (latest capture)${pagesCapped ? " · top 1,000" : ""}`}
+                  </PanelTitle>
                   <div style={{ flex: "1 1 0", minHeight: 320, overflowY: "auto" }}>
                     <DataTable
                       rows={pageRows}
@@ -361,14 +485,14 @@ export default function AiOverview({
                   </div>
                 </div>
                 <div className="panel">
-                  <PanelTitle source={["client.aiImport"]}>Countries</PanelTitle>
+                  <PanelTitle source={["client.aiImport"]}>{`Countries · ${fmtRange(snap.from, snap.to)}`}</PanelTitle>
                   {Object.keys(snap.countries).length ? (
                     <Bars items={top(snap.countries, 10)} color="#5e35b1" />
                   ) : (
                     <p className="muted">Not in the latest update. Click the bookmark again.</p>
                   )}
                   <div style={{ marginTop: 16 }}>
-                    <PanelTitle source={["client.aiImport"]}>Devices</PanelTitle>
+                    <PanelTitle source={["client.aiImport"]}>{`Devices · ${fmtRange(snap.from, snap.to)}`}</PanelTitle>
                     {Object.keys(snap.devices).length ? (
                       <Bars items={top(snap.devices, 5)} color="#9bb0d9" />
                     ) : (
