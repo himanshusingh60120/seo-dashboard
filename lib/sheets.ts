@@ -1,7 +1,7 @@
 // lib/sheets.ts
 // The Google Sheet the dashboard uses as its database (INDEX_SHEET_ID), through the Sheets API, signed in as the
 // service account. Values are written as-is (RAW): dates stay as text such as 2026-11-12, numbers stay numbers.
-// Server-only.
+// Tabs whose name starts with "_" (technical tabs) are created hidden. Server-only.
 import { serviceAccountToken } from "./serviceAccount";
 
 const API = "https://sheets.googleapis.com/v4/spreadsheets";
@@ -75,33 +75,42 @@ export async function tabs(force = false): Promise<Map<string, TabMeta>> {
   return m;
 }
 
-/** Creates the tab (bold, frozen header row) if it doesn't exist. With checkHeaders, rewrites row 1 on an existing tab. */
+/** Runs spreadsheet batchUpdate requests (add, rename or hide tabs, formatting). Returns Google's replies. */
+export async function batchUpdate(requests: object[]): Promise<any> {
+  if (!requests.length) return { replies: [] };
+  return call<any>(":batchUpdate", { method: "POST", body: JSON.stringify({ requests }) });
+}
+
+/**
+ * Creates a simple tab (bold, frozen header row) if it doesn't exist. Tabs whose name starts with "_" are created
+ * hidden. With checkHeaders, rewrites row 1 on an existing tab.
+ */
 export async function ensureTab(title: string, headers: string[], checkHeaders = false) {
   const t = (await tabs()).get(title);
   if (!t) {
     try {
-      const r = await call<any>(":batchUpdate", {
-        method: "POST",
-        body: JSON.stringify({
-          requests: [{ addSheet: { properties: { title, gridProperties: { rowCount: 1000, columnCount: headers.length, frozenRowCount: 1 } } } }],
-        }),
-      });
+      const r = await batchUpdate([
+        {
+          addSheet: {
+            properties: {
+              title,
+              hidden: title.startsWith("_"),
+              gridProperties: { rowCount: 1000, columnCount: headers.length, frozenRowCount: 1 },
+            },
+          },
+        },
+      ]);
       const sheetId = r?.replies?.[0]?.addSheet?.properties?.sheetId;
       if (sheetId != null) {
-        await call(":batchUpdate", {
-          method: "POST",
-          body: JSON.stringify({
-            requests: [
-              {
-                repeatCell: {
-                  range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
-                  cell: { userEnteredFormat: { textFormat: { bold: true } } },
-                  fields: "userEnteredFormat.textFormat.bold",
-                },
-              },
-            ],
-          }),
-        });
+        await batchUpdate([
+          {
+            repeatCell: {
+              range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
+              cell: { userEnteredFormat: { textFormat: { bold: true } } },
+              fields: "userEnteredFormat.textFormat.bold",
+            },
+          },
+        ]);
       }
     } catch (e) {
       if (!/already exists/i.test(e instanceof Error ? e.message : "")) throw e;
@@ -123,19 +132,14 @@ export async function ensureSize(title: string, rows: number, cols: number) {
   if (t.rows >= rows && t.cols >= cols) return;
   const rowCount = Math.max(t.rows, rows + 500);
   const columnCount = Math.max(t.cols, cols);
-  await call(":batchUpdate", {
-    method: "POST",
-    body: JSON.stringify({
-      requests: [
-        {
-          updateSheetProperties: {
-            properties: { sheetId: t.sheetId, gridProperties: { rowCount, columnCount } },
-            fields: "gridProperties.rowCount,gridProperties.columnCount",
-          },
-        },
-      ],
-    }),
-  });
+  await batchUpdate([
+    {
+      updateSheetProperties: {
+        properties: { sheetId: t.sheetId, gridProperties: { rowCount, columnCount } },
+        fields: "gridProperties.rowCount,gridProperties.columnCount",
+      },
+    },
+  ]);
   t.rows = rowCount;
   t.cols = columnCount;
 }
@@ -181,12 +185,10 @@ export async function clearRange(title: string, range: string) {
   await call(`/values/${enc(a1(title, range))}:clear`, { method: "POST", body: "{}" });
 }
 
-
-
 /** Reads several ranges in one request. Tabs that don't exist yet come back empty. */
 export async function batchRead(blocks: { title: string; range: string }[]): Promise<Row[][]> {
   const have = await tabs();
-  const present = blocks.map((b, i) => ({ b, i })).filter((x) => have.has(x.b.title));
+  const present = blocks.map((b, i) => ({ b, i })).filter((x) => x.b.title && have.has(x.b.title));
   const out: Row[][] = blocks.map(() => []);
   if (!present.length) return out;
   const q = present.map((x) => `ranges=${enc(a1(x.b.title, x.b.range))}`).join("&");
