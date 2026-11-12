@@ -2,13 +2,16 @@
 "use client";
 // The "Index checks" tab. Daily URL Inspection runs on the server for this property (results live in the Google
 // Sheet): today's progress, per-sitemap verification, status changes found, and the weekly Search Console captures
-// made by the Chrome extension (or the bookmarks).
+// made by the Chrome extension (or the bookmarks). Anyone who can open the property in Search Console can start the
+// checks; they run as the service account when an owner has added it, otherwise with the starter's Google sign-in.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DataTable, Kpis, PanelTitle, Section, num, pct, type Col, type KpiItem } from "./ui";
 
+const SA_LABEL = "Service account";
+
 type Job = {
   tab: string; enabled: boolean; budget: number; planDay: string; planStatus: string;
-  queued: number; checkedToday: number; lastRun: string; message: string;
+  queued: number; checkedToday: number; lastRun: string; message: string; runAs: string;
 };
 type SitemapRow = {
   sitemap: string; urls: number; verified: number; indexed: number; notIndexed: number;
@@ -17,7 +20,7 @@ type SitemapRow = {
 type Change = { at: string; url: string; change: string; before: string; after: string; link: string };
 type Capture = { report: string; at: string; by: string; source: string; from: string; to: string };
 type Status = {
-  configured: boolean; serviceAccount?: string; job?: Job | null; sitemaps?: SitemapRow[];
+  configured: boolean; serviceAccount?: string; saCanRead?: boolean; job?: Job | null; sitemaps?: SitemapRow[];
   changes?: Change[]; captures?: Capture[]; sheetUrl?: string;
 };
 
@@ -113,14 +116,14 @@ export default function IndexChecks({ site }: { site: string }) {
     return () => clearInterval(t);
   }, [load]);
 
-  const setEnabled = async (enabled: boolean) => {
+  const post = async (body: Record<string, unknown>) => {
     setBusy(true);
     setErr(null);
     try {
       const r = await fetch("/api/index-checks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ site, enabled }),
+        body: JSON.stringify({ site, ...body }),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
@@ -178,12 +181,13 @@ export default function IndexChecks({ site }: { site: string }) {
   const changeTypes = useMemo(() => Array.from(new Set(changes.map((c) => c.change))), [changes]);
   const shownChanges = changeFilter === "all" ? changes : changes.filter((c) => c.change === changeFilter);
 
+  const runsAsPerson = !!job && job.runAs !== SA_LABEL;
   const state = !job
     ? "Not started"
     : !job.enabled
       ? "Paused"
-      : job.planStatus === "error"
-        ? "Problem"
+      : job.planStatus === "error" || /^Checks paused/.test(job.message)
+        ? "Needs attention"
         : job.planStatus === "planning"
           ? "Planning today's checks"
           : job.planDay !== pacificToday()
@@ -195,13 +199,13 @@ export default function IndexChecks({ site }: { site: string }) {
   const kpis: KpiItem[] = job
     ? [
         { label: "Status", value: state, sub: job.lastRun ? `last run ${agoText(job.lastRun)}` : undefined },
+        { label: "Runs as", value: runsAsPerson ? job.runAs : "Service account", sub: runsAsPerson ? "their Google sign-in" : st?.serviceAccount },
         { label: "Inspected today", value: num(job.checkedToday), sub: `of ${num(job.budget)} a day` },
         { label: "Still queued today", value: num(job.queued) },
         { label: "URLs tracked", value: num(totals.urls), sub: `${num(totals.files)} sitemap file(s)` },
         { label: "Verified", value: num(totals.verified), sub: totals.urls ? `${pct(totals.verified / totals.urls, 1)} of tracked URLs` : undefined },
         { label: "Indexed", value: num(totals.indexed), sub: totals.verified ? `${pct(totals.indexed / totals.verified, 1)} of verified` : undefined },
-        { label: "Not indexed", value: num(totals.notIndexed) },
-        { label: "Not checked yet", value: num(totals.notChecked), sub: totals.errors ? `${num(totals.errors)} failed checks` : undefined },
+        { label: "Not indexed", value: num(totals.notIndexed), sub: totals.notChecked ? `${num(totals.notChecked)} not checked yet` : undefined },
       ]
     : [];
 
@@ -209,7 +213,7 @@ export default function IndexChecks({ site }: { site: string }) {
     <>
       <Section
         title="Index checks"
-        lede="Google's URL Inspection, run every day by the server for this property, so nobody needs to keep a tab open. Pages with Search impressions count as indexed for free; the daily inspections go to pages whose impressions stopped, new and changed pages, and results older than 30 days. Every result is saved in the Google Sheet."
+        lede="Google's URL Inspection, run every day by the server for this property, so nobody needs to keep a tab open. Pages with Search impressions count as indexed for free; the daily inspections go to pages whose impressions stopped, new and changed pages, and results older than 30 days. Every result is saved in the shared Google Sheet, so anyone who opens this property sees the same data and nothing is checked twice."
       >
         {err && <div className="notice error">{err}</div>}
         {!st && !err && <p className="muted">Loading…</p>}
@@ -226,14 +230,15 @@ export default function IndexChecks({ site }: { site: string }) {
             <PanelTitle>Start daily index checks for this property</PanelTitle>
             <p style={{ marginTop: 0 }}>
               The server will read this property&apos;s sitemaps every day and inspect up to 1,800 URLs a day, saving each result
-              in its own tab of the Google Sheet. Google allows 2,000 inspections a day per property, so about 200 stay free for
-              people using the dashboard.
+              in this property&apos;s tab of the shared Google Sheet. Google allows 2,000 inspections a day per property, so about
+              200 stay free for people using the dashboard.
             </p>
             <p className="muted">
-              First, in Search Console open Settings → Users and permissions for this property and add{" "}
-              <b>{st.serviceAccount || "the service account"}</b> as a user.
+              {st.saCanRead
+                ? "The service account already has access to this property, so the checks will run as the service account."
+                : `The service account (${st.serviceAccount || "not set"}) hasn't been added to this property, so the checks will run with your own Google sign-in. You don't need to be an owner. If an owner adds the service account later, the checks switch to it automatically.`}
             </p>
-            <button className="btn primary" onClick={() => setEnabled(true)} disabled={busy}>
+            <button className="btn primary" onClick={() => post({ enabled: true })} disabled={busy}>
               {busy ? "Starting…" : "Start daily index checks"}
             </button>
           </div>
@@ -244,10 +249,23 @@ export default function IndexChecks({ site }: { site: string }) {
             <Kpis items={kpis} />
             <div className="panel" style={{ marginTop: 12 }}>
               <p style={{ marginTop: 0 }}>{job.message || "Waiting for the first daily plan (it runs every hour)."}</p>
+              {runsAsPerson && (
+                <p className="muted">
+                  These checks use <b>{job.runAs}</b>&apos;s Google sign-in because the service account hasn&apos;t been added to this
+                  property. If that stops working (for example the person leaves or loses access), anyone who can open the
+                  property can take over with “Use my Google sign-in”. Ask an owner to add {st.serviceAccount} to make it
+                  independent of any one person.
+                </p>
+              )}
               <div className="row" style={{ alignItems: "center" }}>
-                <button className="btn" onClick={() => setEnabled(!job.enabled)} disabled={busy}>
+                <button className="btn" onClick={() => post({ enabled: !job.enabled })} disabled={busy}>
                   {job.enabled ? "Pause daily checks" : "Resume daily checks"}
                 </button>
+                {!st.saCanRead && (
+                  <button className="btn" onClick={() => post({ enabled: true, useMine: true })} disabled={busy}>
+                    Use my Google sign-in
+                  </button>
+                )}
                 {st.sheetUrl && (
                   <a className="btn" href={st.sheetUrl} target="_blank" rel="noreferrer">
                     Open the Google Sheet (tab “{job.tab}”)
@@ -345,11 +363,14 @@ export default function IndexChecks({ site }: { site: string }) {
                     <tr key={c.report}>
                       <td>{c.report}</td>
                       <td>
-                        <span className={`delta ${!c.at ? "flat" : stale ? "bad" : "good"}`}>
-                          {c.at ? agoText(c.at) : "Never"}
-                        </span>{" "}
+                        <span className={`delta ${!c.at ? "flat" : stale ? "bad" : "good"}`}>{c.at ? agoText(c.at) : "Never"}</span>{" "}
                         {stale && <span className="muted">· due</span>}
-                        {c.at && <div className="muted">{when(c.at)}{c.source ? ` · ${c.source}` : ""}</div>}
+                        {c.at && (
+                          <div className="muted">
+                            {when(c.at)}
+                            {c.source ? ` · ${c.source}` : ""}
+                          </div>
+                        )}
                       </td>
                       <td>{c.by || "–"}</td>
                       <td>{c.from && c.to ? `${c.from} to ${c.to}` : "–"}</td>
@@ -371,7 +392,10 @@ export default function IndexChecks({ site }: { site: string }) {
             <PanelTitle>Chrome extension</PanelTitle>
             <ol className="muted" style={{ marginTop: 0, paddingLeft: 18 }}>
               <li>Install the “KR Search Dashboard capture” extension (chrome://extensions → Developer mode → Load unpacked).</li>
-              <li>Open it, enter this dashboard&apos;s address ({typeof window !== "undefined" ? window.location.origin : ""}) and your key below, and click Save.</li>
+              <li>
+                Open it, enter this dashboard&apos;s address ({typeof window !== "undefined" ? window.location.origin : ""}) and your
+                key below, and click Save.
+              </li>
               <li>It then captures every property with daily index checks once a week, while Chrome is open and signed in to Search Console.</li>
             </ol>
             <div className="row" style={{ alignItems: "center" }}>
@@ -379,7 +403,13 @@ export default function IndexChecks({ site }: { site: string }) {
                 <button className="btn" onClick={showKey}>Show my extension key</button>
               ) : (
                 <>
-                  <input readOnly value={key} onFocus={(e) => e.target.select()} style={{ minWidth: 360, fontFamily: "monospace" }} aria-label="Your extension key" />
+                  <input
+                    readOnly
+                    value={key}
+                    onFocus={(e) => e.target.select()}
+                    style={{ minWidth: 360, fontFamily: "monospace" }}
+                    aria-label="Your extension key"
+                  />
                   <button className="btn" onClick={copyKey}>{copied ? "Copied" : "Copy"}</button>
                 </>
               )}
