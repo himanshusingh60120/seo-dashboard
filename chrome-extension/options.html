@@ -19,9 +19,10 @@
       Copies Page indexing, Crawl stats and AI impressions from Search Console once a week and saves them in the dashboard.
       Keep this Chrome profile signed in to the Google account you use for Search Console.
     </p>
+    <p id="who" class="muted"></p>
     <label>Dashboard address <input id="dash" placeholder="https://your-dashboard.vercel.app" /></label>
-    <label>Extension key <input id="key" placeholder="Paste your key from the dashboard" /></label>
-    <p class="muted">To get your key, open <code>/api/capture/key</code> on the dashboard while signed in.</p>
+    <label>Extension key <input id="key" placeholder="Filled in automatically when downloaded from the dashboard" /></label>
+    <p class="muted">Installed from the dashboard's “Download the extension” button? Both are already filled in.</p>
     <label>Extra properties (optional, one per line) <textarea id="extra" rows="2" placeholder="sc-domain:example.com"></textarea></label>
     <button id="save">Save</button><button id="run">Capture now</button>
     <p id="msg" class="muted"></p>
