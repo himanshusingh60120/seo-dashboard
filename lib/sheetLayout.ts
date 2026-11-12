@@ -1,15 +1,20 @@
 // lib/sheetLayout.ts
-// Layout of the Google Sheet: ONE tab per property, holding every kind of data in its own colour-coded section,
-// side by side from left to right. Row 1 is each section's coloured title bar, row 2 its column headers (both frozen),
-// and data starts on row 3. The long URL list is the last section, so a tab opens on the overview and the reports.
-// Technical tabs (_Jobs, _Log, _Updates, _Meta) are kept but hidden. Server-only.
+// Layout of a property's Google Sheet: one tab holding every kind of data in its own colour-coded section, side by
+// side from left to right. Row 1 is each section's coloured title bar, row 2 its column headers (both frozen), and
+// data starts on row 3. The long URL list is the last section, so the tab opens on the overview and the reports.
+// Each property has its own Sheet (lib/sheetBooks.ts); the control Sheet (INDEX_SHEET_ID) keeps the shared, hidden
+// tabs (_Jobs, _Sheets, _Updates, _Log, _Meta). Server-only.
 import { HttpError } from "./token";
 import {
-  batchUpdate, clearRange, colLetter, ensureSize, ensureTab, readRange, safeTitle, tabs, writeRange, writeRanges, type Row,
+  batchRead, batchUpdate, clearRange, colLetter, controlBook, ensureSize, ensureTab, readRange, safeTitle, tabs, writeRange,
+  writeRanges, type Book, type Row,
 } from "./sheets";
 
 export const META_TAB = "_Meta";
-export const LAYOUT_VERSION = "v2";
+/** v3: one Google Sheet per property. */
+export const LAYOUT_VERSION = "v3";
+/** Added to a property tab left (hidden) in the control Sheet once it has moved to its own Sheet. */
+export const MOVED_SUFFIX = " (moved)";
 /** First data row of every section (row 1 = title bar, row 2 = headers). */
 export const FIRST_ROW = 3;
 
@@ -64,43 +69,66 @@ export function tabFor(site: string) {
 
 const s = (v: unknown) => (v == null ? "" : String(v).trim());
 
-/* ---------------- Layout version (one-time move from the old many-tabs layout) ---------------- */
+/* ---------------- Layout version (one-time move to one Sheet per property) ---------------- */
 
 let ready = false;
 let lastCheck = 0;
+let checking: Promise<boolean> | null = null;
 
 export async function markLayoutReady() {
-  await ensureTab(META_TAB, ["Key", "Value"]);
-  await writeRange(META_TAB, "A2:B3", [["layout", LAYOUT_VERSION], ["migrating", ""]]);
+  const control = controlBook();
+  await ensureTab(control, META_TAB, ["Key", "Value"]);
+  await writeRange(control, META_TAB, "A2:B3", [["layout", LAYOUT_VERSION], ["migrating", ""]]);
   ready = true;
 }
 
-/** True once the Sheet uses one tab per property. A brand-new Sheet with no old-layout tabs is marked ready at once. */
-export async function layoutReady(): Promise<boolean> {
-  if (ready) return true;
-  if (Date.now() - lastCheck < 20_000) return false;
-  lastCheck = Date.now();
-  const have = await tabs(true);
+/** Property tabs still inside the control Sheet (from the one-tab-per-property layout), waiting to move to their own Sheet. */
+export async function controlPropertyTabs(): Promise<string[]> {
+  const control = controlBook();
+  const have = await tabs(control, true);
+  const titles = [...have.keys()].filter((t) => !t.startsWith("_") && !t.endsWith(MOVED_SUFFIX) && !/ \(old( \d+)?\)$/.test(t));
+  if (!titles.length) return [];
+  const firstCells = await batchRead(control, titles.map((t) => ({ title: t, range: "A1:A1" })));
+  return titles.filter((_, i) => s(firstCells[i]?.[0]?.[0]) === SEC.overview.title);
+}
+
+async function checkLayout(): Promise<boolean> {
+  const control = controlBook();
+  const have = await tabs(control, true);
   if (have.has(META_TAB)) {
-    const rows = await readRange(META_TAB, "A2:B2");
+    const rows = await readRange(control, META_TAB, "A2:B2");
     if (s(rows[0]?.[0]) === "layout" && s(rows[0]?.[1]) === LAYOUT_VERSION) {
       ready = true;
       return true;
     }
   }
-  const oldLayout = [...have.keys()].some((t) => t === "_Sitemaps" || t === "_Changes" || t.includes(" · "));
-  if (!oldLayout) {
-    await markLayoutReady();
+  if (!(await controlPropertyTabs()).length) {
+    await markLayoutReady(); // nothing to move
     return true;
   }
+  lastCheck = Date.now();
   return false;
+}
+
+/**
+ * True once every property has its own Sheet. A control Sheet with no property tabs inside it is marked ready at once.
+ * Calls made at the same moment share one check, so they always get the same answer.
+ */
+export function layoutReady(): Promise<boolean> {
+  if (ready) return Promise.resolve(true);
+  if (checking) return checking;
+  if (Date.now() - lastCheck < 20_000) return Promise.resolve(false);
+  checking = checkLayout().finally(() => {
+    checking = null;
+  });
+  return checking;
 }
 
 export async function assertLayout() {
   if (await layoutReady()) return;
   throw new HttpError(
     503,
-    "The Google Sheet is being reorganised into one tab per property. It happens with the next hourly run (or click Run on /api/cron/index-plan in Vercel → Settings → Cron Jobs). Try again in a few minutes."
+    "The Google Sheets are being reorganised into one Sheet per property. It happens with the next hourly run (or click Run on /api/cron/index-plan in Vercel → Settings → Cron Jobs). Try again in a few minutes."
   );
 }
 
@@ -183,12 +211,12 @@ function formatRequests(sheetId: number): object[] {
 }
 
 /** Creates a property tab with every section's title bar, headers, colours and formats. */
-export async function createPropertyTab(title: string, rows = 1000) {
+export async function createPropertyTab(book: Book, title: string, rows = 1000) {
   try {
-    await batchUpdate([
+    await batchUpdate(book, [
       {
         addSheet: {
-          properties: { title, gridProperties: { rowCount: Math.max(1000, rows + 500), columnCount: TOTAL_COLS, frozenRowCount: 2 } },
+          properties: { title, index: 0, gridProperties: { rowCount: Math.max(1000, rows + 500), columnCount: TOTAL_COLS, frozenRowCount: 2 } },
         },
       },
     ]);
@@ -196,24 +224,17 @@ export async function createPropertyTab(title: string, rows = 1000) {
     if (/already exists/i.test(e instanceof Error ? e.message : "")) return;
     throw e;
   }
-  const t = (await tabs(true)).get(title);
+  const t = (await tabs(book, true)).get(title);
   if (!t) throw new Error(`Couldn't create the tab "${title}".`);
   await writeRanges(
+    book,
     title,
     SECTIONS.flatMap((sec) => [
       { range: `${sec.L}1`, values: [[sec.title]] },
       { range: `${sec.L}2:${sec.R}2`, values: [sec.headers] },
     ])
   );
-  await batchUpdate(formatRequests(t.sheetId));
-}
-
-/** The property's tab, created with the full layout if it doesn't exist yet. */
-export async function propertyTab(site: string): Promise<string> {
-  await assertLayout();
-  const title = tabFor(site);
-  if (!(await tabs()).has(title) && !(await tabs(true)).has(title)) await createPropertyTab(title);
-  return title;
+  await batchUpdate(book, formatRequests(t.sheetId));
 }
 
 /* ---------------- Reading and writing sections ---------------- */
@@ -225,25 +246,25 @@ const fit = (sec: Section) => (r: Row): Row => {
 };
 
 /** Replaces all data rows of a section (and clears anything left below them in that section only). */
-export async function writeSection(title: string, key: SectionKey, rows: Row[]) {
+export async function writeSection(book: Book, title: string, key: SectionKey, rows: Row[]) {
   const sec = SEC[key];
   const data = rows.map(fit(sec));
-  await ensureSize(title, data.length + FIRST_ROW, TOTAL_COLS);
+  await ensureSize(book, title, data.length + FIRST_ROW, TOTAL_COLS);
   for (let i = 0; i < data.length; i += 5000) {
     const part = data.slice(i, i + 5000);
-    await writeRange(title, `${sec.L}${FIRST_ROW + i}:${sec.R}${FIRST_ROW + i + part.length - 1}`, part);
+    await writeRange(book, title, `${sec.L}${FIRST_ROW + i}:${sec.R}${FIRST_ROW + i + part.length - 1}`, part);
   }
-  const t = (await tabs()).get(title);
+  const t = (await tabs(book)).get(title);
   const from = FIRST_ROW + data.length;
-  if (t && t.rows >= from) await clearRange(title, `${sec.L}${from}:${sec.R}${t.rows}`);
+  if (t && t.rows >= from) await clearRange(book, title, `${sec.L}${from}:${sec.R}${t.rows}`);
 }
 
 /** Adds rows below the last row of a section. */
-export async function appendSection(title: string, key: SectionKey, rows: Row[]) {
+export async function appendSection(book: Book, title: string, key: SectionKey, rows: Row[]) {
   if (!rows.length) return;
   const sec = SEC[key];
-  const firstCol = await readRange(title, `${sec.L}${FIRST_ROW}:${sec.L}`);
+  const firstCol = await readRange(book, title, `${sec.L}${FIRST_ROW}:${sec.L}`);
   const start = FIRST_ROW + firstCol.length;
-  await ensureSize(title, start + rows.length, TOTAL_COLS);
-  await writeRange(title, `${sec.L}${start}:${sec.R}${start + rows.length - 1}`, rows.map(fit(sec)));
+  await ensureSize(book, title, start + rows.length, TOTAL_COLS);
+  await writeRange(book, title, `${sec.L}${start}:${sec.R}${start + rows.length - 1}`, rows.map(fit(sec)));
 }
