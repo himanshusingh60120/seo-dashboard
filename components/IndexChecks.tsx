@@ -92,6 +92,7 @@ export default function IndexChecks({ site }: { site: string }) {
   const [key, setKey] = useState<string | null>(null);
   const [keyErr, setKeyErr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [changeFilter, setChangeFilter] = useState("all");
 
   const load = useCallback(async () => {
@@ -132,6 +133,30 @@ export default function IndexChecks({ site }: { site: string }) {
       setErr(e instanceof Error ? e.message : "Couldn't change the setting");
     }
     setBusy(false);
+  };
+
+  /** Downloads the extension zip, already set up with this dashboard's address and the person's key. */
+  const downloadExtension = async () => {
+    setDownloading(true);
+    setKeyErr(null);
+    try {
+      const r = await fetch("/api/extension", { cache: "no-store" });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j.error || `Download failed (${r.status})`);
+      }
+      const url = URL.createObjectURL(await r.blob());
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "kr-search-capture.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (e) {
+      setKeyErr(e instanceof Error ? e.message : "Couldn't download the extension");
+    }
+    setDownloading(false);
   };
 
   const showKey = async () => {
@@ -390,34 +415,56 @@ export default function IndexChecks({ site }: { site: string }) {
 
           <div style={{ marginTop: 16 }}>
             <PanelTitle>Chrome extension</PanelTitle>
-            <ol className="muted" style={{ marginTop: 0, paddingLeft: 18 }}>
-              <li>Install the “KR Search Dashboard capture” extension (chrome://extensions → Developer mode → Load unpacked).</li>
-              <li>
-                Open it, enter this dashboard&apos;s address ({typeof window !== "undefined" ? window.location.origin : ""}) and your
-                key below, and click Save.
-              </li>
-              <li>It then captures every property with daily index checks once a week, while Chrome is open and signed in to Search Console.</li>
-            </ol>
             <div className="row" style={{ alignItems: "center" }}>
-              {!key ? (
-                <button className="btn" onClick={showKey}>Show my extension key</button>
-              ) : (
-                <>
-                  <input
-                    readOnly
-                    value={key}
-                    onFocus={(e) => e.target.select()}
-                    style={{ minWidth: 360, fontFamily: "monospace" }}
-                    aria-label="Your extension key"
-                  />
-                  <button className="btn" onClick={copyKey}>{copied ? "Copied" : "Copy"}</button>
-                </>
-              )}
+              <button className="btn primary" onClick={downloadExtension} disabled={downloading}>
+                {downloading ? "Preparing…" : "Download the extension"}
+              </button>
+              <span className="muted">Already set up with this dashboard&apos;s address and your personal key.</span>
             </div>
+            <ol className="muted" style={{ marginTop: 12, paddingLeft: 18 }}>
+              <li>
+                Unzip <b>kr-search-capture.zip</b> (right-click → Extract All) and keep the folder somewhere permanent, such as
+                Documents. Chrome runs the extension from that folder, so don&apos;t delete it.
+              </li>
+              <li>
+                In Chrome, open <code>chrome://extensions</code>, turn on <b>Developer mode</b> (top right), click{" "}
+                <b>Load unpacked</b> and choose the <b>kr-search-capture</b> folder.
+              </li>
+              <li>
+                That&apos;s it. Keep this Chrome profile signed in to the Google account you use for Search Console. The first capture
+                starts within a few minutes, then once a week for every property with daily index checks. Click the extension&apos;s
+                icon to see its status or to capture now.
+              </li>
+            </ol>
             <p className="muted" style={{ marginBottom: 0 }}>
-              The key is personal: captures are saved under your name. Don&apos;t share it; an admin can cancel every key by
-              changing <code>CAPTURE_SECRET</code> in Vercel.
+              The download is personal: captures are saved under your name, so don&apos;t share the file. Each person downloads
+              their own. An admin can cancel every key by changing <code>CAPTURE_SECRET</code> in Vercel (then everyone downloads
+              again).
             </p>
+
+            <details style={{ marginTop: 12 }}>
+              <summary className="muted" style={{ cursor: "pointer" }}>Set up by hand instead</summary>
+              <p className="muted">
+                If you installed the extension from the project files, open its settings and enter this dashboard&apos;s address (
+                {typeof window !== "undefined" ? window.location.origin : ""}) and your key:
+              </p>
+              <div className="row" style={{ alignItems: "center" }}>
+                {!key ? (
+                  <button className="btn" onClick={showKey}>Show my extension key</button>
+                ) : (
+                  <>
+                    <input
+                      readOnly
+                      value={key}
+                      onFocus={(e) => e.target.select()}
+                      style={{ minWidth: 360, fontFamily: "monospace" }}
+                      aria-label="Your extension key"
+                    />
+                    <button className="btn" onClick={copyKey}>{copied ? "Copied" : "Copy"}</button>
+                  </>
+                )}
+              </div>
+            </details>
             {keyErr && <p className="notice error" style={{ marginBottom: 0 }}>{keyErr}</p>}
           </div>
         </div>
