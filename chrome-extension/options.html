@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>KR Search Dashboard capture</title>
+    <style>
+      body { font: 14px system-ui, sans-serif; margin: 16px; min-width: 460px; color: #1f2933; }
+      label { display: block; margin-top: 10px; font-weight: 600; }
+      input, textarea { width: 100%; box-sizing: border-box; padding: 6px; margin-top: 4px; font: inherit; font-weight: 400; }
+      button { margin-top: 12px; margin-right: 8px; padding: 6px 12px; }
+      table { border-collapse: collapse; margin-top: 12px; width: 100%; }
+      td, th { border-bottom: 1px solid #e5e7eb; padding: 4px 6px; text-align: left; vertical-align: top; font-size: 12px; }
+      .ok { color: #137333; } .bad { color: #b3261e; } .muted { color: #5b6573; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <h3 style="margin: 0 0 4px">KR Search Dashboard capture</h3>
+    <p class="muted">
+      Copies Page indexing, Crawl stats and AI impressions from Search Console once a week and saves them in the dashboard.
+      Keep this Chrome profile signed in to the Google account you use for Search Console.
+    </p>
+    <label>Dashboard address <input id="dash" placeholder="https://your-dashboard.vercel.app" /></label>
+    <label>Extension key <input id="key" placeholder="Paste your key from the dashboard" /></label>
+    <p class="muted">To get your key, open <code>/api/capture/key</code> on the dashboard while signed in.</p>
+    <label>Extra properties (optional, one per line) <textarea id="extra" rows="2" placeholder="sc-domain:example.com"></textarea></label>
+    <button id="save">Save</button><button id="run">Capture now</button>
+    <p id="msg" class="muted"></p>
+    <table id="status"></table>
+    <script src="options.js"></script>
+  </body>
+</html>
