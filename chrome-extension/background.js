@@ -170,17 +170,20 @@ async function capture(tabId, site, kind) {
     return run(tabId, scrapeCrawl, [site, links]);
   }
 
-  // Generative AI report: open it directly once its address is known, otherwise through Performance → Open report.
+  // Generative AI report: its own page (Performance → Search results → Generative AI).
+  const aiDirect = `${GSC}/performance/search-analytics/ai?resource_id=${id}`;
   const { aiUrl } = await store.get("aiUrl");
-  if (aiUrl) {
-    await go(tabId, aiUrl.replace("__SITE__", id));
+  const tries = [aiUrl ? aiUrl.replace("__SITE__", id) : "", aiDirect].filter((u, i, a) => u && a.indexOf(u) === i);
+  for (const url of tries) {
+    await go(tabId, url);
     const r = await run(tabId, scrapeAi, [site]);
     if (!r.notReport) return r;
   }
+  // Fallback: open it from the Performance page (left-menu link or an "Open report" button).
   await go(tabId, `${GSC}/performance/search-analytics?resource_id=${id}`);
   const o = await run(tabId, openAiReport, []);
   if (!o || !o.clicked) {
-    return { error: "The Generative AI report link wasn't found on the Performance page (the property may have no AI impressions yet)." };
+    return { error: "The Generative AI report wasn't found for this property (it may have no AI impressions yet)." };
   }
   await sleep(4000);
   const r = await run(tabId, scrapeAi, [site]);
