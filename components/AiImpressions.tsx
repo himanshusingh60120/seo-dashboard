@@ -1,14 +1,15 @@
 // components/AiImpressions.tsx
 "use client";
-// Overview section: Google AI Overviews + AI Mode impressions for the whole site. The data comes from Search Console's
-// Generative AI features report (no API): one-click "Copy AI impressions" bookmark, paste, or the report's export files.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// Overview section: Google AI Overviews + AI Mode impressions for the whole site, from Search Console's Generative AI
+// features report (no API). The team's Chrome extension copies the report once a week into the Google Sheet; this
+// screen only shows the data and who updated it. Nothing can be changed or deleted here.
+import { useEffect, useMemo, useState } from "react";
 import { CartesianGrid, ComposedChart, Legend, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { GscData, Source, Sources } from "@/lib/types";
-import { AI_HOW_TO, clearAi, parseAiFiles, saveAi, useAiStore } from "@/lib/aiImpressions";
-import { aiBookmarkletFor, parseAiCapture } from "@/lib/aiCapture";
-import { AI_MAX_PAGES, aiSum, latestAiSnapshot, type AiParsed } from "@/lib/aiStore";
+import { useAiStore } from "@/lib/aiImpressions";
+import { AI_MAX_PAGES, aiSum, latestAiSnapshot } from "@/lib/aiStore";
 import { addDays } from "@/lib/dates";
+import UpdatedBy, { BOOKMARKS_RETIRED, viaOf, type UpdateEntry } from "./UpdatedBy";
 import { Bars, DataTable, Delta, Kpis, PanelTitle, Section, SourcesProvider, num, pct, useSources, type Col, type KpiItem } from "./ui";
 
 const axis = { fontSize: 12, fill: "#5b6573" };
@@ -27,14 +28,6 @@ const top = (m: Record<string, number> | undefined, n: number) =>
     .sort((a, b) => b[1] - a[1])
     .slice(0, n)
     .map(([label, value]) => ({ label, value }));
-
-const ago = (iso: string) => {
-  const t = Date.parse(iso);
-  if (isNaN(t)) return "";
-  const d = (Date.now() - t) / DAY;
-  if (d < 1 / 24) return "just now";
-  return d < 1 ? `${Math.max(1, Math.round(d * 24))} h ago` : `${Math.round(d)} day${Math.round(d) === 1 ? "" : "s"} ago`;
-};
 
 /* ---------- Date range for the AI section ---------- */
 
@@ -67,27 +60,19 @@ export default function AiOverview({
   site,
   gsc,
   inbox = null,
-  waiting = false,
   onInboxHandled,
 }: {
   site: string;
   gsc: GscData;
-  /** Data sent by the "Copy AI impressions" bookmark. */
+  /** Data from an old bookmark. Bookmarks are retired, so it's only acknowledged (kept so existing callers compile). */
   inbox?: string | null;
   waiting?: boolean;
   onInboxHandled?: () => void;
 }) {
   const outer = useSources();
   const state = useAiStore(site);
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
-  const [pending, setPending] = useState<AiParsed | null>(null);
-  const [paste, setPaste] = useState("");
-  const [codeCopied, setCodeCopied] = useState(false);
   const [range, setRange] = useState<AiRange>("period");
-  const fileRef = useRef<HTMLInputElement>(null);
-  const bmRef = useRef<HTMLAnchorElement>(null);
-  const handled = useRef<string | null>(null);
+  const [retired, setRetired] = useState(false);
 
   const store = state?.store ?? null;
   const snap = latestAiSnapshot(store);
@@ -96,6 +81,13 @@ export default function AiOverview({
   const web = (gsc.searchType || "web") === "web";
   const reportUrl = `https://search.google.com/search-console/performance/search-analytics?resource_id=${encodeURIComponent(site)}`;
   const periodDays = daysBetween(gsc.range.startDate, gsc.range.endDate);
+
+  // Old bookmark clicks: nothing is saved any more; say so and clear it.
+  useEffect(() => {
+    if (!inbox) return;
+    setRetired(true);
+    onInboxHandled?.();
+  }, [inbox, onInboxHandled]);
 
   // Remember the chosen range in this browser.
   useEffect(() => {
@@ -146,66 +138,6 @@ export default function AiOverview({
     return total;
   }, [range, win.from, win.to, searchByDay, gsc.totals.current.impressions]);
 
-  // Set the bookmark's address directly (React warns about javascript: links in JSX).
-  useEffect(() => {
-    bmRef.current?.setAttribute("href", aiBookmarkletFor(window.location.origin));
-  }, []);
-
-  const takeCapture = useCallback(
-    async (text: string) => {
-      setBusy(true);
-      setMsg(null);
-      setPending(null);
-      try {
-        const r = parseAiCapture(text, site);
-        const notes = r.notes.length ? ` ${r.notes.join(" ")}` : "";
-        if (r.verified) {
-          await saveAi(site, [r.item]);
-          setMsg({ text: `Updated: ${r.summary}.${notes}` });
-          setPaste("");
-        } else {
-          setPending(r.item);
-          setMsg({ text: `${r.problem}${notes}`, error: true });
-        }
-      } catch (e) {
-        setMsg({ text: e instanceof Error ? e.message : "Couldn't read the data", error: true });
-      }
-      setBusy(false);
-    },
-    [site]
-  );
-
-  // Data arriving from the bookmark (via the dashboard URL).
-  useEffect(() => {
-    if (!inbox || !state || handled.current === inbox) return;
-    handled.current = inbox;
-    takeCapture(inbox).finally(() => onInboxHandled?.());
-  }, [inbox, state, takeCapture, onInboxHandled]);
-
-  const savePending = async () => {
-    if (!pending) return;
-    setBusy(true);
-    try {
-      await saveAi(site, [pending]);
-      setMsg({ text: "Saved anyway. Compare the chart with Search Console to be sure." });
-      setPending(null);
-      setPaste("");
-    } catch (e) {
-      setMsg({ text: e instanceof Error ? e.message : "Saving failed", error: true });
-    }
-    setBusy(false);
-  };
-
-  const copyCode = async () => {
-    try {
-      await navigator.clipboard.writeText(aiBookmarkletFor(window.location.origin));
-      setCodeCopied(true);
-      setTimeout(() => setCodeCopied(false), 1500);
-    } catch {
-      setMsg({ text: "Couldn't copy. Right-click the button and copy the link address instead.", error: true });
-    }
-  };
-
   const trend = useMemo(() => {
     const out: { date: string; ai: number | null; share: number | null }[] = [];
     for (let d = win.from, i = 0; d <= win.to && i < 1100; d = addDays(d, 1), i++) {
@@ -226,18 +158,29 @@ export default function AiOverview({
     return Object.entries(snap.pages).map(([url, impressions]) => ({ url, impressions, share: impressions / tot }));
   }, [snap]);
 
+  const updates = useMemo<UpdateEntry[]>(
+    () =>
+      (store?.imports || []).map((i) => ({
+        at: i.at,
+        by: i.by,
+        via: viaOf(i.file),
+        note: i.from && i.to ? `${i.from} to ${i.to}${i.pages ? ` · ${num(i.pages)} pages` : ""}` : "",
+      })),
+    [store]
+  );
+
   const sources = useMemo<Sources>(() => {
     if (!saved.length) return outer;
     const imported = {
       id: "client.aiImport",
       label: "Google AI impressions (Generative AI features report)",
-      system: `Search Console Generative AI performance report (Beta), copied from the report page or its export and saved ${state?.shared ? "in shared storage" : "in this browser"}`,
+      system: `Search Console Generative AI performance report (Beta), copied from the report page by the team's Chrome extension and saved ${state?.shared ? "in the shared Google Sheet" : "in this browser"}`,
       range: { startDate: saved[0], endDate: saved[saved.length - 1] },
       fetchedAt: last?.at || new Date().toISOString(),
       rowCount: saved.length,
       formula:
         "Daily impressions come from the report's chart and are merged by date across updates; a newer update replaces the same dates. " +
-        "Bookmark copies are saved automatically only when the days add up to the report's Total impressions. " +
+        "Each update is saved only when the days add up to the report's Total impressions. " +
         "Page, country and device totals come from the most recent update and cover only its dates, because the report doesn't split them by day. " +
         "Search Console lists at most 1,000 pages, so a page count of 1,000 means at least 1,000.",
       verifyUrl: reportUrl,
@@ -259,42 +202,6 @@ export default function AiOverview({
     return { ...outer, [imported.id]: imported, [share.id]: share };
   }, [outer, saved, last, state?.shared, reportUrl]);
 
-  const onFiles = async (list: FileList | null) => {
-    if (!list?.length) return;
-    setBusy(true);
-    setMsg(null);
-    setPending(null);
-    try {
-      const { parsed, skipped } = await parseAiFiles(Array.from(list));
-      if (!parsed.length) throw new Error(`Nothing to import. ${AI_HOW_TO}`);
-      await saveAi(site, parsed);
-      const summary = parsed
-        .map((p) => {
-          const total = Object.values(p.days).reduce((a, b) => a + b, 0);
-          return `${num(total)} AI impressions, ${p.from} to ${p.to} · ${num(Object.keys(p.pages).length)} pages · ${Object.keys(p.countries).length} countries · ${Object.keys(p.devices).length} devices`;
-        })
-        .join("; ");
-      setMsg({ text: `Imported: ${summary}.${skipped.length ? ` Skipped ${skipped.join(", ")} (only ZIP and CSV files are read).` : ""}` });
-    } catch (e) {
-      setMsg({ text: e instanceof Error ? e.message : "Couldn't read the files", error: true });
-    }
-    setBusy(false);
-    if (fileRef.current) fileRef.current.value = "";
-  };
-
-  const clearAll = async () => {
-    if (!confirm(`Delete all saved AI impressions for ${site}${state?.shared ? " for everyone" : ""}?`)) return;
-    setBusy(true);
-    try {
-      await clearAi(site);
-      setMsg({ text: "Saved AI data deleted." });
-      setPending(null);
-    } catch (e) {
-      setMsg({ text: e instanceof Error ? e.message : "Delete failed", error: true });
-    }
-    setBusy(false);
-  };
-
   const winText = fmtRange(win.from, win.to);
   const pageCount = snap ? Object.keys(snap.pages).length : 0;
   const pagesCapped = pageCount >= AI_MAX_PAGES;
@@ -306,9 +213,7 @@ export default function AiOverview({
           source: ["client.aiImport"],
           value: cur.covered ? num(cur.total) : "–",
           delta: prev && cur.complete && prev.complete ? <Delta cur={cur.total} prev={prev.total} /> : undefined,
-          sub: cur.complete
-            ? `${winText} · ${cur.expected} days`
-            : `${winText} · only ${cur.covered} of ${cur.expected} days saved`,
+          sub: cur.complete ? `${winText} · ${cur.expected} days` : `${winText} · only ${cur.covered} of ${cur.expected} days saved`,
         },
         {
           label: "Share of Search impressions",
@@ -324,9 +229,7 @@ export default function AiOverview({
           label: "Pages linked by AI",
           source: ["client.aiImport"],
           value: snap ? (pagesCapped ? `${num(AI_MAX_PAGES)}+` : num(pageCount)) : "–",
-          sub: snap
-            ? `${fmtRange(snap.from, snap.to)} · latest capture${pagesCapped ? " · Search Console lists 1,000 max" : ""}`
-            : "no page list saved yet",
+          sub: snap ? `${fmtRange(snap.from, snap.to)} · latest capture${pagesCapped ? " · Search Console lists 1,000 max" : ""}` : "no page list saved yet",
         },
         {
           label: "Days saved",
@@ -343,77 +246,24 @@ export default function AiOverview({
     { id: "all", label: "All saved days" },
   ];
 
-  /** Bookmark, paste and export steps: shown open when nothing is saved yet, folded away under "How to update" otherwise. */
-  const howTo = (
-    <>
-      <h4 style={{ margin: "4px 0 8px" }}>Update with one click (no export)</h4>
-      <ol style={{ marginTop: 0, paddingLeft: 20 }}>
-        <li>
-          One time only: drag this button to your browser&apos;s bookmarks bar{" "}
-          <a ref={bmRef} className="btn" onClick={(e) => e.preventDefault()} title="Drag me to the bookmarks bar">
-            Copy AI impressions
-          </a>{" "}
-          (if dragging doesn&apos;t work,{" "}
-          <button type="button" className="btn small" onClick={copyCode}>
-            {codeCopied ? "Copied" : "copy its code"}
-          </button>{" "}
-          and create a bookmark with that code as the URL). Replace any older “Copy AI impressions” bookmark.
-        </li>
-        <li>
-          Open{" "}
-          <a href={reportUrl} target="_blank" rel="noreferrer">
-            Performance for this property
-          </a>
-          , click <strong>Open report</strong> in the generative AI box, press F5 to reload it, wait for the chart, then click the bookmark. It
-          reads the Pages, Countries and Devices tabs, then the dashboard opens in a new tab, checks the numbers and saves them for everyone.
-        </li>
-      </ol>
-
-      <details>
-        <summary>The browser blocked the new tab? Paste instead</summary>
-        <textarea
-          value={paste}
-          onChange={(e) => setPaste(e.target.value)}
-          rows={4}
-          style={{ width: "100%", marginTop: 8 }}
-          placeholder="Paste what the bookmark copied"
-          aria-label="Paste AI impressions"
-        />
-        <button className="btn" disabled={busy || !paste.trim() || !state} onClick={() => takeCapture(paste)}>
-          Paste AI impressions
-        </button>
-      </details>
-
-      <details style={{ marginTop: 8 }}>
-        <summary>Or import Search Console export files</summary>
-        <p className="muted">{AI_HOW_TO}</p>
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".zip,.csv"
-          multiple
-          disabled={busy || !state}
-          onChange={(e) => onFiles(e.target.files)}
-          aria-label="Choose Generative AI report export files"
-        />
-      </details>
-    </>
-  );
-
   return (
     <SourcesProvider value={sources}>
       <Section
         title="AI visibility in Google Search"
         source={saved.length ? ["client.aiImport"] : undefined}
-        lede="How often Google's AI Overviews and AI Mode linked to this site, from Search Console's Generative AI features report (Beta). Google offers this report only in the Search Console interface, not through its API, so it's copied from the report page or its export. It counts impressions only: Google doesn't share clicks or the questions asked."
+        lede="How often Google's AI Overviews and AI Mode linked to this site, from Search Console's Generative AI features report (Beta). Google offers this report only in the Search Console interface, not through its API, so the team's Chrome extension copies it once a week. It counts impressions only: Google doesn't share clicks or the questions asked."
       >
-        {waiting && <div className="notice">Waiting for data from the “Copy AI impressions” bookmark…</div>}
+        {retired && <div className="notice">{BOOKMARKS_RETIRED}</div>}
         {state?.note && <div className="notice error">{state.note}</div>}
         {state && !state.shared && !state.note && (
-          <div className="notice">Shared storage isn&apos;t set up, so AI data is saved only in this browser.</div>
+          <div className="notice">The Google Sheet isn&apos;t set up, so only AI data saved earlier in this browser is shown.</div>
         )}
         {!state && <p className="muted">Loading saved AI impressions…</p>}
-        {state && !saved.length && <div className="notice">No AI impressions saved for this property yet. Follow the steps below to add them.</div>}
+        {state && !saved.length && (
+          <div className="notice">
+            No AI impressions saved for this property yet. The Chrome extension adds them with its weekly update (see the Index checks tab).
+          </div>
+        )}
 
         {saved.length > 0 && (
           <>
@@ -443,9 +293,7 @@ export default function AiOverview({
 
             <div className="panel" style={{ marginTop: 16 }}>
               <PanelTitle source={web ? ["client.aiImport", "calc.aiShare"] : ["client.aiImport"]}>
-                {web
-                  ? `AI impressions by day, and share of all Search impressions · ${winText}`
-                  : `AI impressions by day · ${winText}`}
+                {web ? `AI impressions by day, and share of all Search impressions · ${winText}` : `AI impressions by day · ${winText}`}
               </PanelTitle>
               <ResponsiveContainer width="100%" height={240}>
                 <ComposedChart data={trend} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
@@ -461,7 +309,7 @@ export default function AiOverview({
               </ResponsiveContainer>
               {!cur.complete && (
                 <p className="muted" style={{ marginBottom: 0 }}>
-                  {cur.expected - cur.covered} days in this range have no saved data. Update with the bookmark or a longer export to fill them.
+                  {cur.expected - cur.covered} days in this range have no saved data yet. Each weekly update adds the latest days.
                 </p>
               )}
             </div>
@@ -489,14 +337,14 @@ export default function AiOverview({
                   {Object.keys(snap.countries).length ? (
                     <Bars items={top(snap.countries, 10)} color="#5e35b1" />
                   ) : (
-                    <p className="muted">Not in the latest update. Click the bookmark again.</p>
+                    <p className="muted">Not in the latest update.</p>
                   )}
                   <div style={{ marginTop: 16 }}>
                     <PanelTitle source={["client.aiImport"]}>{`Devices · ${fmtRange(snap.from, snap.to)}`}</PanelTitle>
                     {Object.keys(snap.devices).length ? (
                       <Bars items={top(snap.devices, 5)} color="#9bb0d9" />
                     ) : (
-                      <p className="muted">Not in the latest update. Click the bookmark again.</p>
+                      <p className="muted">Not in the latest update.</p>
                     )}
                   </div>
                 </div>
@@ -505,50 +353,7 @@ export default function AiOverview({
           </>
         )}
 
-        <div className="panel" style={{ marginTop: 16 }}>
-          <PanelTitle>Update AI impressions</PanelTitle>
-
-          {last && (
-            <p style={{ marginTop: 0 }}>
-              Last updated <strong>{new Date(last.at).toLocaleString()}</strong> ({ago(last.at)})
-              {last.by ? (
-                <>
-                  {" "}
-                  by <strong>{last.by}</strong>
-                </>
-              ) : null}
-              <span className="muted">{state?.shared ? " · saved for everyone" : " · saved in this browser"}</span>
-            </p>
-          )}
-
-          {saved.length > 0 ? (
-            <details>
-              <summary>How to update</summary>
-              <div style={{ marginTop: 8 }}>{howTo}</div>
-            </details>
-          ) : (
-            howTo
-          )}
-
-          <div className="row" style={{ marginTop: 12 }}>
-            {busy && <span className="muted">Working…</span>}
-            {pending && (
-              <button className="btn" onClick={savePending} disabled={busy}>
-                Save anyway
-              </button>
-            )}
-            {saved.length > 0 && (
-              <button className="btn" onClick={clearAll} disabled={busy}>
-                Delete saved AI data
-              </button>
-            )}
-          </div>
-          {msg && (
-            <p className={msg.error ? "notice error" : "muted"} style={{ marginBottom: 0 }}>
-              {msg.text}
-            </p>
-          )}
-        </div>
+        <UpdatedBy title="AI impressions updates" updates={updates} shared={!!state?.shared} />
       </Section>
     </SourcesProvider>
   );
