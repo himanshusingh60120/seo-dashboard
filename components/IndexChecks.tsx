@@ -36,7 +36,10 @@ const ageDays = (iso: string) => (iso && !isNaN(Date.parse(iso)) ? (Date.now() -
 const agoText = (iso: string) => {
   const d = ageDays(iso);
   if (!isFinite(d)) return "never";
-  if (d < 1) return `${Math.max(1, Math.round(d * 24))} h ago`;
+  const mins = d * 24 * 60;
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${Math.round(mins)} min ago`;
+  if (d < 1) return `${Math.round(d * 24)} h ago`;
   return `${Math.round(d)} day${Math.round(d) === 1 ? "" : "s"} ago`;
 };
 
