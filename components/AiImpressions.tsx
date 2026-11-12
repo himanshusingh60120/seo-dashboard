@@ -186,7 +186,7 @@ export default function AiOverview({
       verifyUrl: reportUrl,
       verifyLabel: "Open Performance in Search Console",
       verifyHow:
-        "Search Console → Performance → Open report (Generative AI features). Set the same dates as the card (\"Last 3 months\" here matches Search Console's 3 months); the totals and the daily chart should match.",
+        "Search Console → Performance → Search results → Generative AI. Set the same dates as the card (\"Last 3 months\" here matches Search Console's 3 months); the totals and the daily chart should match.",
     } as Source;
     const share = {
       id: "calc.aiShare",
@@ -261,7 +261,7 @@ export default function AiOverview({
         {!state && <p className="muted">Loading saved AI impressions…</p>}
         {state && !saved.length && (
           <div className="notice">
-            No AI impressions saved for this property yet. The Chrome extension adds them with its weekly update (see the Index checks tab).
+            No AI impressions saved for this property yet. The Chrome extension adds them with its weekly update (see the Weekly captures tab).
           </div>
         )}
 
