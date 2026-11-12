@@ -1,6 +1,7 @@
 // app/api/extension/route.ts
 // GET → the Chrome extension as a .zip, set up for the signed-in person: this dashboard's address and their own
-// extension key are inside (config.json), and Chrome is allowed to reach this dashboard (manifest host_permissions).
+// extension key are inside (config.json), Chrome is allowed to reach this dashboard (manifest host_permissions), and
+// bridge.js runs on this dashboard's pages so the "Capture this property now" button can reach the extension.
 // Only capture accounts (lib/captureAccess.ts) can download it.
 import { promises as fs } from "fs";
 import path from "path";
@@ -29,6 +30,7 @@ export async function GET(req: NextRequest) {
         fs.readFile(path.join(process.cwd(), "chrome-extension", "manifest.json")).then((b) => ["manifest.json", b] as [string, Buffer]),
         fs.readFile(path.join(process.cwd(), "chrome-extension", "background.js")).then((b) => ["background.js", b] as [string, Buffer]),
         fs.readFile(path.join(process.cwd(), "chrome-extension", "scrapers.js")).then((b) => ["scrapers.js", b] as [string, Buffer]),
+        fs.readFile(path.join(process.cwd(), "chrome-extension", "bridge.js")).then((b) => ["bridge.js", b] as [string, Buffer]),
         fs.readFile(path.join(process.cwd(), "chrome-extension", "options.html")).then((b) => ["options.html", b] as [string, Buffer]),
         fs.readFile(path.join(process.cwd(), "chrome-extension", "options.js")).then((b) => ["options.js", b] as [string, Buffer]),
       ]);
@@ -38,6 +40,8 @@ export async function GET(req: NextRequest) {
 
     const manifest = JSON.parse(files[0][1].toString("utf8"));
     manifest.host_permissions = Array.from(new Set([...(manifest.host_permissions || []), `${origin}/*`]));
+    // The bridge runs only on this dashboard's pages.
+    manifest.content_scripts = [{ matches: [`${origin}/*`], js: ["bridge.js"], run_at: "document_idle" }];
     const config = { dashUrl: origin, key: captureKeyFor(email), email, createdAt: new Date().toISOString() };
 
     const zip = makeZip([
