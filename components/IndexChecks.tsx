@@ -1,0 +1,397 @@
+// components/IndexChecks.tsx
+"use client";
+// The "Index checks" tab. Daily URL Inspection runs on the server for this property (results live in the Google
+// Sheet): today's progress, per-sitemap verification, status changes found, and the weekly Search Console captures
+// made by the Chrome extension (or the bookmarks).
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { DataTable, Kpis, PanelTitle, Section, num, pct, type Col, type KpiItem } from "./ui";
+
+type Job = {
+  tab: string; enabled: boolean; budget: number; planDay: string; planStatus: string;
+  queued: number; checkedToday: number; lastRun: string; message: string;
+};
+type SitemapRow = {
+  sitemap: string; urls: number; verified: number; indexed: number; notIndexed: number;
+  errors: number; notChecked: number; pctVerified: number; updated: string;
+};
+type Change = { at: string; url: string; change: string; before: string; after: string; link: string };
+type Capture = { report: string; at: string; by: string; source: string; from: string; to: string };
+type Status = {
+  configured: boolean; serviceAccount?: string; job?: Job | null; sitemaps?: SitemapRow[];
+  changes?: Change[]; captures?: Capture[]; sheetUrl?: string;
+};
+
+const DAY = 864e5;
+const STALE_DAYS = 8;
+const pacificToday = () => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" }).format(new Date());
+const when = (iso: string) => (iso && !isNaN(Date.parse(iso)) ? new Date(iso).toLocaleString() : "–");
+const ageDays = (iso: string) => (iso && !isNaN(Date.parse(iso)) ? (Date.now() - Date.parse(iso)) / DAY : Infinity);
+const agoText = (iso: string) => {
+  const d = ageDays(iso);
+  if (!isFinite(d)) return "never";
+  if (d < 1) return `${Math.max(1, Math.round(d * 24))} h ago`;
+  return `${Math.round(d)} day${Math.round(d) === 1 ? "" : "s"} ago`;
+};
+
+function Progress({ value }: { value: number }) {
+  const p = Math.max(0, Math.min(100, value));
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div style={{ background: "#e7ebef", borderRadius: 4, height: 8, width: 110 }}>
+        <div style={{ width: `${p}%`, background: p >= 100 ? "#1e8e3e" : "#1a73e8", height: 8, borderRadius: 4 }} />
+      </div>
+      <span>{p.toFixed(p >= 10 ? 0 : 1)}%</span>
+    </div>
+  );
+}
+
+const TONE: Record<string, string> = {
+  "Dropped from Google's index": "no",
+  "Impressions stopped": "warn",
+  "Impressions stopped, still indexed": "warn",
+  "Newly indexed": "ok",
+  "Now appearing in search": "ok",
+};
+
+const SITEMAP_COLS: Col<SitemapRow>[] = [
+  {
+    key: "sitemap",
+    label: "Sitemap",
+    render: (r) =>
+      /^https?:\/\//.test(r.sitemap) ? (
+        <a href={r.sitemap} target="_blank" rel="noreferrer">{r.sitemap}</a>
+      ) : (
+        <span className="muted">{r.sitemap}</span>
+      ),
+  },
+  { key: "urls", label: "URLs", num: true, render: (r) => num(r.urls) },
+  { key: "verified", label: "Verified", num: true, render: (r) => num(r.verified) },
+  { key: "indexed", label: "Indexed", num: true, render: (r) => num(r.indexed) },
+  { key: "notIndexed", label: "Not indexed", num: true, render: (r) => num(r.notIndexed) },
+  { key: "errors", label: "Errors", num: true, render: (r) => num(r.errors) },
+  { key: "notChecked", label: "Not checked yet", num: true, render: (r) => num(r.notChecked) },
+  { key: "pctVerified", label: "Verified so far", num: true, render: (r) => <Progress value={r.pctVerified} /> },
+];
+
+const CHANGE_COLS: Col<Change>[] = [
+  { key: "at", label: "When", render: (r) => when(r.at) },
+  { key: "change", label: "Change", render: (r) => <span className={`pill ${TONE[r.change] || "warn"}`}>{r.change}</span> },
+  { key: "url", label: "URL", url: true },
+  { key: "before", label: "Before" },
+  { key: "after", label: "After" },
+  { key: "link", label: "", render: (r) => (r.link ? <a href={r.link} target="_blank" rel="noreferrer">Search Console</a> : "") },
+];
+
+export default function IndexChecks({ site }: { site: string }) {
+  const [st, setSt] = useState<Status | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [key, setKey] = useState<string | null>(null);
+  const [keyErr, setKeyErr] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [changeFilter, setChangeFilter] = useState("all");
+
+  const load = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/index-checks?site=${encodeURIComponent(site)}`, { cache: "no-store" });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
+      setSt(j as Status);
+      setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Couldn't load index checks");
+    }
+  }, [site]);
+
+  useEffect(() => {
+    setSt(null);
+    setErr(null);
+    load();
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") load();
+    }, 60_000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const setEnabled = async (enabled: boolean) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await fetch("/api/index-checks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ site, enabled }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
+      setSt(j as Status);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Couldn't change the setting");
+    }
+    setBusy(false);
+  };
+
+  const showKey = async () => {
+    setKeyErr(null);
+    try {
+      const r = await fetch("/api/capture/key", { cache: "no-store" });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
+      setKey(String(j.key || ""));
+    } catch (e) {
+      setKeyErr(e instanceof Error ? e.message : "Couldn't get your key");
+    }
+  };
+  const copyKey = async () => {
+    if (!key) return;
+    try {
+      await navigator.clipboard.writeText(key);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setKeyErr("Couldn't copy. Select the key and press Ctrl+C.");
+    }
+  };
+
+  const job = st?.job || null;
+  const sitemaps = useMemo(() => st?.sitemaps || [], [st]);
+  const totals = useMemo(() => {
+    const real = sitemaps.filter((x) => x.urls > 0);
+    const t = real.reduce(
+      (a, x) => ({
+        urls: a.urls + x.urls, verified: a.verified + x.verified, indexed: a.indexed + x.indexed,
+        notIndexed: a.notIndexed + x.notIndexed, errors: a.errors + x.errors, notChecked: a.notChecked + x.notChecked,
+      }),
+      { urls: 0, verified: 0, indexed: 0, notIndexed: 0, errors: 0, notChecked: 0 }
+    );
+    const files = real.filter((x) => /^https?:\/\//.test(x.sitemap));
+    return {
+      ...t,
+      files: files.length,
+      complete: files.filter((x) => x.notChecked === 0 && x.errors === 0).length,
+      problems: sitemaps.filter((x) => x.urls === 0 && /^Couldn't read/.test(x.updated)),
+      updated: sitemaps.map((x) => x.updated).filter((u) => !isNaN(Date.parse(u))).sort().pop() || "",
+    };
+  }, [sitemaps]);
+
+  const changes = st?.changes || [];
+  const changeTypes = useMemo(() => Array.from(new Set(changes.map((c) => c.change))), [changes]);
+  const shownChanges = changeFilter === "all" ? changes : changes.filter((c) => c.change === changeFilter);
+
+  const state = !job
+    ? "Not started"
+    : !job.enabled
+      ? "Paused"
+      : job.planStatus === "error"
+        ? "Problem"
+        : job.planStatus === "planning"
+          ? "Planning today's checks"
+          : job.planDay !== pacificToday()
+            ? "Waiting for today's plan"
+            : job.queued > 0
+              ? "Checking"
+              : "Done for today";
+
+  const kpis: KpiItem[] = job
+    ? [
+        { label: "Status", value: state, sub: job.lastRun ? `last run ${agoText(job.lastRun)}` : undefined },
+        { label: "Inspected today", value: num(job.checkedToday), sub: `of ${num(job.budget)} a day` },
+        { label: "Still queued today", value: num(job.queued) },
+        { label: "URLs tracked", value: num(totals.urls), sub: `${num(totals.files)} sitemap file(s)` },
+        { label: "Verified", value: num(totals.verified), sub: totals.urls ? `${pct(totals.verified / totals.urls, 1)} of tracked URLs` : undefined },
+        { label: "Indexed", value: num(totals.indexed), sub: totals.verified ? `${pct(totals.indexed / totals.verified, 1)} of verified` : undefined },
+        { label: "Not indexed", value: num(totals.notIndexed) },
+        { label: "Not checked yet", value: num(totals.notChecked), sub: totals.errors ? `${num(totals.errors)} failed checks` : undefined },
+      ]
+    : [];
+
+  return (
+    <>
+      <Section
+        title="Index checks"
+        lede="Google's URL Inspection, run every day by the server for this property, so nobody needs to keep a tab open. Pages with Search impressions count as indexed for free; the daily inspections go to pages whose impressions stopped, new and changed pages, and results older than 30 days. Every result is saved in the Google Sheet."
+      >
+        {err && <div className="notice error">{err}</div>}
+        {!st && !err && <p className="muted">Loading…</p>}
+
+        {st && !st.configured && (
+          <div className="notice">
+            Index checks need the service account and the Google Sheet. Add <code>GOOGLE_SERVICE_ACCOUNT_JSON</code>,{" "}
+            <code>INDEX_SHEET_ID</code> and <code>CRON_SECRET</code> in Vercel → Settings → Environment Variables, then redeploy.
+          </div>
+        )}
+
+        {st?.configured && !job && (
+          <div className="panel">
+            <PanelTitle>Start daily index checks for this property</PanelTitle>
+            <p style={{ marginTop: 0 }}>
+              The server will read this property&apos;s sitemaps every day and inspect up to 1,800 URLs a day, saving each result
+              in its own tab of the Google Sheet. Google allows 2,000 inspections a day per property, so about 200 stay free for
+              people using the dashboard.
+            </p>
+            <p className="muted">
+              First, in Search Console open Settings → Users and permissions for this property and add{" "}
+              <b>{st.serviceAccount || "the service account"}</b> as a user.
+            </p>
+            <button className="btn primary" onClick={() => setEnabled(true)} disabled={busy}>
+              {busy ? "Starting…" : "Start daily index checks"}
+            </button>
+          </div>
+        )}
+
+        {st?.configured && job && (
+          <>
+            <Kpis items={kpis} />
+            <div className="panel" style={{ marginTop: 12 }}>
+              <p style={{ marginTop: 0 }}>{job.message || "Waiting for the first daily plan (it runs every hour)."}</p>
+              <div className="row" style={{ alignItems: "center" }}>
+                <button className="btn" onClick={() => setEnabled(!job.enabled)} disabled={busy}>
+                  {job.enabled ? "Pause daily checks" : "Resume daily checks"}
+                </button>
+                {st.sheetUrl && (
+                  <a className="btn" href={st.sheetUrl} target="_blank" rel="noreferrer">
+                    Open the Google Sheet (tab “{job.tab}”)
+                  </a>
+                )}
+                <button className="btn" onClick={load}>Refresh</button>
+              </div>
+              <p className="muted" style={{ marginBottom: 0 }}>
+                The plan runs once a day after Google&apos;s quota resets (midnight Pacific time, 13:30 India time); checks then
+                run every 10 minutes until the day&apos;s queue is done. The browser&apos;s Live index monitor is switched off for
+                this property so the two don&apos;t share Google&apos;s daily limit.
+              </p>
+            </div>
+
+            <details className="panel" style={{ marginTop: 16 }}>
+              <summary style={{ cursor: "pointer" }}>
+                <b>Sitemaps</b>: {num(totals.complete)} of {num(totals.files)} fully verified ·{" "}
+                {totals.urls ? pct(totals.verified / totals.urls, 1) : "0%"} of URLs verified
+                {totals.problems.length ? ` · ${totals.problems.length} couldn't be read` : ""}
+                {totals.updated ? <span className="muted"> · updated {agoText(totals.updated)}</span> : null}
+              </summary>
+              <div style={{ marginTop: 12 }}>
+                <DataTable
+                  rows={sitemaps.filter((x) => x.urls > 0)}
+                  cols={SITEMAP_COLS}
+                  initialSort="urls"
+                  pageSize={25}
+                  csvName="sitemap-verification.csv"
+                  empty="No sitemap summary yet. It appears after the first daily plan."
+                />
+                {totals.problems.length > 0 && (
+                  <div className="notice error" style={{ marginTop: 12 }}>
+                    {totals.problems.map((p) => (
+                      <div key={p.sitemap}>
+                        {p.sitemap}: {p.updated.replace(/^Couldn't read:\s*/, "")}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <p className="muted" style={{ marginBottom: 0 }}>
+                  Verified = Google&apos;s answer is known (indexed or not), from URL Inspection or from Search impressions. The list
+                  of pages for each sitemap is in the Sheet.
+                </p>
+              </div>
+            </details>
+
+            <div className="panel" style={{ marginTop: 16 }}>
+              <div className="row" style={{ justifyContent: "space-between", alignItems: "center", flexWrap: "wrap" }}>
+                <PanelTitle>Status changes found</PanelTitle>
+                <label className="control" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                  Show
+                  <select value={changeFilter} onChange={(e) => setChangeFilter(e.target.value)}>
+                    <option value="all">All changes ({changes.length})</option>
+                    {changeTypes.map((t) => (
+                      <option key={t} value={t}>
+                        {t} ({changes.filter((c) => c.change === t).length})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <DataTable
+                rows={shownChanges}
+                cols={CHANGE_COLS}
+                initialSort="at"
+                pageSize={20}
+                csvName="index-status-changes.csv"
+                csvRow={(r) => ({ when: r.at, change: r.change, url: r.url, before: r.before, after: r.after, search_console_link: r.link })}
+                empty="No status changes yet. They appear once pages have been checked at least twice, or when their impressions stop."
+              />
+            </div>
+          </>
+        )}
+      </Section>
+
+      <Section
+        title="Weekly Search Console captures"
+        lede="Page indexing counts, Crawl stats and AI impressions have no Google API. The Chrome extension copies them once a week (the bookmarks still work too) and they're saved in the Google Sheet with their full history."
+      >
+        <div className="panel">
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Report</th>
+                  <th>Last saved</th>
+                  <th>By</th>
+                  <th>Dates covered</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(st?.captures || []).map((c) => {
+                  const stale = ageDays(c.at) > STALE_DAYS;
+                  return (
+                    <tr key={c.report}>
+                      <td>{c.report}</td>
+                      <td>
+                        <span className={`delta ${!c.at ? "flat" : stale ? "bad" : "good"}`}>
+                          {c.at ? agoText(c.at) : "Never"}
+                        </span>{" "}
+                        {stale && <span className="muted">· due</span>}
+                        {c.at && <div className="muted">{when(c.at)}{c.source ? ` · ${c.source}` : ""}</div>}
+                      </td>
+                      <td>{c.by || "–"}</td>
+                      <td>{c.from && c.to ? `${c.from} to ${c.to}` : "–"}</td>
+                    </tr>
+                  );
+                })}
+                {!st?.captures?.length && (
+                  <tr>
+                    <td colSpan={4} className="muted">
+                      {st && !st.configured ? "Needs the Google Sheet (see above)." : "Loading…"}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ marginTop: 16 }}>
+            <PanelTitle>Chrome extension</PanelTitle>
+            <ol className="muted" style={{ marginTop: 0, paddingLeft: 18 }}>
+              <li>Install the “KR Search Dashboard capture” extension (chrome://extensions → Developer mode → Load unpacked).</li>
+              <li>Open it, enter this dashboard&apos;s address ({typeof window !== "undefined" ? window.location.origin : ""}) and your key below, and click Save.</li>
+              <li>It then captures every property with daily index checks once a week, while Chrome is open and signed in to Search Console.</li>
+            </ol>
+            <div className="row" style={{ alignItems: "center" }}>
+              {!key ? (
+                <button className="btn" onClick={showKey}>Show my extension key</button>
+              ) : (
+                <>
+                  <input readOnly value={key} onFocus={(e) => e.target.select()} style={{ minWidth: 360, fontFamily: "monospace" }} aria-label="Your extension key" />
+                  <button className="btn" onClick={copyKey}>{copied ? "Copied" : "Copy"}</button>
+                </>
+              )}
+            </div>
+            <p className="muted" style={{ marginBottom: 0 }}>
+              The key is personal: captures are saved under your name. Don&apos;t share it; an admin can cancel every key by
+              changing <code>CAPTURE_SECRET</code> in Vercel.
+            </p>
+            {keyErr && <p className="notice error" style={{ marginBottom: 0 }}>{keyErr}</p>}
+          </div>
+        </div>
+      </Section>
+    </>
+  );
+}
