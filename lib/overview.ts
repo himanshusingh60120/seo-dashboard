@@ -1,8 +1,9 @@
 // lib/overview.ts
 // The "Overview" section at the left of each property's tab: the key numbers, and who updated each weekly report and
 // when. Rewritten after every daily plan, every check run and every weekly capture. Server-only.
-import { batchRead, tabs, type Row } from "./sheets";
-import { sectionRange, tabFor, writeSection } from "./sheetLayout";
+import { batchRead, controlBook, tabs, type Row } from "./sheets";
+import { sectionRange, writeSection } from "./sheetLayout";
+import { findSheet } from "./sheetBooks";
 import { IDX_LABEL } from "./indexStats";
 import { addDays } from "./dates";
 
@@ -15,14 +16,17 @@ const n = (v: unknown) => {
 const stamp = (iso: string) => (iso && !isNaN(Date.parse(iso)) ? `${new Date(iso).toISOString().slice(0, 16).replace("T", " ")} UTC` : "");
 
 export async function writeOverview(site: string) {
-  const title = tabFor(site);
-  if (!(await tabs()).has(title)) return;
-  const [sm, pages, crawl, ai, log] = await batchRead([
-    { title, range: sectionRange("sitemaps") },
-    { title, range: sectionRange("pages") },
-    { title, range: sectionRange("crawl") },
-    { title, range: sectionRange("ai") },
-    { title: "_Updates", range: "A2:I" },
+  const ref = await findSheet(site);
+  if (!ref || !(await tabs(ref.book)).has(ref.title)) return;
+  const t = ref.title;
+  const [[sm, pages, crawl, ai], [log]] = await Promise.all([
+    batchRead(ref.book, [
+      { title: t, range: sectionRange("sitemaps") },
+      { title: t, range: sectionRange("pages") },
+      { title: t, range: sectionRange("crawl") },
+      { title: t, range: sectionRange("ai") },
+    ]),
+    batchRead(controlBook(), [{ title: "_Updates", range: "A2:I" }]),
   ]);
 
   // URL checks (from the per-sitemap summary).
@@ -55,13 +59,13 @@ export async function writeOverview(site: string) {
   const cDates = [...perDay.keys()].sort();
   const cLatest = cDates[cDates.length - 1] || "";
   const crawl7 = cLatest
-    ? cDates.filter((d) => d > addDays(cLatest, -7)).reduce((t, d) => t + (perDay.get(d)!.total ?? perDay.get(d)!.split), 0)
+    ? cDates.filter((d) => d > addDays(cLatest, -7)).reduce((sum, d) => sum + (perDay.get(d)!.total ?? perDay.get(d)!.split), 0)
     : 0;
 
   // AI impressions, last 28 saved days.
   const aiDays = ai.filter((r) => DATE.test(s(r[0])));
   const aLatest = aiDays.map((r) => s(r[0])).sort().pop() || "";
-  const ai28 = aLatest ? aiDays.filter((r) => s(r[0]) > addDays(aLatest, -28)).reduce((t, r) => t + n(r[1]), 0) : 0;
+  const ai28 = aLatest ? aiDays.filter((r) => s(r[0]) > addDays(aLatest, -28)).reduce((sum, r) => sum + n(r[1]), 0) : 0;
 
   // Who updated each weekly report, and when.
   const last: Record<string, Row> = {};
@@ -95,5 +99,5 @@ export async function writeOverview(site: string) {
     updated("AI impressions"),
     ["Overview updated", stamp(new Date().toISOString()), ""],
   ];
-  await writeSection(title, "overview", rows);
+  await writeSection(ref.book, t, "overview", rows);
 }
