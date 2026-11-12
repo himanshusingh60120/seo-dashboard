@@ -295,7 +295,7 @@ export default function CrawlActivity({
 
         {store && all.length === 0 && (
           <div className="notice">
-            No crawl data saved for this property yet. The Chrome extension adds it with its weekly update (see the Index checks tab).
+            No crawl data saved for this property yet. The Chrome extension adds it with its weekly update (see the Weekly captures tab).
           </div>
         )}
 
