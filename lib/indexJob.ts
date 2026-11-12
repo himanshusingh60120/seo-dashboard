@@ -9,7 +9,8 @@
 //
 // Each property has ONE row in _Jobs and ONE Sheet, whoever started it, so nothing is checked twice.
 //   plan (hourly; acts once per Pacific day per property, after Google's quota resets): reads the sitemaps and the
-//     Search Console impressions per page (both free), adds new URLs and builds today's queue:
+//     Search Console impressions per page (both free), adds new URLs, recounts the "By sitemap" summary and builds
+//     today's queue:
 //       1. pages with no impressions for 4+ days that had impressions before (up to half the budget),
 //       2. "Not indexed" pages that have impressions again,
 //       3. URLs never checked (taking turns across sitemaps),
@@ -17,7 +18,8 @@
 //       5. failed checks,
 //       6. pages that were quiet and now have impressions again (confirmation),
 //       7. everything else, oldest result first (the rotation).
-//   run (every 10 minutes): inspects queued URLs in small batches and writes each result to its row.
+//   run (every 10 minutes): inspects queued URLs in batches of 40, writes each result to its row, and updates the
+//     "By sitemap" counts after every batch (only the sitemaps that changed), so the dashboard moves every 10 minutes.
 // Search Console is read as the service account when it has been added to the property; otherwise as the person who
 // started the checks (their saved Google sign-in, see lib/userCredential.ts). The Sheets are always the service account.
 import { serviceAccountToken } from "./serviceAccount";
@@ -58,6 +60,8 @@ const FLAG_QUIET = `No impressions for ${QUIET_DAYS}+ days, checking`;
 const FLAG_BACK = "Back in search, checking";
 const BATCH = 40;
 const PARALLEL = 6;
+const SEARCH_ONLY = "(found in search, not in a sitemap)";
+const UNKNOWN_SITEMAP = "(sitemap unknown)";
 
 const W = URL_HEADERS.length;
 /** Column letter of URL-checks column k (0-based). */
@@ -105,6 +109,27 @@ async function pool<T, R>(items: T[], size: number, fn: (t: T) => Promise<R>): P
     })
   );
   return out;
+}
+
+/* ---------------- Counting URLs per sitemap ---------------- */
+
+type Bucket = "indexed" | "notIndexed" | "errors" | "unchecked";
+type Tally = Record<Bucket, number>;
+const emptyTally = (): Tally => ({ indexed: 0, notIndexed: 0, errors: 0, unchecked: 0 });
+
+/** The "By sitemap" row a URL row is counted in, or null if it isn't counted (empty or no longer listed). */
+function groupOf(r: Row): string | null {
+  const src = s(r[C.source]);
+  if (!s(r[C.url]) || src === "No longer listed") return null;
+  return src === "Search only" ? SEARCH_ONLY : s(r[C.sitemap]) || UNKNOWN_SITEMAP;
+}
+
+/** Which count a URL is in: only URL Inspection results count as Indexed / Not indexed. */
+function bucketOf(status: string, verifiedBy: string): Bucket {
+  if (status === "Indexed" && verifiedBy === "URL Inspection") return "indexed";
+  if (status === "Not indexed" && verifiedBy === "URL Inspection") return "notIndexed";
+  if (status === "Error") return "errors";
+  return "unchecked";
 }
 
 /* ---------------- _Jobs (control Sheet): one row per property ---------------- */
@@ -273,21 +298,17 @@ export async function propertyStatus(site: string) {
 
 /* ---------------- Per-sitemap summary ("By sitemap" section) ---------------- */
 
+const pctOf = (verified: number, urls: number) => (urls ? Math.round((verified / urls) * 1000) / 10 : 0);
+
+/** Full recount from every URL row (done by the daily plan). */
 async function writeSitemapSummary(book: Book, title: string, rows: Row[], problems: { sitemap: string; error: string }[] = []) {
-  type G = { urls: number; indexed: number; notIndexed: number; errors: number; unchecked: number };
-  const groups = new Map<string, G>();
+  const groups = new Map<string, Tally & { urls: number }>();
   for (const r of rows) {
-    const src = s(r[C.source]);
-    if (!s(r[C.url]) || src === "No longer listed") continue;
-    const key = src === "Search only" ? "(found in search, not in a sitemap)" : s(r[C.sitemap]) || "(sitemap unknown)";
-    const g = groups.get(key) || { urls: 0, indexed: 0, notIndexed: 0, errors: 0, unchecked: 0 };
+    const key = groupOf(r);
+    if (!key) continue;
+    const g = groups.get(key) || { urls: 0, ...emptyTally() };
     g.urls++;
-    const st = s(r[C.status]);
-    const byInspection = s(r[C.verifiedBy]) === "URL Inspection";
-    if (st === "Indexed" && byInspection) g.indexed++;
-    else if (st === "Not indexed" && byInspection) g.notIndexed++;
-    else if (st === "Error") g.errors++;
-    else g.unchecked++;
+    g[bucketOf(s(r[C.status]), s(r[C.verifiedBy]))]++;
     groups.set(key, g);
   }
   const now = new Date().toISOString();
@@ -295,16 +316,38 @@ async function writeSitemapSummary(book: Book, title: string, rows: Row[], probl
     .sort((a, b) => b[1].urls - a[1].urls)
     .map(([k, g]) => {
       const verified = g.indexed + g.notIndexed;
-      return [k, g.urls, verified, g.indexed, g.notIndexed, g.errors, g.unchecked, g.urls ? Math.round((verified / g.urls) * 1000) / 10 : 0, now];
+      return [k, g.urls, verified, g.indexed, g.notIndexed, g.errors, g.unchecked, pctOf(verified, g.urls), now];
     });
   for (const p of problems) out.push([p.sitemap, 0, 0, 0, 0, 0, 0, 0, `Couldn't read: ${p.error}`.slice(0, 300)]);
   await writeSection(book, title, "sitemaps", out);
 }
 
-async function refreshSummary(j: Job) {
-  const rows = (await readRange(j.book, j.tab, URL_RANGE)).map(pad);
-  await writeSitemapSummary(j.book, j.tab, rows);
-  await writeOverview(j.site).catch(() => {});
+/** Applies the changes from one batch of checks to the "By sitemap" counts (reads and rewrites only that small table). */
+async function applyToSummary(book: Book, title: string, delta: Map<string, Tally>) {
+  if (!delta.size) return;
+  const rows = await readRange(book, title, sectionRange("sitemaps"));
+  const now = new Date().toISOString();
+  let changed = false;
+  for (const r of rows) {
+    const d = delta.get(s(r[0]));
+    const urls = n(r[1]);
+    if (!d || !urls) continue;
+    const indexed = Math.max(0, n(r[3]) + d.indexed);
+    const notIndexed = Math.max(0, n(r[4]) + d.notIndexed);
+    const errors = Math.max(0, n(r[5]) + d.errors);
+    const unchecked = Math.max(0, n(r[6]) + d.unchecked);
+    const verified = indexed + notIndexed;
+    r[1] = urls;
+    r[2] = verified;
+    r[3] = indexed;
+    r[4] = notIndexed;
+    r[5] = errors;
+    r[6] = unchecked;
+    r[7] = pctOf(verified, urls);
+    r[8] = now;
+    changed = true;
+  }
+  if (changed) await writeSection(book, title, "sitemaps", rows);
 }
 
 /* ---------------- Plan: once per Pacific day per property ---------------- */
@@ -495,7 +538,7 @@ export async function planProperty(job: Job, day: string): Promise<string> {
     else r[C.nextCheck] = `In rotation (about every ${cycleDays} days)`;
   });
 
-  // 6. Save the URL list, the per-sitemap summary, the changes and the overview.
+  // 6. Save the URL list, the per-sitemap summary (full recount), the changes and the overview.
   await writeSection(book, title, "urls", rows);
   await writeSitemapSummary(book, title, rows, sm.errors);
   await recordChanges(book, title, changes);
@@ -529,7 +572,7 @@ export async function planProperty(job: Job, day: string): Promise<string> {
 
 /* ---------------- Run: inspect queued URLs ---------------- */
 
-type BatchResult = Counts & { done: Set<number>; stop: string; quota: boolean };
+type BatchResult = Counts & { done: Set<number>; stop: string; quota: boolean; delta: Map<string, Tally> };
 
 async function checkBatch(job: Job, rowNums: number[], token: string, day: string): Promise<BatchResult> {
   const got = await readRanges(job.book, job.tab, rowNums.map(rowRange));
@@ -562,6 +605,16 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
   const c: Counts = { used: 0, indexed: 0, notIndexed: 0, errors: 0, drops: 0 };
   const data: { range: string; values: Row[] }[] = [];
   const changes: Row[] = [];
+  const delta = new Map<string, Tally>();
+  /** Moves one URL from one count to another in its sitemap's row of the summary. */
+  const move = (cells: Row, from: Bucket, to: Bucket) => {
+    const key = groupOf(cells);
+    if (!key || from === to) return;
+    const d = delta.get(key) || emptyTally();
+    d[from]--;
+    d[to]++;
+    delta.set(key, d);
+  };
   const now = new Date().toISOString();
   for (const x of results) {
     if (!x) continue;
@@ -573,6 +626,7 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
     const prev = s(it.cells[C.status]);
     const prevFlag = s(it.cells[C.flag]);
     const prevReason = s(it.cells[C.reason]);
+    const was = bucketOf(prev, s(it.cells[C.verifiedBy]));
 
     if (res.verdict === "ERROR") {
       c.errors++;
@@ -582,6 +636,7 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
       } else {
         data.push({ range: `${U(C.status)}${r}:${U(C.inspected)}${r}`, values: [["Error", "URL Inspection", res.coverageState.slice(0, 300), "", "", "", res.checkedAt]] });
         data.push({ range: `${U(C.nextCheck)}${r}:${U(C.link)}${r}`, values: [[addDays(day, 1), "Check failed", ""]] });
+        move(it.cells, was, "errors");
       }
       continue;
     }
@@ -589,6 +644,7 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
     const status = isIndexedVerdict(res.verdict) ? "Indexed" : "Not indexed";
     if (status === "Indexed") c.indexed++;
     else c.notIndexed++;
+    move(it.cells, was, status === "Indexed" ? "indexed" : "notIndexed");
     let flag = "";
     if (status === "Not indexed" && (prev === "Indexed" || prevFlag.startsWith("No impressions"))) {
       flag = `Dropped from Google's index (found ${day})`;
@@ -618,7 +674,7 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
       : rateLimited
         ? "Google asked to slow down; continuing in the next run."
         : "";
-  return { ...c, done, stop, quota };
+  return { ...c, done, stop, quota, delta };
 }
 
 /** Called every 10 minutes. Works through each property's queue in turns until the time budget is used. */
@@ -658,6 +714,8 @@ export async function runChecks(deadline: number) {
         j.checkedToday += r.used;
         used += r.used;
         if (r.used) touched.add(j);
+        // Keep the "By sitemap" counts current after every batch (a small read and write).
+        await applyToSummary(j.book, j.tab, r.delta).catch(() => {});
         j.lastRun = new Date().toISOString();
         if (r.stop) {
           stopped.add(j);
@@ -680,10 +738,10 @@ export async function runChecks(deadline: number) {
     }
   }
 
-  // Keep the dashboard's counts current: recount each property that got new results in this run.
+  // The overview at the left of each tab uses the "By sitemap" counts, so refresh it for properties checked in this run.
   for (const j of touched) {
     if (Date.now() > deadline - 5_000) break;
-    await refreshSummary(j).catch(() => {});
+    await writeOverview(j.site).catch(() => {});
   }
   return { day, used, jobs: jobs.map((j) => ({ site: j.site, checkedToday: j.checkedToday, queued: j.queue.length })) };
 }
