@@ -265,7 +265,6 @@ export default function IndexChecks({ site }: { site: string }) {
                 <button className={`btn${job.enabled ? "" : " primary"}`} onClick={() => post({ enabled: !job.enabled })} disabled={busy}>
                   {job.enabled ? "Pause" : "Resume"}
                 </button>
-                <button className="btn" onClick={load}>Refresh</button>
               </div>
             </div>
 
