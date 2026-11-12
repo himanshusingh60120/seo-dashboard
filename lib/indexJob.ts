@@ -6,9 +6,13 @@
 //     Search Console impressions (both free), adds new URLs, marks pages with impressions as indexed, spots pages
 //     whose impressions suddenly stopped, and queues up to the daily budget of URLs for URL Inspection.
 //   run (every 10 minutes): inspects queued URLs in small batches and writes each result to its row.
+// Status changes (dropped, newly indexed, impressions stopped…) are also written to the _Changes tab.
 // Rows are only ever added at the bottom, never moved, so the queued row numbers stay valid.
 import { serviceAccountToken } from "./serviceAccount";
-import { appendRows, clearRange, colLetter, ensureSize, ensureTab, readRange, readRanges, safeTitle, sheetUrl, writeRange, writeRanges, type Row } from "./sheets";
+import {
+  appendRows, batchRead, clearRange, colLetter, ensureSize, ensureTab, readRange, readRanges, safeTitle, sheetUrl,
+  writeRange, writeRanges, type Row,
+} from "./sheets";
 import { collect } from "./sitemapReader";
 import { HttpError } from "./token";
 import { errorInspection, inspectUrl, latestFinalDate, listSites, searchAnalyticsAll, MAX_ROWS, type InspectionResult } from "./google";
@@ -20,6 +24,7 @@ const DAY = 864e5;
 export const JOBS_TAB = "_Jobs";
 export const SITEMAPS_TAB = "_Sitemaps";
 export const LOG_TAB = "_Log";
+export const CHANGES_TAB = "_Changes";
 
 /** Inspections per property per day for this job. Google allows 2,000; the rest is left for people using the dashboard. */
 export const DEFAULT_BUDGET = Math.min(1900, Math.max(1, Math.floor(Number(process.env.INDEX_DAILY_BUDGET) || 1800)));
@@ -48,6 +53,7 @@ export const JOB_HEADERS = [
 ];
 export const SITEMAP_HEADERS = ["Property", "Sitemap", "URLs", "Verified", "Indexed", "Not indexed", "Errors", "Not checked yet", "% verified", "Updated"];
 export const LOG_HEADERS = ["Time", "Property", "Step", "Inspections used", "Indexed", "Not indexed", "Errors", "Drops confirmed", "Note"];
+export const CHANGE_HEADERS = ["Time", "Property", "URL", "Change", "Before", "After", "Inspection link"];
 
 const s = (v: unknown) => (v == null ? "" : String(v));
 const n = (v: unknown) => {
@@ -141,6 +147,17 @@ async function log(site: string, step: string, c: Partial<Counts>, note: string)
   }
 }
 
+/** Adds rows to _Changes (dropped, newly indexed, impressions stopped…). Never fails a job. */
+async function recordChanges(rows: Row[]) {
+  if (!rows.length) return;
+  try {
+    await ensureTab(CHANGES_TAB, CHANGE_HEADERS);
+    await appendRows(CHANGES_TAB, rows);
+  } catch {
+    /* a convenience, like the log */
+  }
+}
+
 /* ---------------- Turning checks on and off ---------------- */
 
 /** True when the service account has been added as a user of this Search Console property. */
@@ -166,22 +183,31 @@ export async function setEnabled(site: string, enabled: boolean, by: string) {
   ]);
 }
 
-/** This property's job and per-sitemap summary, for the dashboard. */
+/** This property's job, per-sitemap summary and recent status changes, for the dashboard. */
 export async function propertyStatus(site: string) {
   const job = (await readJobs()).find((j) => j.site === site) || null;
-  await ensureTab(SITEMAPS_TAB, SITEMAP_HEADERS);
-  const sitemaps = (await readRange(SITEMAPS_TAB, "A2:J"))
+  const [smRows, chRows] = await batchRead([
+    { title: SITEMAPS_TAB, range: "A2:J" },
+    { title: CHANGES_TAB, range: "A2:G" },
+  ]);
+  const sitemaps = smRows
     .filter((r) => s(r[0]) === site)
     .map((r) => ({
       sitemap: s(r[1]), urls: n(r[2]), verified: n(r[3]), indexed: n(r[4]), notIndexed: n(r[5]),
       errors: n(r[6]), notChecked: n(r[7]), pctVerified: n(r[8]), updated: s(r[9]),
     }));
+  const changes = chRows
+    .filter((r) => s(r[1]) === site)
+    .slice(-300)
+    .reverse()
+    .map((r) => ({ at: s(r[0]), url: s(r[2]), change: s(r[3]), before: s(r[4]), after: s(r[5]), link: s(r[6]) }));
   return {
     job: job && {
       tab: job.tab, enabled: job.enabled, budget: job.budget, planDay: job.planDay, planStatus: job.planStatus,
       queued: job.queue.length, checkedToday: job.checkedToday, lastRun: job.lastRun, message: job.message,
     },
     sitemaps,
+    changes,
     sheetUrl: sheetUrl(),
   };
 }
@@ -283,6 +309,8 @@ export async function planProperty(job: Job, day: string): Promise<string> {
   for (const [u, v] of imp28) if (v > 0 && !at.has(u)) addRow(u);
 
   // 3. Decide what needs a URL Inspection today.
+  const now = new Date().toISOString();
+  const changes: Row[] = [];
   const due: { i: number; p: number; sitemap: string; inspected: string }[] = [];
   let withImpressions = 0;
   let stoppedCount = 0;
@@ -309,7 +337,10 @@ export async function planProperty(job: Job, day: string): Promise<string> {
     if (imp > 0 && !stopped) {
       withImpressions++;
       if (status !== "Indexed") {
-        r[C.flag] = status === "Not indexed" ? `Now appearing in search (${end})` : "";
+        if (status === "Not indexed") {
+          r[C.flag] = `Now appearing in search (${end})`;
+          changes.push([now, job.site, url, "Now appearing in search", "Not indexed", "Indexed (has impressions)", s(r[C.link])]);
+        } else r[C.flag] = "";
         r[C.status] = "Indexed";
         r[C.verifiedBy] = "Impressions";
       } else if (s(r[C.flag]) === "New") r[C.flag] = "";
@@ -322,6 +353,7 @@ export async function planProperty(job: Job, day: string): Promise<string> {
       p = 1;
       stoppedCount++;
       r[C.flag] = `Impressions stopped (last seen ${s(r[C.lastSeen]) || "earlier"}), checking`;
+      changes.push([now, job.site, url, "Impressions stopped", `${base} impressions in the 14 days before`, "Being checked with URL Inspection", s(r[C.link])]);
     } else if (r[C.source] === "No longer listed") p = 0;
     else if (!inspected) p = 2;
     else if (s(r[C.lastmod]) && s(r[C.lastmod]).slice(0, 10) > inspected.slice(0, 10)) p = 3;
@@ -371,6 +403,7 @@ export async function planProperty(job: Job, day: string): Promise<string> {
     await writeRange(job.tab, `A${i + 2}:${LAST}${i + 1 + part.length}`, part);
   }
   await writeSitemapSummary(job.site, rows, sm.errors);
+  await recordChanges(changes);
 
   job.planDay = day;
   job.planStatus = "ready";
@@ -419,14 +452,18 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
 
   const c: Counts = { used: 0, indexed: 0, notIndexed: 0, errors: 0, drops: 0 };
   const data: { range: string; values: Row[] }[] = [];
+  const changes: Row[] = [];
+  const now = new Date().toISOString();
   for (const x of results) {
     if (!x) continue;
     const { it, res } = x;
     const r = it.row;
+    const url = s(it.cells[C.url]);
     done.add(r);
     c.used++;
     const prev = s(it.cells[C.status]);
     const prevFlag = s(it.cells[C.flag]);
+    const prevReason = s(it.cells[C.reason]);
 
     if (res.verdict === "ERROR") {
       c.errors++;
@@ -447,10 +484,13 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
     if (status === "Not indexed" && (prev === "Indexed" || prevFlag.startsWith("Impressions stopped"))) {
       flag = `Dropped from Google's index (found ${day})`;
       c.drops++;
+      changes.push([now, job.site, url, "Dropped from Google's index", prevReason || prev || "Indexed", res.coverageState, res.link]);
     } else if (status === "Indexed" && prevFlag.startsWith("Impressions stopped")) {
       flag = "Impressions stopped, but still indexed";
+      changes.push([now, job.site, url, "Impressions stopped, still indexed", "Impressions stopped", res.coverageState, res.link]);
     } else if (status === "Indexed" && prev === "Not indexed") {
       flag = `Newly indexed (found ${day})`;
+      changes.push([now, job.site, url, "Newly indexed", prevReason || "Not indexed", res.coverageState, res.link]);
     }
     data.push({
       range: `E${r}:K${r}`,
@@ -459,6 +499,7 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
     data.push({ range: `N${r}:P${r}`, values: [[addDays(day, RECHECK_DAYS), flag, res.link]] });
   }
   if (data.length) await writeRanges(job.tab, data);
+  await recordChanges(changes);
 
   const stop = quota
     ? "Google's daily URL Inspection limit for this property was reached (people using the dashboard share it). Checks continue after tomorrow's plan."
