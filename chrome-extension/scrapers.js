@@ -278,15 +278,29 @@ export async function scrapeCrawl(site, known) {
 /* ---------------- Generative AI report ---------------- */
 export async function openAiReport() {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const visible = (e) => e.getClientRects().length > 0;
   for (let i = 0; i < 60; i++) {
+    // 1. Left menu: Performance → Search results → Generative AI
+    for (const e of document.querySelectorAll("a[href],[role=link],[role=menuitem]")) {
+      const href = e.getAttribute("href") || "";
+      const t = (e.innerText || "").trim();
+      if (visible(e) && (/\/search-analytics\/ai\b/.test(href) || /^generative ai$/i.test(t))) {
+        e.click();
+        return { clicked: true };
+      }
+    }
+    // 2. Older layout: an "Open report" button in the generative AI box on the Performance page
     for (const e of document.querySelectorAll("a,button,[role=button],[role=link]")) {
       const label = ((e.innerText || "") + " " + (e.getAttribute("aria-label") || "")).trim();
-      if (!/open report/i.test(label) || !e.getClientRects().length) continue;
+      if (!/open report/i.test(label) || !visible(e)) continue;
       let box = e.parentElement;
       for (let k = 0; k < 8 && box; k++, box = box.parentElement) {
         const t = box.innerText || "";
         if (t.length > 800) break;
-        if (/generative ai/i.test(t)) { e.click(); return { clicked: true }; }
+        if (/generative ai/i.test(t)) {
+          e.click();
+          return { clicked: true };
+        }
       }
     }
     await sleep(500);
