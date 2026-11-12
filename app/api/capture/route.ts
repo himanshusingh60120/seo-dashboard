@@ -1,13 +1,15 @@
 // app/api/capture/route.ts
 // POST (with the extension key) { kind: "indexing" | "crawl" | "ai", capture } → checks what the Chrome extension
-// copied exactly as the dashboard checks a bookmark copy, and saves it to the Google Sheet only when it adds up.
-// Only capture accounts (lib/captureAccess.ts) can send captures.
+// copied exactly as the dashboard checks a bookmark copy, and saves it to the property's Google Sheet only when it adds
+// up. Only capture accounts (lib/captureAccess.ts) can send captures, and only for properties with daily index checks,
+// on the weekly capture list, or that the service account can open.
 import { NextRequest, NextResponse } from "next/server";
 import { HttpError } from "@/lib/token";
 import { verifyCaptureKey } from "@/lib/captureKey";
 import { assertCaptureEmail } from "@/lib/captureAccess";
 import { serviceAccountReady } from "@/lib/serviceAccount";
 import { readJobs, serviceAccountCanRead } from "@/lib/indexJob";
+import { captureList } from "@/lib/captureList";
 import { parseIdxCapture } from "@/lib/capture/parseIdx";
 import { parseCapture as parseCrawlCapture } from "@/lib/capture/parseCrawl";
 import { parseAiCapture } from "@/lib/capture/parseAi";
@@ -30,9 +32,12 @@ export async function POST(req: NextRequest) {
     const cap = body.capture;
     const site = typeof cap?.site === "string" ? cap.site : "";
     if (!site) throw new HttpError(400, "The capture doesn't say which property it came from.");
-    const known = (await readJobs()).some((j) => j.site === site);
+    const known = (await readJobs()).some((j) => j.site === site) || (await captureList()).includes(site);
     if (!known && !(await serviceAccountCanRead(site))) {
-      throw new HttpError(403, `${site} isn't set up in the dashboard. Enable it in the _Jobs tab or give the service account access to it.`);
+      throw new HttpError(
+        403,
+        `${site} isn't set up in the dashboard. Open it in the dashboard's Weekly captures tab and click “Capture this property now”, or start its daily index checks.`
+      );
     }
     const text = JSON.stringify(cap);
     const stamp = `Chrome extension, ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`;
