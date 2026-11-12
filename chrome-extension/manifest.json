@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "KR Search Dashboard capture",
+  "version": "1.0.0",
+  "description": "Once a week, copies Search Console's Page indexing, Crawl stats and Generative AI reports into the KR Search Dashboard.",
+  "permissions": ["alarms", "storage", "tabs", "scripting"],
+  "host_permissions": ["https://search.google.com/*"],
+  "optional_host_permissions": ["https://*/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "options_page": "options.html",
+  "action": { "default_title": "KR Search Dashboard capture", "default_popup": "options.html" }
+}
