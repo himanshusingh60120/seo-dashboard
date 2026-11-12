@@ -1,12 +1,13 @@
 // lib/indexJob.ts
-// Daily index checks for enrolled properties, stored in each property's tab of the Google Sheet (INDEX_SHEET_ID),
-// in the "URL checks", "By sitemap" and "Status changes" sections (see lib/sheetLayout.ts).
+// Daily index checks for enrolled properties. Each property's results live in its own Google Sheet
+// (lib/sheetBooks.ts), in the "URL checks", "By sitemap" and "Status changes" sections (lib/sheetLayout.ts). The shared
+// bookkeeping (_Jobs: one row per property; _Log) is in the control Sheet (INDEX_SHEET_ID).
 //
 // Only Google's URL Inspection decides whether a URL is Indexed or Not indexed. Search impressions are used only to
 // decide what to check first. Every tracked URL goes through a rotation within the daily budget (oldest result first),
 // so each URL is re-checked about every (URLs ÷ daily budget) days, automatically.
 //
-// Each property has ONE row in _Jobs and ONE tab, whoever started it, so nothing is checked twice.
+// Each property has ONE row in _Jobs and ONE Sheet, whoever started it, so nothing is checked twice.
 //   plan (hourly; acts once per Pacific day per property, after Google's quota resets): reads the sitemaps and the
 //     Search Console impressions per page (both free), adds new URLs and builds today's queue:
 //       1. pages with no impressions for 4+ days that had impressions before (up to half the budget),
@@ -18,15 +19,15 @@
 //       7. everything else, oldest result first (the rotation).
 //   run (every 10 minutes): inspects queued URLs in small batches and writes each result to its row.
 // Search Console is read as the service account when it has been added to the property; otherwise as the person who
-// started the checks (their saved Google sign-in, see lib/userCredential.ts). The Sheet is always the service account.
+// started the checks (their saved Google sign-in, see lib/userCredential.ts). The Sheets are always the service account.
 import { serviceAccountToken } from "./serviceAccount";
 import { userAccessToken } from "./userCredential";
 import {
-  appendRows, batchRead, colLetter, ensureTab, readRange, readRanges, sheetUrl, tabs, writeRange, writeRanges, type Row,
+  appendRows, batchRead, bookUrl, colLetter, controlBook, ensureTab, readRange, readRanges, sheetUrl, tabs, writeRange, writeRanges,
+  type Book, type Row,
 } from "./sheets";
-import {
-  FIRST_ROW, SEC, URL_HEADERS, appendSection, assertLayout, propertyTab, sectionRange, tabFor, writeSection,
-} from "./sheetLayout";
+import { FIRST_ROW, SEC, URL_HEADERS, appendSection, assertLayout, sectionRange, tabFor, writeSection } from "./sheetLayout";
+import { findSheet, propertySheet } from "./sheetBooks";
 import { writeOverview } from "./overview";
 import { collect } from "./sitemapReader";
 import { HttpError } from "./token";
@@ -106,7 +107,7 @@ async function pool<T, R>(items: T[], size: number, fn: (t: T) => Promise<R>): P
   return out;
 }
 
-/* ---------------- _Jobs: one row per property ---------------- */
+/* ---------------- _Jobs (control Sheet): one row per property ---------------- */
 
 /** Written by the daily plan: how far the rotation has got. */
 export type PlanStats = {
@@ -118,6 +119,8 @@ export type Job = {
   row: number; site: string; tab: string; enabled: boolean; budget: number;
   planDay: string; planStatus: string; plannedAt: string; queue: number[];
   checkedToday: number; lastRun: string; message: string; runAs: string; stats: PlanStats | null;
+  /** The property's own Sheet; filled in by the plan or the run. */
+  book: Book;
 };
 
 const parseStats = (v: unknown): PlanStats | null => {
@@ -130,10 +133,11 @@ const parseStats = (v: unknown): PlanStats | null => {
 };
 
 export async function readJobs(): Promise<Job[]> {
-  await ensureTab(JOBS_TAB, JOB_HEADERS);
-  const t = (await tabs()).get(JOBS_TAB);
-  if (t && t.cols < JOB_HEADERS.length) await ensureTab(JOBS_TAB, JOB_HEADERS, true); // adds new columns to older sheets
-  const rows = await readRange(JOBS_TAB, "A2:O");
+  const control = controlBook();
+  await ensureTab(control, JOBS_TAB, JOB_HEADERS);
+  const t = (await tabs(control)).get(JOBS_TAB);
+  if (t && t.cols < JOB_HEADERS.length) await ensureTab(control, JOBS_TAB, JOB_HEADERS, true); // adds new columns to older sheets
+  const rows = await readRange(control, JOBS_TAB, "A2:O");
   return rows
     .map(
       (r, i): Job => ({
@@ -154,14 +158,16 @@ export async function readJobs(): Promise<Job[]> {
         message: s(r[12]),
         runAs: s(r[13]).trim() || SA_LABEL,
         stats: parseStats(r[14]),
+        book: "",
       })
     )
     .filter((j) => j.site);
 }
 
 async function saveJob(j: Job) {
-  await writeRange(JOBS_TAB, `B${j.row}:B${j.row}`, [[j.tab]]);
-  await writeRange(JOBS_TAB, `G${j.row}:O${j.row}`, [
+  const control = controlBook();
+  await writeRange(control, JOBS_TAB, `B${j.row}:B${j.row}`, [[j.tab]]);
+  await writeRange(control, JOBS_TAB, `G${j.row}:O${j.row}`, [
     [
       j.planDay, j.planStatus, j.plannedAt, j.queue.join(","), j.checkedToday, j.lastRun, j.message.slice(0, 500), j.runAs,
       j.stats ? JSON.stringify(j.stats) : "",
@@ -178,8 +184,9 @@ type Counts = { used: number; indexed: number; notIndexed: number; errors: numbe
 
 async function log(site: string, step: string, c: Partial<Counts>, note: string) {
   try {
-    await ensureTab(LOG_TAB, LOG_HEADERS);
-    await appendRows(LOG_TAB, [
+    const control = controlBook();
+    await ensureTab(control, LOG_TAB, LOG_HEADERS);
+    await appendRows(control, LOG_TAB, [
       [new Date().toISOString(), site, step, c.used ?? 0, c.indexed ?? 0, c.notIndexed ?? 0, c.errors ?? 0, c.drops ?? 0, note.slice(0, 500)],
     ]);
   } catch {
@@ -188,10 +195,10 @@ async function log(site: string, step: string, c: Partial<Counts>, note: string)
 }
 
 /** Adds rows to the property's "Status changes" section. Never fails a job. */
-async function recordChanges(title: string, rows: Row[]) {
+async function recordChanges(book: Book, title: string, rows: Row[]) {
   if (!rows.length) return;
   try {
-    await appendSection(title, "changes", rows);
+    await appendSection(book, title, "changes", rows);
   } catch {
     /* a convenience, like the log */
   }
@@ -206,25 +213,26 @@ export async function serviceAccountCanRead(site: string) {
 }
 
 /**
- * Starts or pauses daily checks for a property. Starting a property that isn't in the Sheet yet adds its _Jobs row
- * and its tab; starting one that is already there reuses them (nothing is checked twice).
+ * Starts or pauses daily checks for a property. Starting a property that isn't in the control Sheet yet adds its _Jobs
+ * row and creates its own Sheet; starting one that is already there reuses them (nothing is checked twice).
  */
 export async function setEnabled(site: string, enabled: boolean, by: string, runAs: string = SA_LABEL) {
   await assertLayout();
+  const control = controlBook();
   const jobs = await readJobs();
   const j = jobs.find((x) => x.site === site);
   if (j) {
-    await writeRange(JOBS_TAB, `C${j.row}:C${j.row}`, [[enabled]]);
+    await writeRange(control, JOBS_TAB, `C${j.row}:C${j.row}`, [[enabled]]);
     if (enabled) {
-      await writeRange(JOBS_TAB, `N${j.row}:N${j.row}`, [[runAs]]);
-      if (j.planStatus === "error") await writeRange(JOBS_TAB, `H${j.row}:H${j.row}`, [["waiting"]]);
-      await propertyTab(site);
+      await writeRange(control, JOBS_TAB, `N${j.row}:N${j.row}`, [[runAs]]);
+      if (j.planStatus === "error") await writeRange(control, JOBS_TAB, `H${j.row}:H${j.row}`, [["waiting"]]);
+      await propertySheet(site, by);
     }
     return;
   }
   if (!enabled) return;
-  const title = await propertyTab(site);
-  await appendRows(JOBS_TAB, [
+  const { title } = await propertySheet(site, by);
+  await appendRows(control, JOBS_TAB, [
     [site, title, true, DEFAULT_BUDGET, by, new Date().toISOString(), "", "waiting", "", "", 0, "", "Added. The first daily plan runs within the hour.", runAs, ""],
   ]);
 }
@@ -233,11 +241,13 @@ export async function setEnabled(site: string, enabled: boolean, by: string, run
 export async function propertyStatus(site: string) {
   await assertLayout();
   const job = (await readJobs()).find((j) => j.site === site) || null;
-  const title = tabFor(site);
-  const [smRows, chRows] = await batchRead([
-    { title, range: sectionRange("sitemaps") },
-    { title, range: sectionRange("changes") },
-  ]);
+  const ref = await findSheet(site);
+  const [smRows, chRows] = ref
+    ? await batchRead(ref.book, [
+        { title: ref.title, range: sectionRange("sitemaps") },
+        { title: ref.title, range: sectionRange("changes") },
+      ])
+    : ([[], []] as Row[][]);
   const sitemaps = smRows
     .filter((r) => s(r[0]))
     .map((r) => ({
@@ -257,13 +267,13 @@ export async function propertyStatus(site: string) {
     },
     sitemaps,
     changes,
-    sheetUrl: sheetUrl(),
+    sheetUrl: ref ? bookUrl(ref.book) : sheetUrl(),
   };
 }
 
 /* ---------------- Per-sitemap summary ("By sitemap" section) ---------------- */
 
-async function writeSitemapSummary(title: string, rows: Row[], problems: { sitemap: string; error: string }[] = []) {
+async function writeSitemapSummary(book: Book, title: string, rows: Row[], problems: { sitemap: string; error: string }[] = []) {
   type G = { urls: number; indexed: number; notIndexed: number; errors: number; unchecked: number };
   const groups = new Map<string, G>();
   for (const r of rows) {
@@ -288,12 +298,12 @@ async function writeSitemapSummary(title: string, rows: Row[], problems: { sitem
       return [k, g.urls, verified, g.indexed, g.notIndexed, g.errors, g.unchecked, g.urls ? Math.round((verified / g.urls) * 1000) / 10 : 0, now];
     });
   for (const p of problems) out.push([p.sitemap, 0, 0, 0, 0, 0, 0, 0, `Couldn't read: ${p.error}`.slice(0, 300)]);
-  await writeSection(title, "sitemaps", out);
+  await writeSection(book, title, "sitemaps", out);
 }
 
 async function refreshSummary(j: Job) {
-  const rows = (await readRange(j.tab, URL_RANGE)).map(pad);
-  await writeSitemapSummary(j.tab, rows);
+  const rows = (await readRange(j.book, j.tab, URL_RANGE)).map(pad);
+  await writeSitemapSummary(j.book, j.tab, rows);
   await writeOverview(j.site).catch(() => {});
 }
 
@@ -322,7 +332,8 @@ export async function planProperty(job: Job, day: string): Promise<string> {
   }
   await saveJob(job);
   const token = await jobToken(job);
-  const title = await propertyTab(job.site);
+  const { book, title } = await propertySheet(job.site, "Daily index checks");
+  job.book = book;
   job.tab = title;
 
   // 1. Free signals: sitemaps, and Search Console impressions per page.
@@ -345,7 +356,7 @@ export async function planProperty(job: Job, day: string): Promise<string> {
   ]);
 
   // 2. Current rows, plus new URLs at the bottom.
-  const rows = (await readRange(title, URL_RANGE)).map(pad);
+  const rows = (await readRange(book, title, URL_RANGE)).map(pad);
   const at = new Map<string, number>();
   rows.forEach((r, i) => {
     const u = s(r[C.url]);
@@ -485,9 +496,9 @@ export async function planProperty(job: Job, day: string): Promise<string> {
   });
 
   // 6. Save the URL list, the per-sitemap summary, the changes and the overview.
-  await writeSection(title, "urls", rows);
-  await writeSitemapSummary(title, rows, sm.errors);
-  await recordChanges(title, changes);
+  await writeSection(book, title, "urls", rows);
+  await writeSitemapSummary(book, title, rows, sm.errors);
+  await recordChanges(book, title, changes);
 
   const unchecked = tracked - verified;
   job.stats = {
@@ -521,7 +532,7 @@ export async function planProperty(job: Job, day: string): Promise<string> {
 type BatchResult = Counts & { done: Set<number>; stop: string; quota: boolean };
 
 async function checkBatch(job: Job, rowNums: number[], token: string, day: string): Promise<BatchResult> {
-  const got = await readRanges(job.tab, rowNums.map(rowRange));
+  const got = await readRanges(job.book, job.tab, rowNums.map(rowRange));
   const items = rowNums.map((row, k) => ({ row, cells: pad(got[k]?.[0] || []) }));
   const done = new Set<number>(items.filter((x) => !s(x.cells[C.url])).map((x) => x.row)); // emptied rows leave the queue
   const work = items.filter((x) => s(x.cells[C.url]));
@@ -596,8 +607,8 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
     });
     data.push({ range: `${U(C.nextCheck)}${r}:${U(C.link)}${r}`, values: [["In rotation", flag, res.link]] });
   }
-  if (data.length) await writeRanges(job.tab, data);
-  await recordChanges(job.tab, changes);
+  if (data.length) await writeRanges(job.book, job.tab, data);
+  await recordChanges(job.book, job.tab, changes);
 
   const who = job.runAs === SA_LABEL ? "the service account" : job.runAs;
   const stop = quota
@@ -630,6 +641,12 @@ export async function runChecks(deadline: number) {
     for (const j of active) {
       if (!timeLeft()) break;
       try {
+        if (!j.book) {
+          const ref = await findSheet(j.site);
+          if (!ref) throw new Error("This property's Google Sheet wasn't found. It's set up again with the next daily plan.");
+          j.book = ref.book;
+          j.tab = ref.title;
+        }
         let token = tokens.get(j);
         if (!token) {
           token = await jobToken(j);
