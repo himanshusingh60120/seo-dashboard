@@ -1,10 +1,15 @@
 // lib/serviceAccount.ts
 // Signs in as the service account (a "robot" Google account) for jobs that run while nobody is logged in:
-// Search Console (URL Inspection, Search Analytics, sitemaps) and the Google Sheet used as the database.
+// Search Console (URL Inspection, Search Analytics, sitemaps), the Google Sheets used as the database, and Google
+// Drive (to create each property's Sheet in the shared drive).
 // Server-only. Needs GOOGLE_SERVICE_ACCOUNT_JSON (the whole key file) and INDEX_SHEET_ID in the environment.
 import { createSign } from "crypto";
 
-const SCOPES = ["https://www.googleapis.com/auth/webmasters.readonly", "https://www.googleapis.com/auth/spreadsheets"];
+const SCOPES = [
+  "https://www.googleapis.com/auth/webmasters.readonly",
+  "https://www.googleapis.com/auth/spreadsheets",
+  "https://www.googleapis.com/auth/drive",
+];
 
 type Key = { client_email: string; private_key: string };
 let cached: { token: string; exp: number } | null = null;
