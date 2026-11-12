@@ -1,9 +1,11 @@
 // app/api/capture/route.ts
 // POST (with the extension key) { kind: "indexing" | "crawl" | "ai", capture } → checks what the Chrome extension
 // copied exactly as the dashboard checks a bookmark copy, and saves it to the Google Sheet only when it adds up.
+// Only capture accounts (lib/captureAccess.ts) can send captures.
 import { NextRequest, NextResponse } from "next/server";
 import { HttpError } from "@/lib/token";
 import { verifyCaptureKey } from "@/lib/captureKey";
+import { assertCaptureEmail } from "@/lib/captureAccess";
 import { serviceAccountReady } from "@/lib/serviceAccount";
 import { readJobs, serviceAccountCanRead } from "@/lib/indexJob";
 import { parseIdxCapture } from "@/lib/capture/parseIdx";
@@ -21,6 +23,7 @@ export const maxDuration = 60;
 export async function POST(req: NextRequest) {
   try {
     const email = verifyCaptureKey(req.headers.get("x-capture-key"));
+    assertCaptureEmail(email);
     if (!serviceAccountReady()) throw new HttpError(503, "The dashboard's Google Sheet isn't set up yet.");
     const body = await req.json().catch(() => ({}));
     const kind = String(body.kind || "");
