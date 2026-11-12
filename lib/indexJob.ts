@@ -1,11 +1,12 @@
 // lib/indexJob.ts
-// Daily index checks for enrolled properties, stored in the Google Sheet (INDEX_SHEET_ID).
+// Daily index checks for enrolled properties, stored in each property's tab of the Google Sheet (INDEX_SHEET_ID),
+// in the "URL checks", "By sitemap" and "Status changes" sections (see lib/sheetLayout.ts).
 //
 // Only Google's URL Inspection decides whether a URL is Indexed or Not indexed. Search impressions are used only to
 // decide what to check first. Every tracked URL goes through a rotation within the daily budget (oldest result first),
 // so each URL is re-checked about every (URLs ÷ daily budget) days, automatically.
 //
-// Each property has ONE row in _Jobs and ONE tab with one row per URL, whoever started it, so nothing is checked twice.
+// Each property has ONE row in _Jobs and ONE tab, whoever started it, so nothing is checked twice.
 //   plan (hourly; acts once per Pacific day per property, after Google's quota resets): reads the sitemaps and the
 //     Search Console impressions per page (both free), adds new URLs and builds today's queue:
 //       1. pages with no impressions for 4+ days that had impressions before (up to half the budget),
@@ -18,25 +19,27 @@
 //   run (every 10 minutes): inspects queued URLs in small batches and writes each result to its row.
 // Search Console is read as the service account when it has been added to the property; otherwise as the person who
 // started the checks (their saved Google sign-in, see lib/userCredential.ts). The Sheet is always the service account.
-// Status changes are also written to the _Changes tab. Rows are only added at the bottom, never moved.
 import { serviceAccountToken } from "./serviceAccount";
 import { userAccessToken } from "./userCredential";
 import {
-  appendRows, batchRead, clearRange, colLetter, ensureSize, ensureTab, readRange, readRanges, safeTitle, sheetUrl,
-  tabs, writeRange, writeRanges, type Row,
+  appendRows, batchRead, colLetter, ensureTab, readRange, readRanges, sheetUrl, tabs, writeRange, writeRanges, type Row,
 } from "./sheets";
+import {
+  FIRST_ROW, SEC, URL_HEADERS, appendSection, assertLayout, propertyTab, sectionRange, tabFor, writeSection,
+} from "./sheetLayout";
+import { writeOverview } from "./overview";
 import { collect } from "./sitemapReader";
 import { HttpError } from "./token";
 import { errorInspection, inspectUrl, latestFinalDate, listSites, searchAnalyticsAll, MAX_ROWS, type InspectionResult } from "./google";
 import { addDays, GSC_TZ, todayIn } from "./dates";
 import { normalizeUrl } from "./url";
 
+export { tabFor, URL_HEADERS };
+
 const DAY = 864e5;
 
 export const JOBS_TAB = "_Jobs";
-export const SITEMAPS_TAB = "_Sitemaps";
 export const LOG_TAB = "_Log";
-export const CHANGES_TAB = "_Changes";
 /** Value of the "Runs as" column when Search Console is read as the service account. */
 export const SA_LABEL = "Service account";
 
@@ -55,13 +58,11 @@ const FLAG_BACK = "Back in search, checking";
 const BATCH = 40;
 const PARALLEL = 6;
 
-export const URL_HEADERS = [
-  "URL", "Sitemap", "Source", "Sitemap lastmod", "Status", "Verified by", "Google's reason", "Page fetch",
-  "Last crawled by Google", "Google canonical", "Last inspected", "Impressions (28 days)", "Last seen in search",
-  "Next check", "Flag", "Inspection link",
-];
 const W = URL_HEADERS.length;
-const LAST = colLetter(W);
+/** Column letter of URL-checks column k (0-based). */
+const U = (k: number) => colLetter(SEC.urls.start + k);
+const URL_RANGE = sectionRange("urls");
+const rowRange = (r: number) => `${U(0)}${r}:${U(W - 1)}${r}`;
 const C = {
   url: 0, sitemap: 1, source: 2, lastmod: 3, status: 4, verifiedBy: 5, reason: 6, fetch: 7,
   lastCrawl: 8, canonical: 9, inspected: 10, imp28: 11, lastSeen: 12, nextCheck: 13, flag: 14, link: 15,
@@ -71,9 +72,7 @@ export const JOB_HEADERS = [
   "Property", "Tab", "Enabled", "Daily budget", "Added by", "Added at", "Plan day", "Plan status", "Planned at",
   "Queue (row numbers)", "Checked today", "Last run", "Last message", "Runs as", "Plan stats",
 ];
-export const SITEMAP_HEADERS = ["Property", "Sitemap", "URLs", "Verified", "Indexed", "Not indexed", "Errors", "Not checked yet", "% verified", "Updated"];
 export const LOG_HEADERS = ["Time", "Property", "Step", "Inspections used", "Indexed", "Not indexed", "Errors", "Drops confirmed", "Note"];
-export const CHANGE_HEADERS = ["Time", "Property", "URL", "Change", "Before", "After", "Inspection link"];
 
 const s = (v: unknown) => (v == null ? "" : String(v));
 const n = (v: unknown) => {
@@ -92,12 +91,6 @@ const isIndexedVerdict = (v: string) => v === "PASS" || v === "PARTIAL";
 
 /** Google's daily quotas reset at midnight Pacific time, so the job's "day" is a Pacific day. */
 export const today = () => todayIn(GSC_TZ);
-
-/** "sc-domain:example.com" → "example.com (domain)"; "https://www.example.com/" → "www.example.com". */
-export function tabFor(site: string) {
-  const t = site.startsWith("sc-domain:") ? `${site.slice(10)} (domain)` : site.replace(/^https?:\/\//, "").replace(/\/$/, "");
-  return safeTitle(t);
-}
 
 async function pool<T, R>(items: T[], size: number, fn: (t: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
@@ -146,7 +139,7 @@ export async function readJobs(): Promise<Job[]> {
       (r, i): Job => ({
         row: i + 2,
         site: s(r[0]).trim(),
-        tab: s(r[1]).trim() || tabFor(s(r[0]).trim()),
+        tab: tabFor(s(r[0]).trim()),
         enabled: yes(r[2]),
         budget: Math.min(1900, Math.max(1, Math.floor(n(r[3]) || DEFAULT_BUDGET))),
         planDay: s(r[6]),
@@ -155,7 +148,7 @@ export async function readJobs(): Promise<Job[]> {
         queue: s(r[9])
           .split(",")
           .map((x) => Math.floor(Number(x)))
-          .filter((x) => x >= 2),
+          .filter((x) => x >= FIRST_ROW),
         checkedToday: n(r[10]),
         lastRun: s(r[11]),
         message: s(r[12]),
@@ -194,12 +187,11 @@ async function log(site: string, step: string, c: Partial<Counts>, note: string)
   }
 }
 
-/** Adds rows to _Changes (dropped, newly indexed, impressions stopped…). Never fails a job. */
-async function recordChanges(rows: Row[]) {
+/** Adds rows to the property's "Status changes" section. Never fails a job. */
+async function recordChanges(title: string, rows: Row[]) {
   if (!rows.length) return;
   try {
-    await ensureTab(CHANGES_TAB, CHANGE_HEADERS);
-    await appendRows(CHANGES_TAB, rows);
+    await appendSection(title, "changes", rows);
   } catch {
     /* a convenience, like the log */
   }
@@ -218,6 +210,7 @@ export async function serviceAccountCanRead(site: string) {
  * and its tab; starting one that is already there reuses them (nothing is checked twice).
  */
 export async function setEnabled(site: string, enabled: boolean, by: string, runAs: string = SA_LABEL) {
+  await assertLayout();
   const jobs = await readJobs();
   const j = jobs.find((x) => x.site === site);
   if (j) {
@@ -225,36 +218,37 @@ export async function setEnabled(site: string, enabled: boolean, by: string, run
     if (enabled) {
       await writeRange(JOBS_TAB, `N${j.row}:N${j.row}`, [[runAs]]);
       if (j.planStatus === "error") await writeRange(JOBS_TAB, `H${j.row}:H${j.row}`, [["waiting"]]);
-      await ensureTab(j.tab, URL_HEADERS);
+      await propertyTab(site);
     }
     return;
   }
   if (!enabled) return;
-  const tab = tabFor(site);
-  await ensureTab(tab, URL_HEADERS);
+  const title = await propertyTab(site);
   await appendRows(JOBS_TAB, [
-    [site, tab, true, DEFAULT_BUDGET, by, new Date().toISOString(), "", "waiting", "", "", 0, "", "Added. The first daily plan runs within the hour.", runAs, ""],
+    [site, title, true, DEFAULT_BUDGET, by, new Date().toISOString(), "", "waiting", "", "", 0, "", "Added. The first daily plan runs within the hour.", runAs, ""],
   ]);
 }
 
 /** This property's job, per-sitemap summary and recent status changes, for the dashboard. */
 export async function propertyStatus(site: string) {
+  await assertLayout();
   const job = (await readJobs()).find((j) => j.site === site) || null;
+  const title = tabFor(site);
   const [smRows, chRows] = await batchRead([
-    { title: SITEMAPS_TAB, range: "A2:J" },
-    { title: CHANGES_TAB, range: "A2:G" },
+    { title, range: sectionRange("sitemaps") },
+    { title, range: sectionRange("changes") },
   ]);
   const sitemaps = smRows
-    .filter((r) => s(r[0]) === site)
+    .filter((r) => s(r[0]))
     .map((r) => ({
-      sitemap: s(r[1]), urls: n(r[2]), verified: n(r[3]), indexed: n(r[4]), notIndexed: n(r[5]),
-      errors: n(r[6]), notChecked: n(r[7]), pctVerified: n(r[8]), updated: s(r[9]),
+      sitemap: s(r[0]), urls: n(r[1]), verified: n(r[2]), indexed: n(r[3]), notIndexed: n(r[4]),
+      errors: n(r[5]), notChecked: n(r[6]), pctVerified: n(r[7]), updated: s(r[8]),
     }));
   const changes = chRows
-    .filter((r) => s(r[1]) === site)
+    .filter((r) => s(r[0]))
     .slice(-300)
     .reverse()
-    .map((r) => ({ at: s(r[0]), url: s(r[2]), change: s(r[3]), before: s(r[4]), after: s(r[5]), link: s(r[6]) }));
+    .map((r) => ({ at: s(r[0]), url: s(r[1]), change: s(r[2]), before: s(r[3]), after: s(r[4]), link: s(r[5]) }));
   return {
     job: job && {
       tab: job.tab, enabled: job.enabled, budget: job.budget, planDay: job.planDay, planStatus: job.planStatus,
@@ -267,9 +261,9 @@ export async function propertyStatus(site: string) {
   };
 }
 
-/* ---------------- Per-sitemap summary (_Sitemaps) ---------------- */
+/* ---------------- Per-sitemap summary ("By sitemap" section) ---------------- */
 
-async function writeSitemapSummary(site: string, rows: Row[], problems: { sitemap: string; error: string }[] = []) {
+async function writeSitemapSummary(title: string, rows: Row[], problems: { sitemap: string; error: string }[] = []) {
   type G = { urls: number; indexed: number; notIndexed: number; errors: number; unchecked: number };
   const groups = new Map<string, G>();
   for (const r of rows) {
@@ -287,25 +281,20 @@ async function writeSitemapSummary(site: string, rows: Row[], problems: { sitema
     groups.set(key, g);
   }
   const now = new Date().toISOString();
-  const mine: Row[] = [...groups.entries()]
+  const out: Row[] = [...groups.entries()]
     .sort((a, b) => b[1].urls - a[1].urls)
     .map(([k, g]) => {
       const verified = g.indexed + g.notIndexed;
-      return [site, k, g.urls, verified, g.indexed, g.notIndexed, g.errors, g.unchecked, g.urls ? Math.round((verified / g.urls) * 1000) / 10 : 0, now];
+      return [k, g.urls, verified, g.indexed, g.notIndexed, g.errors, g.unchecked, g.urls ? Math.round((verified / g.urls) * 1000) / 10 : 0, now];
     });
-  for (const p of problems) mine.push([site, p.sitemap, 0, 0, 0, 0, 0, 0, 0, `Couldn't read: ${p.error}`.slice(0, 300)]);
-
-  await ensureTab(SITEMAPS_TAB, SITEMAP_HEADERS);
-  const others = (await readRange(SITEMAPS_TAB, "A2:J")).filter((r) => s(r[0]) && s(r[0]) !== site);
-  const out = [...others, ...mine];
-  await ensureSize(SITEMAPS_TAB, out.length + 1, SITEMAP_HEADERS.length);
-  await clearRange(SITEMAPS_TAB, "A2:J");
-  if (out.length) await writeRange(SITEMAPS_TAB, `A2:J${out.length + 1}`, out);
+  for (const p of problems) out.push([p.sitemap, 0, 0, 0, 0, 0, 0, 0, `Couldn't read: ${p.error}`.slice(0, 300)]);
+  await writeSection(title, "sitemaps", out);
 }
 
 async function refreshSummary(j: Job) {
-  const rows = (await readRange(j.tab, `A2:${LAST}`)).map(pad);
-  await writeSitemapSummary(j.site, rows);
+  const rows = (await readRange(j.tab, URL_RANGE)).map(pad);
+  await writeSitemapSummary(j.tab, rows);
+  await writeOverview(j.site).catch(() => {});
 }
 
 /* ---------------- Plan: once per Pacific day per property ---------------- */
@@ -333,7 +322,8 @@ export async function planProperty(job: Job, day: string): Promise<string> {
   }
   await saveJob(job);
   const token = await jobToken(job);
-  await ensureTab(job.tab, URL_HEADERS, true);
+  const title = await propertyTab(job.site);
+  job.tab = title;
 
   // 1. Free signals: sitemaps, and Search Console impressions per page.
   const sm = await collect(token, job.site, null, false);
@@ -355,7 +345,7 @@ export async function planProperty(job: Job, day: string): Promise<string> {
   ]);
 
   // 2. Current rows, plus new URLs at the bottom.
-  const rows = (await readRange(job.tab, `A2:${LAST}`)).map(pad);
+  const rows = (await readRange(title, URL_RANGE)).map(pad);
   const at = new Map<string, number>();
   rows.forEach((r, i) => {
     const u = s(r[C.url]);
@@ -428,7 +418,7 @@ export async function planProperty(job: Job, day: string): Promise<string> {
         p = 1;
         quietCount++;
         if (!flag.startsWith("No impressions")) {
-          changes.push([now, job.site, url, "Impressions stopped", `${base} impressions in the 14 days before`, "Being checked with URL Inspection", s(r[C.link])]);
+          changes.push([now, url, "Impressions stopped", `${base} impressions in the 14 days before`, "Being checked with URL Inspection", s(r[C.link])]);
         }
         r[C.flag] = FLAG_QUIET;
       } else {
@@ -437,7 +427,7 @@ export async function planProperty(job: Job, day: string): Promise<string> {
     } else if (rec > 0 && status === "Not indexed" && age >= 1) {
       p = 2;
       if (!flag.startsWith("Back in search")) {
-        changes.push([now, job.site, url, "Back in search", "Not indexed", "Has impressions again; being checked", s(r[C.link])]);
+        changes.push([now, url, "Back in search", "Not indexed", "Has impressions again; being checked", s(r[C.link])]);
       }
       r[C.flag] = FLAG_BACK;
     } else if (!inspected) {
@@ -448,7 +438,7 @@ export async function planProperty(job: Job, day: string): Promise<string> {
       p = 5;
     } else if (rec > 0 && flag.startsWith("No impressions") && age >= 1) {
       p = 6;
-      changes.push([now, job.site, url, "Back in search", "No impressions", "Has impressions again; being checked", s(r[C.link])]);
+      changes.push([now, url, "Back in search", "No impressions", "Has impressions again; being checked", s(r[C.link])]);
       r[C.flag] = FLAG_BACK;
     } else if (age >= 1) {
       p = 7;
@@ -456,13 +446,13 @@ export async function planProperty(job: Job, day: string): Promise<string> {
     if (p) due.push({ i, p, sitemap: s(r[C.sitemap]), inspected });
   });
 
-  // 4. Today's queue, within the daily budget.
+  // 4. Today's queue, within the daily budget (queue entries are sheet row numbers).
   due.sort((a, b) => a.p - b.p || (a.inspected < b.inspected ? -1 : a.inspected > b.inspected ? 1 : 0));
   const queue: number[] = [];
   const room = () => queue.length < job.budget;
   const quietCap = Math.floor(job.budget * QUIET_SHARE);
-  for (const d of due) if (d.p === 1 && queue.length < quietCap) queue.push(d.i + 2);
-  for (const d of due) if (d.p === 2 && room()) queue.push(d.i + 2);
+  for (const d of due) if (d.p === 1 && queue.length < quietCap) queue.push(d.i + FIRST_ROW);
+  for (const d of due) if (d.p === 2 && room()) queue.push(d.i + FIRST_ROW);
   const fresh = new Map<string, Due[]>();
   for (const d of due) {
     if (d.p !== 3) continue;
@@ -476,32 +466,28 @@ export async function planProperty(job: Job, day: string): Promise<string> {
     for (const l of lists) {
       if (k < l.length) {
         any = true;
-        if (room()) queue.push(l[k].i + 2);
+        if (room()) queue.push(l[k].i + FIRST_ROW);
       }
     }
     if (!any) break;
   }
-  for (const d of due) if (d.p > 3 && room()) queue.push(d.i + 2);
+  for (const d of due) if (d.p > 3 && room()) queue.push(d.i + FIRST_ROW);
 
   // 5. "Next check" for every row.
   const queued = new Set(queue);
   const cycleDays = Math.max(1, Math.ceil(tracked / Math.max(1, job.budget)));
   rows.forEach((r, i) => {
     if (!s(r[C.url])) return;
-    if (queued.has(i + 2)) r[C.nextCheck] = day;
+    if (queued.has(i + FIRST_ROW)) r[C.nextCheck] = day;
     else if (r[C.source] === "No longer listed") r[C.nextCheck] = "Not checked (no longer in a sitemap or search)";
     else if (!s(r[C.inspected])) r[C.nextCheck] = "Waiting for its first check";
     else r[C.nextCheck] = `In rotation (about every ${cycleDays} days)`;
   });
 
-  // 6. Save the tab in chunks so each request stays small.
-  await ensureSize(job.tab, rows.length + 1, W);
-  for (let i = 0; i < rows.length; i += 4000) {
-    const part = rows.slice(i, i + 4000);
-    await writeRange(job.tab, `A${i + 2}:${LAST}${i + 1 + part.length}`, part);
-  }
-  await writeSitemapSummary(job.site, rows, sm.errors);
-  await recordChanges(changes);
+  // 6. Save the URL list, the per-sitemap summary, the changes and the overview.
+  await writeSection(title, "urls", rows);
+  await writeSitemapSummary(title, rows, sm.errors);
+  await recordChanges(title, changes);
 
   const unchecked = tracked - verified;
   job.stats = {
@@ -525,6 +511,7 @@ export async function planProperty(job: Job, day: string): Promise<string> {
     (reset ? ` · ${reset.toLocaleString()} earlier impression-based results reset` : "") +
     (sm.errors.length ? ` · ${sm.errors.length} sitemap problem(s)` : "");
   await saveJob(job);
+  await writeOverview(job.site).catch(() => {});
   await log(job.site, "plan", {}, `${job.message} · runs as ${job.runAs}`);
   return job.message;
 }
@@ -534,7 +521,7 @@ export async function planProperty(job: Job, day: string): Promise<string> {
 type BatchResult = Counts & { done: Set<number>; stop: string; quota: boolean };
 
 async function checkBatch(job: Job, rowNums: number[], token: string, day: string): Promise<BatchResult> {
-  const got = await readRanges(job.tab, rowNums.map((r) => `A${r}:${LAST}${r}`));
+  const got = await readRanges(job.tab, rowNums.map(rowRange));
   const items = rowNums.map((row, k) => ({ row, cells: pad(got[k]?.[0] || []) }));
   const done = new Set<number>(items.filter((x) => !s(x.cells[C.url])).map((x) => x.row)); // emptied rows leave the queue
   const work = items.filter((x) => s(x.cells[C.url]));
@@ -580,10 +567,10 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
       c.errors++;
       if (prev === "Indexed" || prev === "Not indexed") {
         // A failed check never replaces a real result.
-        data.push({ range: `N${r}:O${r}`, values: [[addDays(day, 1), `Last check failed: ${res.coverageState}`.slice(0, 300)]] });
+        data.push({ range: `${U(C.nextCheck)}${r}:${U(C.flag)}${r}`, values: [[addDays(day, 1), `Last check failed: ${res.coverageState}`.slice(0, 300)]] });
       } else {
-        data.push({ range: `E${r}:K${r}`, values: [["Error", "URL Inspection", res.coverageState.slice(0, 300), "", "", "", res.checkedAt]] });
-        data.push({ range: `N${r}:P${r}`, values: [[addDays(day, 1), "Check failed", ""]] });
+        data.push({ range: `${U(C.status)}${r}:${U(C.inspected)}${r}`, values: [["Error", "URL Inspection", res.coverageState.slice(0, 300), "", "", "", res.checkedAt]] });
+        data.push({ range: `${U(C.nextCheck)}${r}:${U(C.link)}${r}`, values: [[addDays(day, 1), "Check failed", ""]] });
       }
       continue;
     }
@@ -595,22 +582,22 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
     if (status === "Not indexed" && (prev === "Indexed" || prevFlag.startsWith("No impressions"))) {
       flag = `Dropped from Google's index (found ${day})`;
       c.drops++;
-      changes.push([now, job.site, url, "Dropped from Google's index", prevReason || prev || "Indexed", res.coverageState, res.link]);
+      changes.push([now, url, "Dropped from Google's index", prevReason || prev || "Indexed", res.coverageState, res.link]);
     } else if (status === "Indexed" && prevFlag.startsWith("No impressions")) {
       flag = "No recent impressions, but still indexed";
-      changes.push([now, job.site, url, "No impressions, still indexed", "No impressions for 4+ days", res.coverageState, res.link]);
+      changes.push([now, url, "No impressions, still indexed", "No impressions for 4+ days", res.coverageState, res.link]);
     } else if (status === "Indexed" && prev === "Not indexed") {
       flag = `Newly indexed (found ${day})`;
-      changes.push([now, job.site, url, "Newly indexed", prevReason || "Not indexed", res.coverageState, res.link]);
+      changes.push([now, url, "Newly indexed", prevReason || "Not indexed", res.coverageState, res.link]);
     }
     data.push({
-      range: `E${r}:K${r}`,
+      range: `${U(C.status)}${r}:${U(C.inspected)}${r}`,
       values: [[status, "URL Inspection", res.coverageState, res.pageFetchState, res.lastCrawlTime, res.googleCanonical, res.checkedAt]],
     });
-    data.push({ range: `N${r}:P${r}`, values: [["In rotation", flag, res.link]] });
+    data.push({ range: `${U(C.nextCheck)}${r}:${U(C.link)}${r}`, values: [["In rotation", flag, res.link]] });
   }
   if (data.length) await writeRanges(job.tab, data);
-  await recordChanges(changes);
+  await recordChanges(job.tab, changes);
 
   const who = job.runAs === SA_LABEL ? "the service account" : job.runAs;
   const stop = quota
