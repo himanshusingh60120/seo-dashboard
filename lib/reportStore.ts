@@ -1,17 +1,18 @@
 // lib/reportStore.ts
-// Search Console reports that have no API (Page indexing, Crawl stats, the Generative AI report), kept in the Google
-// Sheet with their full history, in sections of each property's tab (see lib/sheetLayout.ts):
+// Search Console reports that have no API (Page indexing, Crawl stats, the Generative AI report), kept with their full
+// history in sections of the property's own Google Sheet (see lib/sheetBooks.ts and lib/sheetLayout.ts):
 //   Page indexing · Google's report   one row per view and day: Indexed, Not indexed, Impressions
 //   Why pages aren't indexed          the reasons table, one block per update
 //   Crawl stats                       one row per series (All / Refresh / Discovery / other) and day
 //   Crawled URLs                      example crawled URLs (from Crawl stats exports)
 //   AI impressions                    one row per day
 //   AI pages, countries, devices      one block per update
-// plus the hidden _Updates tab (who saved what, and when, for all properties).
+// plus the hidden _Updates tab in the control Sheet (who saved what, and when, for all properties).
 // The dashboard still receives the same shapes (IdxStore, CrawlStore, AiStore), so its screens don't change.
 // Server-only.
-import { appendRows, batchRead, ensureTab, tabs, type Row } from "./sheets";
-import { assertLayout, propertyTab, sectionRange, tabFor, writeSection } from "./sheetLayout";
+import { appendRows, batchRead, controlBook, ensureTab, tabs, type Row } from "./sheets";
+import { assertLayout, sectionRange, writeSection, type SectionKey } from "./sheetLayout";
+import { findSheet, propertySheet } from "./sheetBooks";
 import { writeOverview } from "./overview";
 import { IDX_LABEL, IDX_VIEWS, emptyIdxStore, mergeIdx, type IdxImport, type IdxParsed, type IdxStore, type IdxView, type IdxViewData } from "./indexStats";
 import { emptyAiStore, mergeAi, type AiImport, type AiParsed, type AiSnapshot, type AiStore } from "./aiStore";
@@ -52,8 +53,24 @@ const overview = (site: string) => writeOverview(site).catch(() => {});
 
 async function logUpdates(rows: Row[]) {
   if (!rows.length) return;
-  await ensureTab(UPDATES_TAB, UPDATE_HEADERS);
-  await appendRows(UPDATES_TAB, rows);
+  const control = controlBook();
+  await ensureTab(control, UPDATES_TAB, UPDATE_HEADERS);
+  await appendRows(control, UPDATES_TAB, rows);
+}
+
+/** Sections of the property's Sheet (empty when it has no Sheet yet), plus the update log from the control Sheet. */
+async function readProperty(site: string, keys: SectionKey[], fresh: boolean): Promise<{ parts: Row[][]; log: Row[] }> {
+  await assertLayout();
+  const control = controlBook();
+  const ref = await findSheet(site, fresh);
+  if (fresh) await Promise.all([tabs(control, true), ref ? tabs(ref.book, true) : null]);
+  const [parts, logs] = await Promise.all([
+    ref
+      ? batchRead(ref.book, keys.map((k) => ({ title: ref.title, range: sectionRange(k) })))
+      : Promise.resolve(keys.map((): Row[] => [])),
+    batchRead(control, [{ title: UPDATES_TAB, range: "A2:I" }]),
+  ]);
+  return { parts, log: logs[0] };
 }
 
 /** This property's log rows for one report, after its most recent "Deleted". */
@@ -95,14 +112,10 @@ function pageRowsOf(store: IdxStore): Row[] {
 
 export function loadIdx(site: string, fresh = false): Promise<IdxStore> {
   return memo(`idx:${site}`, fresh, async () => {
-    await assertLayout();
-    if (fresh) await tabs(true);
-    const t = tabFor(site);
-    const [pages, reasons, log] = await batchRead([
-      { title: t, range: sectionRange("pages") },
-      { title: t, range: sectionRange("reasons") },
-      { title: UPDATES_TAB, range: "A2:I" },
-    ]);
+    const {
+      parts: [pages, reasons],
+      log,
+    } = await readProperty(site, ["pages", "reasons"], fresh);
     const store = emptyIdxStore();
     const viewData = (v: IdxView): IdxViewData => (store.views[v] ||= { days: {}, reasons: [], reasonsHistory: {} });
     for (const r of pages) {
@@ -138,10 +151,10 @@ export function loadIdx(site: string, fresh = false): Promise<IdxStore> {
 }
 
 export async function saveIdx(site: string, parsed: IdxParsed, by: string, source: string): Promise<IdxStore> {
-  const t = await propertyTab(site);
+  const { book, title } = await propertySheet(site, by);
   const store = mergeIdx(await loadIdx(site, true), parsed, by);
   // Reasons: earlier updates stay as they are; a new copy for the same view and date replaces that block.
-  const [old] = await batchRead([{ title: t, range: sectionRange("reasons") }]);
+  const [old] = await batchRead(book, [{ title, range: sectionRange("reasons") }]);
   const replaced = new Set<string>();
   const added: Row[] = [];
   for (const v of IDX_VIEWS) {
@@ -151,8 +164,8 @@ export async function saveIdx(site: string, parsed: IdxParsed, by: string, sourc
     for (const r of pv.reasons) added.push([IDX_LABEL[v], pv.asOf, r.reason, r.source, r.validation, r.pages]);
   }
   const reasonRows = sortReasons([...old.filter((r) => s(r[0]) && !replaced.has(`${viewOf(r[0])}|${s(r[1])}`)), ...added]);
-  await writeSection(t, "pages", pageRowsOf(store));
-  await writeSection(t, "reasons", reasonRows);
+  await writeSection(book, title, "pages", pageRowsOf(store));
+  await writeSection(book, title, "reasons", reasonRows);
   const last = store.imports[store.imports.length - 1];
   const days = Math.max(0, ...IDX_VIEWS.map((v) => Object.keys(parsed[v]?.days || {}).length));
   await logUpdates([[last.at, site, REPORT.idx, by, source, last.from, last.to, days, last.views.join(",")]]);
@@ -161,9 +174,9 @@ export async function saveIdx(site: string, parsed: IdxParsed, by: string, sourc
   return store;
 }
 
-/** One-time copy of data saved before the Sheet existed. */
+/** One-time copy of data saved before the Sheets existed. */
 export async function restoreIdx(site: string, old: IdxStore) {
-  const t = await propertyTab(site);
+  const { book, title } = await propertySheet(site, FROM_UPSTASH);
   const reasons: Row[] = [];
   for (const v of IDX_VIEWS) {
     const view = old.views?.[v];
@@ -176,17 +189,17 @@ export async function restoreIdx(site: string, old: IdxStore) {
       }
     }
   }
-  await writeSection(t, "pages", pageRowsOf(old));
-  await writeSection(t, "reasons", sortReasons(reasons));
+  await writeSection(book, title, "pages", pageRowsOf(old));
+  await writeSection(book, title, "reasons", sortReasons(reasons));
   await logUpdates((old.imports || []).map((i) => [i.at, site, REPORT.idx, i.by || "", FROM_UPSTASH, i.from, i.to, "", (i.views || []).join(",")]));
   forget(`idx:${site}`);
   await overview(site);
 }
 
 export async function clearIdx(site: string, by: string) {
-  const t = await propertyTab(site);
-  await writeSection(t, "pages", []);
-  await writeSection(t, "reasons", []);
+  const { book, title } = await propertySheet(site, by);
+  await writeSection(book, title, "pages", []);
+  await writeSection(book, title, "reasons", []);
   await logUpdates([[now(), site, REPORT.idx, by, DELETED, "", "", 0, ""]]);
   forget(`idx:${site}`);
   await overview(site);
@@ -199,8 +212,8 @@ const CRAWL_LABEL: Record<SeriesKind, string> = { total: "All crawl requests", r
 const kindOfKey = (key: string): SeriesKind => (key === "total" || key === "refresh" || key === "discovery" ? key : "other");
 const MAX_DAYS = 1100;
 
-async function writeCrawl(site: string, series: Record<string, CrawlSeries>) {
-  const t = await propertyTab(site);
+async function writeCrawl(site: string, series: Record<string, CrawlSeries>, by: string) {
+  const { book, title } = await propertySheet(site, by);
   const list = Object.values(series).sort((a, b) => KINDS.indexOf(a.kind) - KINDS.indexOf(b.kind) || a.key.localeCompare(b.key));
   const rows: Row[] = [];
   const urls: Row[] = [];
@@ -211,20 +224,16 @@ async function writeCrawl(site: string, series: Record<string, CrawlSeries>) {
     }
     for (const u of x.urls || []) urls.push([x.key, u.url, u.when]);
   }
-  await writeSection(t, "crawl", rows);
-  await writeSection(t, "crawlUrls", urls);
+  await writeSection(book, title, "crawl", rows);
+  await writeSection(book, title, "crawlUrls", urls);
 }
 
 export function loadCrawl(site: string, fresh = false): Promise<CrawlStore> {
   return memo(`crawl:${site}`, fresh, async () => {
-    await assertLayout();
-    if (fresh) await tabs(true);
-    const t = tabFor(site);
-    const [rows, urlRows, log] = await batchRead([
-      { title: t, range: sectionRange("crawl") },
-      { title: t, range: sectionRange("crawlUrls") },
-      { title: UPDATES_TAB, range: "A2:I" },
-    ]);
+    const {
+      parts: [rows, urlRows],
+      log,
+    } = await readProperty(site, ["crawl", "crawlUrls"], fresh);
     const series: Record<string, CrawlSeries> = {};
     const get = (key: string, label: string) =>
       (series[key] ||= { key, kind: kindOfKey(key), label: label || CRAWL_LABEL[kindOfKey(key)], days: {}, urls: [] });
@@ -296,7 +305,7 @@ export async function saveCrawl(site: string, incoming: CrawlIncoming[], by: str
     imports.push({ file, at, series: key, label, from: dates[0], to: dates[dates.length - 1], days: dates.length });
   }
   if (!imports.length) return { store, saved: 0 };
-  await writeCrawl(site, series);
+  await writeCrawl(site, series, by);
   await logUpdates(log);
   forget(`crawl:${site}`);
   await overview(site);
@@ -304,16 +313,16 @@ export async function saveCrawl(site: string, incoming: CrawlIncoming[], by: str
 }
 
 export async function restoreCrawl(site: string, old: CrawlStore) {
-  await writeCrawl(site, old.series || {});
+  await writeCrawl(site, old.series || {}, FROM_UPSTASH);
   await logUpdates((old.imports || []).map((i) => [i.at, site, REPORT.crawl, "", FROM_UPSTASH, i.from, i.to, i.days, i.series]));
   forget(`crawl:${site}`);
   await overview(site);
 }
 
 export async function clearCrawl(site: string, by: string) {
-  const t = await propertyTab(site);
-  await writeSection(t, "crawl", []);
-  await writeSection(t, "crawlUrls", []);
+  const { book, title } = await propertySheet(site, by);
+  await writeSection(book, title, "crawl", []);
+  await writeSection(book, title, "crawlUrls", []);
   await logUpdates([[now(), site, REPORT.crawl, by, DELETED, "", "", 0, ""]]);
   forget(`crawl:${site}`);
   await overview(site);
@@ -321,8 +330,8 @@ export async function clearCrawl(site: string, by: string) {
 
 /* ---------- AI impressions (Generative AI report) ---------- */
 
-async function writeAi(site: string, store: AiStore) {
-  const t = await propertyTab(site);
+async function writeAi(site: string, store: AiStore, by: string) {
+  const { book, title } = await propertySheet(site, by);
   const days: Row[] = Object.keys(store.days).sort().map((d) => [d, store.days[d]]);
   const split: Row[] = [];
   for (const x of store.snapshots) {
@@ -331,20 +340,16 @@ async function writeAi(site: string, store: AiStore) {
     for (const [k, v] of Object.entries(x.countries)) split.push([...head, "Country", k, v]);
     for (const [k, v] of Object.entries(x.devices)) split.push([...head, "Device", k, v]);
   }
-  await writeSection(t, "ai", days);
-  await writeSection(t, "aiSplit", split);
+  await writeSection(book, title, "ai", days);
+  await writeSection(book, title, "aiSplit", split);
 }
 
 export function loadAi(site: string, fresh = false): Promise<AiStore> {
   return memo(`ai:${site}`, fresh, async () => {
-    await assertLayout();
-    if (fresh) await tabs(true);
-    const t = tabFor(site);
-    const [rows, split, log] = await batchRead([
-      { title: t, range: sectionRange("ai") },
-      { title: t, range: sectionRange("aiSplit") },
-      { title: UPDATES_TAB, range: "A2:I" },
-    ]);
+    const {
+      parts: [rows, split],
+      log,
+    } = await readProperty(site, ["ai", "aiSplit"], fresh);
     const store = emptyAiStore();
     for (const r of rows) {
       const d = s(r[0]);
@@ -386,7 +391,7 @@ export function loadAi(site: string, fresh = false): Promise<AiStore> {
 export async function saveAi(site: string, items: AiParsed[], by: string): Promise<AiStore> {
   let store = await loadAi(site, true);
   for (const p of items) store = mergeAi(store, p, by);
-  await writeAi(site, store);
+  await writeAi(site, store, by);
   await logUpdates(items.map((p) => [now(), site, REPORT.ai, by, p.file, p.from, p.to, Object.keys(p.days).length, Object.keys(p.pages).length]));
   forget(`ai:${site}`);
   await overview(site);
@@ -394,16 +399,16 @@ export async function saveAi(site: string, items: AiParsed[], by: string): Promi
 }
 
 export async function restoreAi(site: string, old: AiStore) {
-  await writeAi(site, { days: old.days || {}, snapshots: old.snapshots || [], imports: [] });
+  await writeAi(site, { days: old.days || {}, snapshots: old.snapshots || [], imports: [] }, FROM_UPSTASH);
   await logUpdates((old.imports || []).map((i) => [i.at, site, REPORT.ai, i.by || "", FROM_UPSTASH, i.from, i.to, i.days, i.pages]));
   forget(`ai:${site}`);
   await overview(site);
 }
 
 export async function clearAi(site: string, by: string) {
-  const t = await propertyTab(site);
-  await writeSection(t, "ai", []);
-  await writeSection(t, "aiSplit", []);
+  const { book, title } = await propertySheet(site, by);
+  await writeSection(book, title, "ai", []);
+  await writeSection(book, title, "aiSplit", []);
   await logUpdates([[now(), site, REPORT.ai, by, DELETED, "", "", 0, 0]]);
   forget(`ai:${site}`);
   await overview(site);
