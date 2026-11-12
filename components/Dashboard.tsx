@@ -21,14 +21,16 @@ import CtaSection from "./CtaSection";
 import ChannelDrilldown from "./ChannelDrilldown";
 import Audit from "./Audit";
 import IndexChecks from "./IndexChecks";
+import WeeklyCaptures from "./WeeklyCaptures";
 
-type Tab = "overview" | "rankings" | "indexing" | "checks" | "crawl" | "queries" | "growth" | "audience" | "cta" | "audit";
+type Tab = "overview" | "rankings" | "indexing" | "checks" | "captures" | "crawl" | "queries" | "growth" | "audience" | "cta" | "audit";
 
 const BASE_TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "rankings", label: "Rankings" },
   { id: "indexing", label: "Indexing" },
   { id: "checks", label: "Index checks" },
+  { id: "captures", label: "Weekly captures" },
   { id: "crawl", label: "Crawl activity" },
   { id: "queries", label: "Queries" },
   { id: "growth", label: "Query growth" },
@@ -85,7 +87,7 @@ export default function Dashboard() {
   const reqId = useRef(0);
   const [indexVersion, setIndexVersion] = useState(0);
   const bumpIndex = useCallback(() => setIndexVersion((v) => v + 1), []);
-  // Data sent by the bookmarks (arrives in the URL after #)
+  // Data sent by the old bookmarks (arrives in the URL after #). Bookmarks are retired; the tabs only acknowledge it.
   const [inbox, setInbox] = useState<string | null>(null); // Copy crawl stats
   const [inboxWaiting, setInboxWaiting] = useState(false);
   const [aiInbox, setAiInbox] = useState<string | null>(null); // Copy AI impressions
@@ -119,7 +121,7 @@ export default function Dashboard() {
       .catch(() => {});
   }, []);
 
-  // Receive data from the bookmarks. Each opens this page with a "wait" hash first, then the data:
+  // Receive data from the old bookmarks. Each opens this page with a "wait" hash first, then the data:
   //   Copy crawl stats:    #crawl-wait, then #crawlstats=<data>
   //   Copy AI impressions: #ai-wait,    then #aistats=<data>
   //   Copy page indexing:  #idx-wait,   then #idxstats=<data>
@@ -410,9 +412,7 @@ export default function Dashboard() {
           )}
 
           {!gsc && !error && needsGsc && (
-            <div className="notice">
-              {aiWaiting || aiInbox ? "Receiving AI impressions from the bookmark… " : ""}Loading data for {site || "your properties"}…
-            </div>
+            <div className="notice">Loading data for {site || "your properties"}…</div>
           )}
 
           {gsc && tab === "overview" && (
@@ -445,6 +445,7 @@ export default function Dashboard() {
           )}
 
           {site && tab === "checks" && <IndexChecks site={site} />}
+          {site && tab === "captures" && <WeeklyCaptures site={site} />}
 
           {site && tab === "crawl" && (
             <CrawlActivity
