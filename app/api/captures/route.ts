@@ -1,13 +1,13 @@
 // app/api/captures/route.ts
 // GET ?site=… → the weekly Search Console captures for this property: the latest update of each report, and the
-// update history (who saved what, and when), from the _Updates tab. canCapture says whether the signed-in person runs
-// the captures (and so may see the Chrome extension section).
+// update history (who saved what, and when), from the _Updates tab of the control Sheet. canCapture says whether the
+// signed-in person runs the captures (and so may see the Chrome extension section).
 import { NextRequest, NextResponse } from "next/server";
 import { getGoogleAccessToken, requireUser } from "@/lib/token";
 import { assertSiteAccess } from "@/lib/google";
 import { serviceAccountReady } from "@/lib/serviceAccount";
 import { isCaptureEmail } from "@/lib/captureAccess";
-import { batchRead } from "@/lib/sheets";
+import { batchRead, controlBook } from "@/lib/sheets";
 import { fail } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
@@ -28,7 +28,7 @@ export async function GET(req: NextRequest) {
     const canCapture = isCaptureEmail(email);
     if (!serviceAccountReady()) return NextResponse.json({ configured: false, canCapture });
 
-    const [rows] = await batchRead([{ title: "_Updates", range: "A2:I" }]);
+    const [rows] = await batchRead(controlBook(), [{ title: "_Updates", range: "A2:I" }]);
 
     // One entry per save. Crawl stats writes one row per series (All / Refresh / Discovery) at the same moment,
     // so rows with the same report, time and person are merged.
