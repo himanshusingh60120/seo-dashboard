@@ -2,6 +2,8 @@
 "use client";
 // The Live index monitor (replaces the old Deindexed pages tab). The engine is in lib/monitor.ts and keeps running
 // while you use other tabs. Status changes come from comparing successive URL Inspection results per URL.
+// When the server's daily index checks are on for a property, this monitor switches itself off for it, because both
+// would use the same 2,000 daily URL Inspections.
 import { useEffect, useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { DataTable, Kpis, Section, SubTabs, num } from "./ui";
@@ -35,6 +37,7 @@ export default function IndexMonitor({ site }: { site: string }) {
   const [perm, setPerm] = useState("default");
   const [picking, setPicking] = useState(false);
   const [listCache, setListCache] = useState<IndexCache | null>(null);
+  const [serverOn, setServerOn] = useState(false);
   const mine = state.site === site;
   const running = state.running && mine;
 
@@ -47,6 +50,29 @@ export default function IndexMonitor({ site }: { site: string }) {
     setPicking(false);
     setMsg("");
   }, [site]);
+
+  // Is the server checking this property every day? Then this monitor stays off for it.
+  useEffect(() => {
+    let live = true;
+    setServerOn(false);
+    fetch(`/api/index-checks?site=${encodeURIComponent(site)}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (live) setServerOn(!!j?.configured && !!j?.job?.enabled);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [site]);
+
+  useEffect(() => {
+    if (serverOn && state.running && state.site === site) {
+      monitor.stop();
+      saveMonitorPrefs(site, false, budget);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverOn, state.running, state.site, site]);
 
   // The saved URL list, re-read after it changes
   useEffect(() => {
@@ -61,6 +87,21 @@ export default function IndexMonitor({ site }: { site: string }) {
   useEffect(() => {
     loadEvents(site).then(setEvents);
   }, [site, state.recentEvents]);
+
+  if (serverOn) {
+    return (
+      <Section
+        title="Live index monitor"
+        lede="Switched off for this property: the server checks it every day instead (see the Index checks tab), so nobody needs to keep this tab open."
+      >
+        <div className="notice">
+          Daily index checks are on for this property. Their results, sitemap progress and status changes are in the{" "}
+          <b>Index checks</b> tab. The browser monitor stays off here so the two don&apos;t share Google&apos;s 2,000 daily URL
+          Inspections.
+        </div>
+      </Section>
+    );
+  }
 
   const toggle = () => {
     if (running) {
@@ -119,7 +160,7 @@ export default function IndexMonitor({ site }: { site: string }) {
   return (
     <Section
       title="Live index monitor"
-      lede="Watches indexing while this dashboard is open in a browser tab. Every 15 minutes it reads Search Console's fresh data (a few hours behind) to spot pages that suddenly stopped getting impressions, and it keeps re-checking pages with the URL Inspection API in priority order: suspected drops first, then failed checks, new sitemap URLs, top pages, and indexed pages every 3 days. It only inspects pages in the URL list, which comes from the sitemaps you choose under “Reload URL list”. Every status change is saved in this browser. Google doesn't offer a real-time index feed, so this is the closest free option."
+      lede="Watches indexing while this dashboard is open in a browser tab. Every 15 minutes it reads Search Console's fresh data (a few hours behind) to spot pages that suddenly stopped getting impressions, and it keeps re-checking pages with the URL Inspection API in priority order: suspected drops first, then failed checks, new sitemap URLs, top pages, and indexed pages every 3 days. It only inspects pages in the URL list, which comes from the sitemaps you choose under “Reload URL list”. Every status change is saved in this browser. Google doesn't offer a real-time index feed, so this is the closest free option. For hands-off daily checks saved in the Google Sheet, use the Index checks tab instead."
     >
       <div className="panel">
         <div className="row">
