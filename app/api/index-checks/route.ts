@@ -1,5 +1,6 @@
 // app/api/index-checks/route.ts
-//   GET  ?site=…                        → this property's daily index checks (job, per-sitemap summary, status changes).
+//   GET  ?site=…                        → this property's daily index checks (job, per-sitemap summary, status changes)
+//                                          plus Google's own latest count from the Page indexing report.
 //   POST { site, enabled, useMine? }     → start or pause daily checks. Anyone who can open the property in Search
 //                                          Console can start them. If the service account hasn't been added to the
 //                                          property, the checks run with the starter's own Google sign-in (saved
@@ -12,15 +13,34 @@ import { assertSiteAccess } from "@/lib/google";
 import { serviceAccountEmail, serviceAccountReady } from "@/lib/serviceAccount";
 import { SA_LABEL, propertyStatus, serviceAccountCanRead, setEnabled } from "@/lib/indexJob";
 import { saveUserCredential } from "@/lib/userCredential";
+import { loadIdx } from "@/lib/reportStore";
+import { latestIdxDay } from "@/lib/indexStats";
 import { fail } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
+/** Google's own latest numbers (All known pages) from the Page indexing report saved by the weekly capture. */
+async function googleReport(site: string) {
+  try {
+    const store = await loadIdx(site);
+    const L = latestIdxDay(store.views.ALL_URLS);
+    if (!L) return null;
+    const last = store.imports[store.imports.length - 1];
+    return { indexed: L.indexed, notIndexed: L.notIndexed, date: L.date, savedAt: last?.at || "", by: last?.by || "" };
+  } catch {
+    return null;
+  }
+}
+
 async function everything(site: string) {
-  const [status, saCanRead] = await Promise.all([propertyStatus(site), serviceAccountCanRead(site).catch(() => false)]);
-  return { configured: true, serviceAccount: serviceAccountEmail(), saCanRead, ...status };
+  const [status, saCanRead, report] = await Promise.all([
+    propertyStatus(site),
+    serviceAccountCanRead(site).catch(() => false),
+    googleReport(site),
+  ]);
+  return { configured: true, serviceAccount: serviceAccountEmail(), saCanRead, report, ...status };
 }
 
 export async function GET(req: NextRequest) {
