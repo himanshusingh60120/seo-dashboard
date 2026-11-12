@@ -1,9 +1,10 @@
 // components/IndexChecks.tsx
 "use client";
 // The "Index checks" tab. Daily URL Inspection runs on the server for this property (results live in the Google
-// Sheet): today's progress, per-sitemap verification and status changes found. Anyone who can open the property in
-// Search Console can start the checks; they run as the service account when an owner has added it, otherwise with the
-// starter's Google sign-in. The weekly Search Console captures have their own tab (components/WeeklyCaptures.tsx).
+// Sheet): today's progress, per-sitemap verification and status changes found. It also shows Google's own latest
+// count from the Page indexing report (saved by the weekly capture) next to the checker's confirmed counts.
+// Anyone who can open the property in Search Console can start the checks; they run as the service account when an
+// owner has added it, otherwise with the starter's Google sign-in. The weekly captures have their own tab.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DataTable, Kpis, PanelTitle, Section, num, pct, type Col, type KpiItem } from "./ui";
 
@@ -18,9 +19,10 @@ type SitemapRow = {
   errors: number; notChecked: number; pctVerified: number; updated: string;
 };
 type Change = { at: string; url: string; change: string; before: string; after: string; link: string };
+type GoogleReport = { indexed: number; notIndexed: number; date: string; savedAt: string; by: string };
 type Status = {
   configured: boolean; serviceAccount?: string; saCanRead?: boolean; job?: Job | null; sitemaps?: SitemapRow[];
-  changes?: Change[]; sheetUrl?: string;
+  changes?: Change[]; sheetUrl?: string; report?: GoogleReport | null;
 };
 
 const DAY = 864e5;
@@ -130,6 +132,7 @@ export default function IndexChecks({ site }: { site: string }) {
   };
 
   const job = st?.job || null;
+  const report = st?.report || null;
   const sitemaps = useMemo(() => st?.sitemaps || [], [st]);
   const totals = useMemo(() => {
     const real = sitemaps.filter((x) => x.urls > 0);
@@ -169,16 +172,40 @@ export default function IndexChecks({ site }: { site: string }) {
               ? "Checking"
               : "Done for today";
 
+  /** Days until every tracked URL has been checked once, at the daily budget. */
+  const daysLeft = job && totals.notChecked ? Math.ceil(totals.notChecked / Math.max(1, job.budget)) : 0;
+
   const kpis: KpiItem[] = job
     ? [
         { label: "Status", value: state, sub: job.lastRun ? `last run ${agoText(job.lastRun)}` : undefined },
-        { label: "Runs as", value: runsAsPerson ? job.runAs : "Service account", sub: runsAsPerson ? "their Google sign-in" : st?.serviceAccount },
-        { label: "Inspected today", value: num(job.checkedToday), sub: `of ${num(job.budget)} a day` },
-        { label: "Still queued today", value: num(job.queued) },
-        { label: "URLs tracked", value: num(totals.urls), sub: `${num(totals.files)} sitemap file(s)` },
-        { label: "Verified", value: num(totals.verified), sub: totals.urls ? `${pct(totals.verified / totals.urls, 1)} of tracked URLs` : undefined },
-        { label: "Indexed", value: num(totals.indexed), sub: totals.verified ? `${pct(totals.indexed / totals.verified, 1)} of verified` : undefined },
-        { label: "Not indexed", value: num(totals.notIndexed), sub: totals.notChecked ? `${num(totals.notChecked)} not checked yet` : undefined },
+        {
+          label: "Indexed (Google's report)",
+          value: report ? num(report.indexed) : "–",
+          sub: report ? `as of ${report.date} · Page indexing report` : "no weekly capture yet",
+        },
+        {
+          label: "Not indexed (Google's report)",
+          value: report ? num(report.notIndexed) : "–",
+          sub: report ? `of ${num(report.indexed + report.notIndexed)} pages Google knows` : undefined,
+        },
+        {
+          label: "Confirmed indexed",
+          value: num(totals.indexed),
+          sub: totals.verified ? `${pct(totals.indexed / totals.verified, 1)} of URLs checked so far` : "checked by this tool",
+        },
+        { label: "Confirmed not indexed", value: num(totals.notIndexed), sub: "by URL Inspection" },
+        {
+          label: "Not checked yet",
+          value: num(totals.notChecked),
+          sub: daysLeft ? `about ${num(daysLeft)} day${daysLeft === 1 ? "" : "s"} to finish at ${num(job.budget)} a day` : "every URL checked",
+        },
+        { label: "URLs tracked", value: num(totals.urls), sub: `${num(totals.files)} sitemap file(s) + pages seen in search` },
+        { label: "Inspected today", value: num(job.checkedToday), sub: `of ${num(job.budget)} a day · ${num(job.queued)} still queued` },
+        {
+          label: "Runs as",
+          value: runsAsPerson ? "Google sign-in" : "Service account",
+          sub: runsAsPerson ? job.runAs : st?.serviceAccount,
+        },
       ]
     : [];
 
@@ -218,7 +245,22 @@ export default function IndexChecks({ site }: { site: string }) {
 
       {st?.configured && job && (
         <>
+          {!job.enabled && (
+            <div className="notice" style={{ marginBottom: 12 }}>
+              Daily checks are paused for this property, so no URLs are being inspected. Click <b>Resume daily checks</b> below to
+              continue where they stopped.
+            </div>
+          )}
+
           <Kpis items={kpis} />
+
+          <p className="muted" style={{ margin: "8px 0 0" }}>
+            <b>Google&apos;s report</b> is Google&apos;s own total for every page it knows about, from the Page indexing report
+            (saved by the weekly capture; Google updates it with a delay of a few days). <b>Confirmed</b> counts are this tool&apos;s
+            page-by-page checks of the URLs in your sitemaps and search results; they fill in over the coming days until every URL
+            has been checked.
+          </p>
+
           <div className="panel" style={{ marginTop: 12 }}>
             <p style={{ marginTop: 0 }}>{job.message || "Waiting for the first daily plan (it runs every hour)."}</p>
             {runsAsPerson && (
@@ -230,7 +272,7 @@ export default function IndexChecks({ site }: { site: string }) {
               </p>
             )}
             <div className="row" style={{ alignItems: "center" }}>
-              <button className="btn" onClick={() => post({ enabled: !job.enabled })} disabled={busy}>
+              <button className={`btn${job.enabled ? "" : " primary"}`} onClick={() => post({ enabled: !job.enabled })} disabled={busy}>
                 {job.enabled ? "Pause daily checks" : "Resume daily checks"}
               </button>
               {!st.saCanRead && (
