@@ -1,8 +1,10 @@
 // app/api/cron/index-run/route.ts
 // Every 10 minutes (vercel.json). Inspects queued URLs for every property and writes the results to the Sheet.
+// Waits while the Sheet is being moved to the one-tab-per-property layout (that happens in the hourly plan job).
 import { NextRequest, NextResponse } from "next/server";
 import { assertCron } from "@/lib/cron";
 import { serviceAccountReady } from "@/lib/serviceAccount";
+import { layoutReady } from "@/lib/sheetLayout";
 import { runChecks } from "@/lib/indexJob";
 import { fail } from "@/lib/api";
 
@@ -14,6 +16,9 @@ export async function GET(req: NextRequest) {
   try {
     assertCron(req);
     if (!serviceAccountReady()) return NextResponse.json({ skipped: "GOOGLE_SERVICE_ACCOUNT_JSON or INDEX_SHEET_ID isn't set." });
+    if (!(await layoutReady())) {
+      return NextResponse.json({ skipped: "Waiting for the Sheet to be reorganised (this happens in the hourly plan job)." });
+    }
     return NextResponse.json(await runChecks(Date.now() + 50_000));
   } catch (e) {
     return fail(e);
