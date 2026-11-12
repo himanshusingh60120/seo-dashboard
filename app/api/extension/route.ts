@@ -1,12 +1,13 @@
 // app/api/extension/route.ts
 // GET → the Chrome extension as a .zip, set up for the signed-in person: this dashboard's address and their own
 // extension key are inside (config.json), and Chrome is allowed to reach this dashboard (manifest host_permissions).
-// The zip is personal: captures sent with it are saved under this person's name.
+// Only capture accounts (lib/captureAccess.ts) can download it.
 import { promises as fs } from "fs";
 import path from "path";
 import { NextRequest, NextResponse } from "next/server";
 import { HttpError, requireUser } from "@/lib/token";
 import { captureKeyFor } from "@/lib/captureKey";
+import { assertCaptureEmail } from "@/lib/captureAccess";
 import { makeZip } from "@/lib/zip";
 import { fail } from "@/lib/api";
 
@@ -18,6 +19,7 @@ const FOLDER = "kr-search-capture";
 export async function GET(req: NextRequest) {
   try {
     const email = await requireUser(req);
+    assertCaptureEmail(email);
     const origin = req.nextUrl.origin;
 
     let files: [string, Buffer][];
