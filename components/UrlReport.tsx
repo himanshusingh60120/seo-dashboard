@@ -3,7 +3,7 @@
 // Everything about one page, opened from the "Look up a URL" box in the top bar:
 // Google index status (URL Inspection), Google Search performance and queries (Search Console), AI impressions,
 // and site traffic for the page (GA4), including visits from AI assistants.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { GscData, Inspection } from "@/lib/types";
 import type { Compare } from "@/lib/dates";
@@ -12,6 +12,8 @@ import type { Ga4PageResponse, Ga4SourceRow } from "@/app/api/ga4/page/route";
 import { useAiStore } from "@/lib/aiImpressions";
 import { latestAiSnapshot } from "@/lib/aiStore";
 import { normalizeUrl } from "@/lib/url";
+import { DAILY_INSPECTION_LIMIT, inspectAndStore, quotaLeft } from "@/lib/checks";
+import { loadIndexCache } from "@/lib/indexCache";
 import { Bars, DataTable, Delta, Kpis, PanelTitle, SourcesProvider, duration, num, pct, pos, shortUrl, useSources, type Col, type KpiItem } from "./ui";
 
 const axis = { fontSize: 12, fill: "#5b6573" };
@@ -25,6 +27,42 @@ const ago = (iso: string) => {
   const d = (Date.now() - t) / DAY;
   return d < 1 ? `${Math.max(1, Math.round(d * 24))} h ago` : `${Math.round(d)} day${Math.round(d) === 1 ? "" : "s"} ago`;
 };
+
+/* ---------- URL Inspection: counted, saved and not repeated ---------- */
+
+/** A saved inspection younger than this is shown as is, without using any of the day's 2,000 inspections. */
+const FRESH_MS = 24 * 36e5;
+
+type Looked = { result: Inspection | null; note?: string };
+
+/** One request per URL at a time, so a double render (or React Strict Mode in development) can't spend two inspections. */
+const inflight = new Map<string, Promise<Looked>>();
+
+/** The saved result for this URL, matching the way this file compares URLs (case, trailing slash). */
+const findSaved = (inspected: Record<string, Inspection>, url: string) =>
+  inspected[url] ?? Object.values(inspected).find((r) => same(r.url, url)) ?? null;
+
+/**
+ * Runs URL Inspection through inspectAndStore(): counts it against today's quota and saves the result
+ * (and any status change) for the Indexing tab, the Live index monitor and Crawl activity.
+ */
+function inspectOnce(site: string, url: string): Promise<Looked> {
+  const k = `${site}\n${url}`;
+  let p = inflight.get(k);
+  if (!p) {
+    p = inspectAndStore(site, [url])
+      .then((o): Looked => {
+        const r = o.results[0] ?? null;
+        if (o.quotaExceeded) return { result: r, note: "Google's daily URL Inspection limit for this property is used up. Try again tomorrow." };
+        if (!r && o.rateLimited) return { result: null, note: "Google asked to slow down. Try again in a minute." };
+        if (!r) return { result: null, note: "This URL isn't part of the property." };
+        return { result: r };
+      })
+      .finally(() => inflight.delete(k));
+    inflight.set(k, p);
+  }
+  return p;
+}
 
 async function getJson<T>(input: string, init?: RequestInit): Promise<T> {
   const r = await fetch(input, { cache: "no-store", ...init });
@@ -68,8 +106,6 @@ export default function UrlReport({
 }: { site: string; url: string; gsc: GscData; ga4: string; days: number; compare: Compare; onClose: () => void }) {
   const outer = useSources();
   const closeRef = useRef<HTMLButtonElement>(null);
-  const [insp, setInsp] = useState<Inspection | null>(null);
-  const [inspErr, setInspErr] = useState<string | null>(null);
   const [pq, setPq] = useState<PageQueriesResponse | null>(null);
   const [pqErr, setPqErr] = useState<string | null>(null);
   const [ga, setGa] = useState<Ga4PageResponse | null>(null);
@@ -85,28 +121,80 @@ export default function UrlReport({
     }
   }, [url]);
 
-  // Google index status (URL Inspection: 1 of about 2,000 daily checks)
+  // Google index status. A saved result from the last 24 hours is shown without calling Google;
+  // otherwise one inspection runs through inspectAndStore(), which counts it against today's quota and saves it.
+  const [insp, setInsp] = useState<Inspection | null>(null);
+  const [fromSaved, setFromSaved] = useState(false);
+  const [inspErr, setInspErr] = useState<string | null>(null);
+  const [inspNote, setInspNote] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const reqId = useRef(0);
+
+  const runCheck = useCallback(
+    async (force: boolean) => {
+      const id = ++reqId.current;
+      const live = () => reqId.current === id;
+      setChecking(false);
+      setInspErr(null);
+      setInspNote(null);
+      if (!force) {
+        setInsp(null);
+        setFromSaved(false);
+      }
+
+      const cache = await loadIndexCache(site).catch(() => null);
+      if (!live()) return;
+      const saved = cache ? findSaved(cache.inspected, url) : null;
+      const good = saved && saved.verdict && saved.verdict !== "ERROR" ? saved : null;
+
+      if (good && !force) {
+        setInsp(good);
+        setFromSaved(true);
+        if (Date.now() - Date.parse(good.checkedAt) < FRESH_MS) return; // recent enough: no inspection used
+      }
+
+      if (quotaLeft(site) <= 0) {
+        if (good) setInspNote("Today's URL Inspection limit for this property is used up, so this is the last saved result.");
+        else setInspErr("Google's daily URL Inspection limit for this property is used up. Try again tomorrow.");
+        return;
+      }
+
+      setChecking(true);
+      try {
+        const { result, note } = await inspectOnce(site, url);
+        if (!live()) return;
+        if (result && result.verdict !== "ERROR") {
+          setInsp(result);
+          setFromSaved(false);
+          if (note) setInspNote(note);
+        } else if (good) {
+          setInsp(good);
+          setFromSaved(true);
+          setInspNote(`${note || result?.coverageState || "Google couldn't check this URL just now."} Showing the last saved result.`);
+        } else {
+          setInspErr(note || result?.coverageState || "Google couldn't check this URL just now. Try again in a minute.");
+        }
+      } catch (e) {
+        if (!live()) return;
+        const msg = e instanceof Error ? e.message : "Inspection failed";
+        if (good) {
+          setInsp(good);
+          setFromSaved(true);
+          setInspNote(`${msg}. Showing the last saved result.`);
+        } else setInspErr(msg);
+      } finally {
+        if (live()) setChecking(false);
+      }
+    },
+    [site, url]
+  );
+
   useEffect(() => {
-    let live = true;
-    setInsp(null);
-    setInspErr(null);
-    getJson<{ results?: Inspection[]; quotaExceeded?: boolean; rateLimited?: boolean }>("/api/gsc/inspect", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ siteUrl: site, urls: [url] }),
-    })
-      .then((j) => {
-        if (j.quotaExceeded) throw new Error("Google's daily URL Inspection limit for this property is used up. Try again tomorrow.");
-        if (j.rateLimited) throw new Error("Google asked to slow down. Try again in a minute.");
-        const x = (j.results || [])[0];
-        if (!x) throw new Error("This URL isn't part of the property.");
-        if (live) setInsp(x);
-      })
-      .catch((e) => live && setInspErr(e instanceof Error ? e.message : "Inspection failed"));
+    runCheck(false);
     return () => {
-      live = false;
+      reqId.current++; // ignore late answers; the result is still saved by inspectAndStore()
     };
-  }, [site, url]);
+  }, [runCheck]);
 
   // Google Search performance and queries, same dates as the top bar
   useEffect(() => {
@@ -149,6 +237,8 @@ export default function UrlReport({
   }, [onClose]);
 
   const merged = useMemo(() => ({ ...outer, ...(pq?.sources || {}) }), [outer, pq]);
+
+  const left = quotaLeft(site);
 
   /* ---------- Index status ---------- */
   const inspKpis: KpiItem[] = insp
@@ -245,9 +335,17 @@ export default function UrlReport({
           <div className="panel" style={{ marginTop: 12 }}>
             <PanelTitle>Google index status</PanelTitle>
             {inspErr && <div className="notice error">{inspErr}</div>}
+            {inspNote && <div className="notice">{inspNote}</div>}
             {!insp && !inspErr && <p className="muted">Checking with Google&apos;s URL Inspection…</p>}
             {insp && (
               <>
+                <p className="muted" style={{ marginTop: 0 }}>
+                  {fromSaved ? `Last checked ${ago(insp.checkedAt)} (saved result, no inspection used)` : "Checked just now"}
+                  {` · ${num(left)} of ${num(DAILY_INSPECTION_LIMIT)} inspections left today `}
+                  <button className="btn small" onClick={() => runCheck(true)} disabled={checking || left <= 0}>
+                    {checking ? "Checking…" : "Check again"}
+                  </button>
+                </p>
                 <Kpis items={inspKpis} />
                 <div className="table-wrap" style={{ marginTop: 12 }}>
                   <table>
