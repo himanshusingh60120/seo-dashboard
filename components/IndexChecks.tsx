@@ -368,7 +368,7 @@ export default function IndexChecks({ site }: { site: string }) {
 
       <Section
         title="Weekly Search Console captures"
-        lede="Page indexing counts, Crawl stats and AI impressions have no Google API. The Chrome extension copies them once a week (the bookmarks still work too) and they're saved in the Google Sheet with their full history."
+        lede="Page indexing counts, Crawl stats and AI impressions have no Google API. The Chrome extension copies them once a week and they're saved in the Google Sheet with their full history."
       >
         <div className="panel">
           <div className="table-wrap">
