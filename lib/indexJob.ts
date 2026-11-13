@@ -18,6 +18,8 @@
 //       5. failed checks,
 //       6. pages that were quiet and now have impressions again (confirmation),
 //       7. everything else, oldest result first (the rotation).
+//     A sitemap that can't be read on a given day (for example the site's server is slow) keeps its URLs as they were,
+//     so a slow server never makes pages disappear from the counts or the rotation.
 //   run (every 10 minutes): inspects queued URLs in batches of 40, writes each result to its row, and updates the
 //     "By sitemap" counts after every batch (only the sitemaps that changed), so the dashboard moves every 10 minutes.
 // Search Console is read as the service account when it has been added to the property; otherwise as the person who
@@ -382,6 +384,8 @@ export async function planProperty(job: Job, day: string): Promise<string> {
   // 1. Free signals: sitemaps, and Search Console impressions per page.
   const sm = await collect(token, job.site, null, false);
   const inSitemap = new Map(sm.urls.map((u) => [u.url, u] as const));
+  // Sitemaps that couldn't be read today (e.g. the site's server timed out): their URLs keep what they had.
+  const unreadable = new Set(sm.errors.map((e) => e.sitemap));
   const end = await latestFinalDate(token, job.site);
   const byPage = async (from: string, to: string) => {
     const rows = await searchAnalyticsAll(token, job.site, { startDate: from, endDate: to, dimensions: ["page"] }, MAX_ROWS);
@@ -427,6 +431,7 @@ export async function planProperty(job: Job, day: string): Promise<string> {
   let seenInSearch = 0;
   let quietCount = 0;
   let reset = 0;
+  let kept = 0;
   let oldest = "";
 
   rows.forEach((r, i) => {
@@ -440,7 +445,10 @@ export async function planProperty(job: Job, day: string): Promise<string> {
       r[C.sitemap] = smu.sitemap || s(r[C.sitemap]);
       r[C.lastmod] = smu.lastmod || "";
     }
-    r[C.source] = smu && imp ? "Sitemap + search" : smu ? "Sitemap" : imp ? "Search only" : "No longer listed";
+    // Its sitemap couldn't be read today: keep it in that sitemap rather than treating it as removed.
+    const keep = !smu && unreadable.has(s(r[C.sitemap]));
+    if (keep) kept++;
+    r[C.source] = smu || keep ? (imp ? "Sitemap + search" : "Sitemap") : imp ? "Search only" : "No longer listed";
     r[C.imp28] = imp;
     if (rec > 0) r[C.lastSeen] = end;
     if (r[C.source] === "No longer listed") return;
@@ -563,7 +571,8 @@ export async function planProperty(job: Job, day: string): Promise<string> {
     `${queue.length.toLocaleString()} queued today` +
     (quietCount ? ` (including ${quietCount.toLocaleString()} with no impressions for ${QUIET_DAYS}+ days)` : "") +
     (reset ? ` · ${reset.toLocaleString()} earlier impression-based results reset` : "") +
-    (sm.errors.length ? ` · ${sm.errors.length} sitemap problem(s)` : "");
+    (sm.errors.length ? ` · ${sm.errors.length} sitemap problem(s)` : "") +
+    (kept ? ` · ${kept.toLocaleString()} URLs kept from sitemaps that couldn't be read today` : "");
   await saveJob(job);
   await writeOverview(job.site).catch(() => {});
   await log(job.site, "plan", {}, `${job.message} · runs as ${job.runAs}`);
