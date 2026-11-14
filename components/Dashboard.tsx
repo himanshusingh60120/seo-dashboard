@@ -90,6 +90,45 @@ function siteOf(raw: string | null): string {
   }
 }
 
+/* ---------------- Phones ---------------- */
+
+const NARROW_PX = 760;
+
+/** True on phone-sized screens. */
+function useNarrow() {
+  const [narrow, setNarrow] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia(`(max-width: ${NARROW_PX}px)`);
+    const on = () => setNarrow(mq.matches);
+    on();
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return narrow;
+}
+
+/** Layout fixes for phone-sized screens (the whole dashboard, including Compare months). */
+const MOBILE_CSS = `
+@media (max-width: ${NARROW_PX}px) {
+  .topbar { position: static !important; }
+  .topbar-inner { padding: 10px 12px !important; }
+  .topbar .control, .topbar .control select, .topbar .control input { width: 100%; min-width: 0 !important; max-width: none !important; }
+  .topbar form { max-width: none !important; }
+  .tabs { overflow-x: auto; flex-wrap: nowrap !important; white-space: nowrap; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tabs .tab { flex: 0 0 auto; }
+  main { padding: 12px !important; }
+  .section h2 { font-size: 18px; }
+  .panel { padding: 12px !important; }
+  .grid-2 { grid-template-columns: 1fr !important; }
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 8px !important; }
+  .kpi .value { font-size: 20px !important; }
+  table { font-size: 13px; }
+  .src-dialog { width: 100vw !important; max-width: 100vw !important; max-height: 100vh !important; border-radius: 0 !important; }
+  .cmp-mid { flex-direction: row !important; width: 100%; justify-content: center !important; flex-wrap: wrap; }
+  .cmp-line { display: none !important; }
+}`;
+
 /* ---------------- Top bar pieces ---------------- */
 
 const BLUE = "#1a73e8";
@@ -105,11 +144,12 @@ function Group({ title, children, grow = false }: { title: string; children: Rea
   );
 }
 
-/** The thin vertical line between groups. */
-const Divider = () => <div aria-hidden="true" style={{ width: 1, alignSelf: "stretch", background: "#dadce0", margin: "0 4px" }} />;
+/** The thin vertical line between groups (hidden on phones, where the groups stack). */
+const Divider = ({ hidden = false }: { hidden?: boolean }) =>
+  hidden ? null : <div aria-hidden="true" style={{ width: 1, alignSelf: "stretch", background: "#dadce0", margin: "0 4px" }} />;
 
 /** One clear switch between the normal dashboard and Compare months. */
-function ViewSwitch({ compare, onChange }: { compare: boolean; onChange: (v: boolean) => void }) {
+function ViewSwitch({ compare, onChange, full = false }: { compare: boolean; onChange: (v: boolean) => void; full?: boolean }) {
   const option = (active: boolean, label: string, value: boolean, title: string) => (
     <button
       type="button"
@@ -117,6 +157,7 @@ function ViewSwitch({ compare, onChange }: { compare: boolean; onChange: (v: boo
       aria-pressed={active}
       title={title}
       style={{
+        flex: full ? "1 1 0" : undefined,
         padding: "8px 16px",
         border: "none",
         background: active ? BLUE : "#fff",
@@ -130,7 +171,11 @@ function ViewSwitch({ compare, onChange }: { compare: boolean; onChange: (v: boo
     </button>
   );
   return (
-    <div role="group" aria-label="Choose the view" style={{ display: "inline-flex", border: `1px solid ${BLUE}`, borderRadius: 8, overflow: "hidden" }}>
+    <div
+      role="group"
+      aria-label="Choose the view"
+      style={{ display: "inline-flex", width: full ? "100%" : undefined, border: `1px solid ${BLUE}`, borderRadius: 8, overflow: "hidden" }}
+    >
       {option(!compare, "Normal view", false, "Live Search Console and GA4 numbers for the period you choose")}
       <span aria-hidden="true" style={{ width: 1, background: BLUE }} />
       {option(compare, "Compare months", true, "Compare any months side by side, including months Search Console no longer shows")}
@@ -140,6 +185,8 @@ function ViewSwitch({ compare, onChange }: { compare: boolean; onChange: (v: boo
 
 export default function Dashboard() {
   const { data: session } = useSession();
+  const narrow = useNarrow();
+  const [showControls, setShowControls] = useState(false);
   const [props, setProps] = useState<Properties | null>(null);
   const [site, setSite] = useState("");
   const [ga4, setGa4] = useState("");
@@ -299,6 +346,7 @@ export default function Dashboard() {
     }
     setLookupErr(null);
     setLookup(u);
+    if (narrow) setShowControls(false);
   };
 
   const downloadEvidence = () => {
@@ -452,8 +500,34 @@ export default function Dashboard() {
   const previousIncomplete = !compareMode && compare === "previous" && days * 2 > MAX_DAYS;
   const rowLine = { borderTop: "1px solid #e8eaed", marginTop: 12, paddingTop: 12 };
 
+  // The one-line summary shown on phones instead of every control.
+  const siteShort = site.replace(/^sc-domain:/, "").replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "");
+  const periodLabel = customMonths ? `Last ${customMonths} months` : PERIODS.find(([d]) => d === days)?.[1] || `Last ${days} days`;
+  const controlsOpen = !narrow || showControls;
+
+  const nav = (
+    <nav
+      className="tabs"
+      role="tablist"
+      style={narrow ? { position: "sticky", top: 0, zIndex: 20, background: "#fff", borderBottom: "1px solid #d5dbe1" } : undefined}
+    >
+      {compareMode
+        ? COMPARE_TABS.map((t) => (
+            <button key={t.id} role="tab" className="tab" aria-selected={ctab === t.id} onClick={() => setCtab(t.id)}>
+              {t.label}
+            </button>
+          ))
+        : tabs.map((t) => (
+            <button key={t.id} role="tab" className="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
+              {t.label}
+            </button>
+          ))}
+    </nav>
+  );
+
   return (
     <>
+      <style>{MOBILE_CSS}</style>
       <header className="topbar">
         <div className="topbar-inner" style={{ display: "block" }}>
           {/* Row 1: who you are, which view, sign out */}
@@ -469,147 +543,176 @@ export default function Dashboard() {
                 )}
               </small>
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <ViewSwitch compare={compareMode} onChange={setCompareMode} />
-              <button className="btn" onClick={() => signOut({ callbackUrl: "/login" })}>Sign out</button>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", width: narrow ? "100%" : undefined }}>
+              <ViewSwitch compare={compareMode} onChange={setCompareMode} full={narrow} />
+              {!narrow && <button className="btn" onClick={() => signOut({ callbackUrl: "/login" })}>Sign out</button>}
             </div>
           </div>
 
-          {/* Row 2: which website, and which dates */}
-          <div style={{ ...rowLine, display: "flex", alignItems: "stretch", gap: 16, flexWrap: "wrap" }}>
-            <Group title="Website">
-              <label className="control">
-                Search Console property
-                <select value={site} onChange={(e) => changeSite(e.target.value)} disabled={!props} style={{ minWidth: 220 }}>
-                  {!props && <option>Loading…</option>}
-                  {props?.gsc.map((s) => (
-                    <option key={s.siteUrl} value={s.siteUrl}>{s.siteUrl.replace(/\/$/, "")}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="control">
-                GA4 property
-                <select value={ga4} onChange={(e) => setGa4(e.target.value)} disabled={!props} style={{ minWidth: 220, maxWidth: 340 }}>
-                  <option value="">None</option>
-                  {props?.ga4.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name} ({p.account})</option>
-                  ))}
-                </select>
-              </label>
-            </Group>
+          {/* Phones: one line instead of every control; tap to change */}
+          {narrow && (
+            <button
+              type="button"
+              onClick={() => setShowControls((v) => !v)}
+              aria-expanded={showControls}
+              style={{
+                marginTop: 10,
+                width: "100%",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                padding: "10px 12px",
+                border: "1px solid #dadce0",
+                borderRadius: 8,
+                background: "#f8f9fa",
+                fontSize: 14,
+                cursor: "pointer",
+                textAlign: "left",
+              }}
+            >
+              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <b>{siteShort || "Choose a website"}</b> · {compareMode ? "Compare months" : periodLabel}
+              </span>
+              <span style={{ color: BLUE, fontWeight: 600, marginLeft: 8, flex: "0 0 auto" }}>{showControls ? "Done ▴" : "Change ▾"}</span>
+            </button>
+          )}
 
-            <Divider />
-
-            {compareMode ? (
-              <Group title="Dates" grow>
-                <div
-                  style={{
-                    padding: "9px 12px",
-                    background: "#e8f0fe",
-                    color: "#174ea6",
-                    borderRadius: 8,
-                    fontSize: 14,
-                    alignSelf: "center",
-                  }}
-                >
-                  Pick the months in the boxes below: <b>left side</b> vs <b>right side</b>.
-                </div>
-              </Group>
-            ) : (
-              <Group title="Dates" grow>
-                <label className="control">
-                  Period
-                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                    <select value={customMonths ? "custom" : String(days)} onChange={(e) => changePeriod(e.target.value)} style={{ minWidth: 170 }}>
-                      {!customMonths && !PERIODS.some(([d]) => d === days) && <option value={String(days)}>Last {days} days</option>}
-                      {PERIODS.map(([d, l]) => (
-                        <option key={d} value={String(d)}>{l}</option>
+          {controlsOpen && (
+            <>
+              {/* Row 2: which website, and which dates */}
+              <div style={{ ...rowLine, display: "flex", alignItems: "stretch", gap: 16, flexWrap: "wrap" }}>
+                <Group title="Website">
+                  <label className="control">
+                    Search Console property
+                    <select value={site} onChange={(e) => changeSite(e.target.value)} disabled={!props} style={{ minWidth: 220 }}>
+                      {!props && <option>Loading…</option>}
+                      {props?.gsc.map((s) => (
+                        <option key={s.siteUrl} value={s.siteUrl}>{s.siteUrl.replace(/\/$/, "")}</option>
                       ))}
-                      <option value="custom">Custom: last N months…</option>
                     </select>
-                    {customMonths && (
-                      <>
-                        <input
-                          type="number"
-                          min={1}
-                          max={MAX_CUSTOM_MONTHS}
-                          value={customMonths}
-                          onChange={(e) => changeCustom(e.target.value)}
-                          aria-label="Number of months"
-                          style={{ width: 64 }}
-                        />
-                        <span className="muted" style={{ whiteSpace: "nowrap" }}>months ({days} days)</span>
-                      </>
-                    )}
-                  </div>
-                </label>
+                  </label>
+                  <label className="control">
+                    GA4 property
+                    <select value={ga4} onChange={(e) => setGa4(e.target.value)} disabled={!props} style={{ minWidth: 220, maxWidth: 340 }}>
+                      <option value="">None</option>
+                      {props?.ga4.map((p) => (
+                        <option key={p.id} value={p.id}>{p.name} ({p.account})</option>
+                      ))}
+                    </select>
+                  </label>
+                </Group>
 
-                <label className="control">
-                  Compare with
-                  <select value={compare} onChange={(e) => setCompare(e.target.value as Compare)} style={{ minWidth: 160 }}>
-                    <option value="previous">Previous period</option>
-                    <option value="yoy" disabled={!yoyAllowed(days)}>Same days last year</option>
-                  </select>
-                </label>
+                <Divider hidden={narrow} />
 
-                <label className="control">
-                  Search type
-                  <select value={searchType} onChange={(e) => setSearchType(e.target.value)}>
-                    {SEARCH_TYPES.map(([id, label]) => (
-                      <option key={id} value={id}>{label}</option>
-                    ))}
-                  </select>
-                </label>
-              </Group>
-            )}
-          </div>
+                {compareMode ? (
+                  <Group title="Dates" grow>
+                    <div
+                      style={{
+                        padding: "9px 12px",
+                        background: "#e8f0fe",
+                        color: "#174ea6",
+                        borderRadius: 8,
+                        fontSize: 14,
+                        alignSelf: "center",
+                      }}
+                    >
+                      Pick the months in the boxes below: <b>left side</b> vs <b>right side</b>.
+                    </div>
+                  </Group>
+                ) : (
+                  <Group title="Dates" grow>
+                    <label className="control">
+                      Period
+                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <select value={customMonths ? "custom" : String(days)} onChange={(e) => changePeriod(e.target.value)} style={{ minWidth: 170 }}>
+                          {!customMonths && !PERIODS.some(([d]) => d === days) && <option value={String(days)}>Last {days} days</option>}
+                          {PERIODS.map(([d, l]) => (
+                            <option key={d} value={String(d)}>{l}</option>
+                          ))}
+                          <option value="custom">Custom: last N months…</option>
+                        </select>
+                        {customMonths && (
+                          <>
+                            <input
+                              type="number"
+                              min={1}
+                              max={MAX_CUSTOM_MONTHS}
+                              value={customMonths}
+                              onChange={(e) => changeCustom(e.target.value)}
+                              aria-label="Number of months"
+                              style={{ width: 64, minWidth: 64 }}
+                            />
+                            <span className="muted" style={{ whiteSpace: "nowrap" }}>months ({days} days)</span>
+                          </>
+                        )}
+                      </div>
+                    </label>
 
-          {/* Row 3 (normal view only): look up a page, and actions */}
-          {!compareMode && (
-            <div style={{ ...rowLine, display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
-              <Group title="Look up a page" grow>
-                <form onSubmit={openLookup} style={{ display: "flex", gap: 6, flex: "1 1 auto", maxWidth: 560 }}>
-                  <input
-                    type="search"
-                    value={lookupText}
-                    onChange={(e) => setLookupText(e.target.value)}
-                    placeholder="Paste a page URL from this site"
-                    aria-label="Page URL to look up"
-                    style={{ flex: "1 1 auto", minWidth: 240 }}
-                  />
-                  <button className="btn" type="submit" disabled={!site || !lookupText.trim()}>
-                    Look up
-                  </button>
-                </form>
-              </Group>
+                    <label className="control">
+                      Compare with
+                      <select value={compare} onChange={(e) => setCompare(e.target.value as Compare)} style={{ minWidth: 160 }}>
+                        <option value="previous">Previous period</option>
+                        <option value="yoy" disabled={!yoyAllowed(days)}>Same days last year</option>
+                      </select>
+                    </label>
 
-              <Group title="Actions">
-                <button className="btn" onClick={load} disabled={loading || !site}>{loading ? "Refreshing…" : "Refresh"}</button>
-                <button className="btn" onClick={downloadEvidence} disabled={!gsc} title="Download every number with the exact Google API request behind it">
-                  Download evidence
-                </button>
-                <button className="live btn" onClick={() => setLive(!live)} aria-pressed={live} title="Refresh automatically every 10 minutes while this tab is visible">
-                  <span className={`live-dot ${live ? "" : "off"}`} /> {live ? "Auto-refresh on" : "Auto-refresh off"}
-                </button>
-              </Group>
-            </div>
+                    <label className="control">
+                      Search type
+                      <select value={searchType} onChange={(e) => setSearchType(e.target.value)}>
+                        {SEARCH_TYPES.map(([id, label]) => (
+                          <option key={id} value={id}>{label}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </Group>
+                )}
+              </div>
+
+              {/* Row 3 (normal view only): look up a page, and actions */}
+              {!compareMode && (
+                <div style={{ ...rowLine, display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+                  <Group title="Look up a page" grow>
+                    <form onSubmit={openLookup} style={{ display: "flex", gap: 6, flex: "1 1 auto", maxWidth: 560, width: narrow ? "100%" : undefined }}>
+                      <input
+                        type="search"
+                        value={lookupText}
+                        onChange={(e) => setLookupText(e.target.value)}
+                        placeholder="Paste a page URL from this site"
+                        aria-label="Page URL to look up"
+                        style={{ flex: "1 1 auto", minWidth: narrow ? 0 : 240 }}
+                      />
+                      <button className="btn" type="submit" disabled={!site || !lookupText.trim()}>
+                        Look up
+                      </button>
+                    </form>
+                  </Group>
+
+                  <Group title="Actions">
+                    <button className="btn" onClick={load} disabled={loading || !site}>{loading ? "Refreshing…" : "Refresh"}</button>
+                    <button className="btn" onClick={downloadEvidence} disabled={!gsc} title="Download every number with the exact Google API request behind it">
+                      Download evidence
+                    </button>
+                    <button className="live btn" onClick={() => setLive(!live)} aria-pressed={live} title="Refresh automatically every 10 minutes while this tab is visible">
+                      <span className={`live-dot ${live ? "" : "off"}`} /> {live ? "Auto-refresh on" : "Auto-refresh off"}
+                    </button>
+                  </Group>
+                </div>
+              )}
+
+              {/* Phones: sign out and close, at the bottom of the open panel */}
+              {narrow && (
+                <div style={{ ...rowLine, display: "flex", justifyContent: "space-between", gap: 10 }}>
+                  <button className="btn" onClick={() => signOut({ callbackUrl: "/login" })}>Sign out</button>
+                  <button className="btn primary" onClick={() => setShowControls(false)}>Done</button>
+                </div>
+              )}
+            </>
           )}
         </div>
 
-        <nav className="tabs" role="tablist">
-          {compareMode
-            ? COMPARE_TABS.map((t) => (
-                <button key={t.id} role="tab" className="tab" aria-selected={ctab === t.id} onClick={() => setCtab(t.id)}>
-                  {t.label}
-                </button>
-              ))
-            : tabs.map((t) => (
-                <button key={t.id} role="tab" className="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
-                  {t.label}
-                </button>
-              ))}
-        </nav>
+        {!narrow && nav}
       </header>
+      {narrow && nav}
 
       <SourcesProvider value={sources}>
         <main>
@@ -626,12 +729,12 @@ export default function Dashboard() {
               {lookup && !gsc && <div className="notice">Loading Search Console data before opening {lookup}…</div>}
 
               {updated && (
-                <p className="muted" style={{ margin: 0 }}>
+                <p className="muted" style={{ margin: 0, fontSize: narrow ? 12 : undefined }}>
                   Updated {updated.toLocaleTimeString()}
                   {gsc && ` · Search data ${gsc.range.startDate} to ${gsc.range.endDate} vs ${gsc.previousRange.startDate} to ${gsc.previousRange.endDate}`}
                   {gsc?.dataThrough && ` · Search Console is complete through ${gsc.dataThrough}`}
                   {ga?.timeZone && ` · GA4 dates in ${ga.timeZone}`}
-                  {gsc && " · Every figure has a Source button showing the Google API call behind it."}
+                  {gsc && !narrow && " · Every figure has a Source button showing the Google API call behind it."}
                 </p>
               )}
               {previousIncomplete && (
