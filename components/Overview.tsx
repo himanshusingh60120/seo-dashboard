@@ -8,6 +8,7 @@ import { SearchTrend, PositionTrend, TrafficTrend } from "./Charts";
 import { loadIndexCache, classify } from "@/lib/indexCache";
 import { useIdxStore } from "@/lib/indexCapture";
 import { latestIdxDay } from "@/lib/indexStats";
+import { UpdatesList, updatesBetween, useGoogleUpdates } from "./googleUpdates";
 import AiOverview from "./AiImpressions";
 import AiTraffic from "./AiTraffic";
 
@@ -42,6 +43,8 @@ export default function Overview({
   const [index, setIndex] = useState<{ indexed: number; notIndexed: number } | null>(null);
   const idx = useIdxStore(site);
   const gscIdx = latestIdxDay(idx?.store.views.ALL_URLS);
+  const updates = useGoogleUpdates();
+  const inPeriod = updatesBetween(updates, gsc.range.startDate, gsc.range.endDate);
 
   useEffect(() => {
     let live = true;
@@ -103,7 +106,10 @@ export default function Overview({
         {g && (
           <>
             <Kpis items={traffic} />
-            <div className="panel" style={{ marginTop: 16 }}><PanelTitle source={["ga4.trend", "ga4.organic"]}>Active users and sessions</PanelTitle><TrafficTrend data={ga!.trend} /></div>
+            <div className="panel" style={{ marginTop: 16 }}>
+              <PanelTitle source={["ga4.trend", "ga4.organic"]}>Active users and sessions</PanelTitle>
+              <TrafficTrend data={ga!.trend} events={updates} />
+            </div>
           </>
         )}
       </Section>
@@ -112,9 +118,14 @@ export default function Overview({
       <Section title="Search performance" lede={`Google Search, ${gsc.range.startDate} to ${gsc.range.endDate}, compared with the ${gsc.previousRange.startDate} to ${gsc.previousRange.endDate} period.`}>
         <Kpis items={search} />
         <div className="grid-2" style={{ marginTop: 16 }}>
-          <div className="panel"><PanelTitle source={["gsc.trend"]}>Clicks and impressions</PanelTitle><SearchTrend data={gsc.trend} /></div>
-          <div className="panel"><PanelTitle source={["gsc.trend"]}>Average position and CTR</PanelTitle><PositionTrend data={gsc.trend} /></div>
+          <div className="panel"><PanelTitle source={["gsc.trend"]}>Clicks and impressions</PanelTitle><SearchTrend data={gsc.trend} events={updates} /></div>
+          <div className="panel"><PanelTitle source={["gsc.trend"]}>Average position and CTR</PanelTitle><PositionTrend data={gsc.trend} events={updates} /></div>
         </div>
+        {inPeriod.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <UpdatesList rows={inPeriod.map((u) => ({ u }))} />
+          </div>
+        )}
       </Section>
 
       {/* 3. Shown inside Google's AI Overviews and AI Mode (Search Console) */}
