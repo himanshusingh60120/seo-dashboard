@@ -2,8 +2,11 @@
 export type Compare = "previous" | "yoy";
 export type Range = { startDate: string; endDate: string };
 
-export const WINDOWS = [7, 15, 30] as const;
+/** Period presets in the top bar (days). Any whole number of days up to MAX_DAYS is accepted (custom months). */
+export const WINDOWS = [7, 15, 30, 90, 180, 365, 480] as const;
 export const DEFAULT_DAYS = 30;
+/** Search Console keeps about 16 months, so live periods can't be longer. Older months: Compare months mode. */
+export const MAX_DAYS = 486;
 export const YOY_MAX_DAYS = 90;
 /** 52 weeks back, so weekdays line up. */
 export const YOY_SHIFT_DAYS = 364;
@@ -13,8 +16,8 @@ export const GSC_TZ = "America/Los_Angeles";
 export const yoyAllowed = (days: number) => days <= YOY_MAX_DAYS;
 
 export function parseDays(v: string | null | undefined) {
-  const n = Number(v);
-  return (WINDOWS as readonly number[]).includes(n) ? n : DEFAULT_DAYS;
+  const n = Math.floor(Number(v));
+  return Number.isFinite(n) && n >= 1 && n <= MAX_DAYS ? n : DEFAULT_DAYS;
 }
 
 export function parseCompare(v: string | null | undefined, days: number): Compare {
