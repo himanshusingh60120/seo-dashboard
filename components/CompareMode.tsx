@@ -1,6 +1,6 @@
 // components/CompareMode.tsx
 "use client";
-// Compare months mode. Pick any months for period A and period B (one or many each); every tab then compares them,
+// Compare months mode. Pick any months for period A (left) and period B (right); every tab then compares them,
 // using the history saved in the Google Sheets (lib/compare.ts), including months Search Console no longer shows.
 // Written for executives: period names instead of A/B, plain-language headlines, every chart on screen, "Not saved"
 // instead of zeros, and a print / PDF button.
@@ -24,6 +24,7 @@ export const COMPARE_TABS: { id: CompareTab; label: string }[] = [
 
 type Resp = { timeline: MonthRow[]; googleKeepsFrom: string; ga4: string; a: Group | null; b: Group | null };
 type Sel = { a: string[]; b: string[] };
+type Side = "a" | "b";
 type Fmt = "num" | "pct" | "pos" | "dur";
 type Names = { a: string; b: string };
 type Tone = "good" | "bad" | "flat";
@@ -31,6 +32,8 @@ type Tone = "good" | "bad" | "flat";
 const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const A_COLOR = "#1a73e8";
 const B_COLOR = "#e8710a";
+const A_TINT = "#e8f0fe";
+const B_TINT = "#feefe3";
 const OFF = "#d5dbe3";
 const INK = "#202124";
 const MUTED = "#5f6368";
@@ -48,6 +51,7 @@ const DEBOUNCE_MS = 900;
 const mi = (m: string) => Number(m.slice(5, 7)) - 1;
 const mName = (m: string) => `${MON[mi(m)]} ${m.slice(0, 4)}`;
 const yy = (m: string) => `'${m.slice(2, 4)}`;
+const monthId = (y: number, i: number) => `${y}-${String(i + 1).padStart(2, "0")}`;
 const shift = (m: string, k: number) => {
   const [y, mo] = m.split("-").map(Number);
   const t = y * 12 + (mo - 1) + k;
@@ -62,16 +66,7 @@ const daysIn = (m: string) => new Date(Date.UTC(Number(m.slice(0, 4)), mi(m) + 1
 const isRun = (ms: string[]) => ms.every((m, i) => i === 0 || shift(ms[i - 1], 1) === m);
 const flip = (list: string[], m: string) => (list.includes(m) ? list.filter((x) => x !== m) : [...list, m].sort());
 
-/** Long label for the picker buttons. */
-function label(ms: string[]) {
-  if (!ms.length) return "no months chosen";
-  const s = [...ms].sort();
-  if (s.length === 1) return mName(s[0]);
-  if (isRun(s)) return `${mName(s[0])} – ${mName(s[s.length - 1])} (${s.length} months)`;
-  return s.length <= 4 ? s.map(mName).join(", ") : `${s.length} months: ${s.slice(0, 3).map(mName).join(", ")} …`;
-}
-
-/** Short name used everywhere else: "Sep–Nov 2026", "Nov 2025 – Jan 2026", "6 months, Sep 2025 – Nov 2026". */
+/** Short name used everywhere: "Sep–Nov 2026", "Nov 2025 – Jan 2026", "6 months, Sep 2025 – Nov 2026". */
 function periodName(ms: string[]) {
   if (!ms.length) return "";
   const s = [...ms].sort();
@@ -562,12 +557,115 @@ function Assistants({ A, B, names }: { A: Group | null; B: Group | null; names: 
   );
 }
 
-/* ---------------- Month picker ---------------- */
+/* ---------------- Month picker: Period A on the left, Period B on the right ---------------- */
+
+/** One side of the picker. Clicking a month here adds it to (or removes it from) this side only. */
+function MonthPanel({
+  side, byMonth, years, sel, setSel, extra,
+}: {
+  side: Side; byMonth: Map<string, MonthRow>; years: number[]; sel: Sel; setSel: (f: (s: Sel) => Sel) => void; extra?: ReactNode;
+}) {
+  const color = side === "a" ? A_COLOR : B_COLOR;
+  const tint = side === "a" ? A_TINT : B_TINT;
+  const other: Side = side === "a" ? "b" : "a";
+  const otherColor = other === "a" ? A_COLOR : B_COLOR;
+  const mine = sel[side];
+  const theirs = sel[other];
+  const saved = (m: string) => {
+    const t = byMonth.get(m);
+    return !!t && !!(t.search || t.ga);
+  };
+  const pickable = (y: number) => MON.map((_, i) => monthId(y, i)).filter((m) => saved(m) && !theirs.includes(m));
+  const setMine = (list: string[]) => setSel((s) => (side === "a" ? { a: list, b: s.b } : { a: s.a, b: list }));
+  const toggle = (m: string) => setMine(flip(mine, m));
+  const toggleYear = (y: number) => {
+    const ms = pickable(y);
+    const all = ms.length > 0 && ms.every((m) => mine.includes(m));
+    setMine(all ? mine.filter((m) => !ms.includes(m)) : [...new Set([...mine, ...ms])].sort());
+  };
+
+  return (
+    <div style={{ flex: "1 1 340px", minWidth: 0, border: `2px solid ${color}`, borderRadius: 12, overflow: "hidden", background: "#fff" }}>
+      <div style={{ background: tint, padding: "10px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color, letterSpacing: 0.4 }}>
+            {side === "a" ? "PERIOD A · WHAT YOU WANT TO SEE" : "PERIOD B · COMPARE WITH"}
+          </div>
+          <div style={{ fontSize: 18, fontWeight: 600, color: INK, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            {mine.length ? periodName(mine) : <span style={{ color: "#80868b", fontWeight: 500, fontSize: 15 }}>Click months below</span>}
+          </div>
+        </div>
+        {mine.length > 0 && (
+          <button type="button" className="btn small" onClick={() => setMine([])}>
+            Clear
+          </button>
+        )}
+      </div>
+
+      <div style={{ padding: "4px 14px 14px" }}>
+        {extra}
+        {years.map((y) => {
+          const ms = pickable(y);
+          const all = ms.length > 0 && ms.every((m) => mine.includes(m));
+          return (
+            <div key={y} style={{ marginTop: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <b style={{ fontSize: 14, color: INK }}>{y}</b>
+                <button type="button" className="btn small" onClick={() => toggleYear(y)} disabled={!ms.length}>
+                  {all ? "Remove whole year" : "Whole year"}
+                </button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 6 }}>
+                {MON.map((mn, i) => {
+                  const m = monthId(y, i);
+                  const t = byMonth.get(m);
+                  const ok = saved(m);
+                  const inMine = mine.includes(m);
+                  const inOther = theirs.includes(m);
+                  const disabled = !ok || inOther;
+                  const tip = !ok
+                    ? `${mName(m)}: nothing saved`
+                    : inOther
+                      ? `${mName(m)} is already in Period ${other.toUpperCase()}`
+                      : `${mName(m)}${t!.partial ? ` (saved ${t!.from} to ${t!.through})` : ""}${t!.onlyHere ? " · only in your saved history" : ""}`;
+                  return (
+                    <button
+                      key={m}
+                      type="button"
+                      disabled={disabled}
+                      onClick={() => toggle(m)}
+                      title={tip}
+                      aria-pressed={inMine}
+                      aria-label={`${mName(m)}${inMine ? ", selected" : ""}`}
+                      style={{
+                        padding: "8px 0",
+                        borderRadius: 8,
+                        fontSize: 14,
+                        border: `1px solid ${inMine ? color : inOther ? otherColor : ok ? "#cfd6de" : "#e3e6ea"}`,
+                        background: inMine ? color : ok ? "#fff" : "#f2f4f7",
+                        color: inMine ? "#fff" : inOther ? otherColor : ok ? INK : "#b0b6bd",
+                        fontWeight: inMine ? 600 : 400,
+                        cursor: disabled ? "default" : "pointer",
+                        opacity: inOther ? 0.55 : 1,
+                        textDecoration: inOther ? "line-through" : undefined,
+                        boxShadow: ok && t?.onlyHere && !inMine ? "inset 0 -3px 0 #7b1fa2" : undefined,
+                      }}
+                    >
+                      {mn}
+                      {t?.partial ? "*" : ""}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 function Picker({ timeline, sel, setSel }: { timeline: MonthRow[]; sel: Sel; setSel: (f: (s: Sel) => Sel) => void }) {
-  const [picking, setPicking] = useState<"a" | "b">("a");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
   const byMonth = useMemo(() => new Map(timeline.map((t) => [t.month, t])), [timeline]);
   const avail = useMemo(() => timeline.filter((t) => t.search || t.ga).map((t) => t.month), [timeline]);
   const has = (m: string) => avail.includes(m);
@@ -582,161 +680,86 @@ function Picker({ timeline, sel, setSel }: { timeline: MonthRow[]; sel: Sel; set
   const year = latest.slice(0, 4);
 
   const presets = [
-    { name: "Last month vs the month before", a: [lc], b: [shift(lc, -1)] },
-    { name: "Last month vs the same month last year", a: [lc], b: [shift(lc, -12)] },
-    { name: "Last 3 months vs the 3 before", a: range(shift(lc, -2), lc), b: range(shift(lc, -5), shift(lc, -3)) },
-    { name: "Last 3 months vs the same months last year", a: range(shift(lc, -2), lc), b: range(shift(lc, -14), shift(lc, -12)) },
-    { name: "Last 6 months vs the 6 before", a: range(shift(lc, -5), lc), b: range(shift(lc, -11), shift(lc, -6)) },
-    { name: "Last 12 months vs the 12 before", a: range(shift(lc, -11), lc), b: range(shift(lc, -23), shift(lc, -12)) },
-    { name: `${year} so far vs the same months of ${Number(year) - 1}`, a: range(`${year}-01`, latest), b: range(`${Number(year) - 1}-01`, shift(latest, -12)) },
+    { name: "Last month vs month before", a: [lc], b: [shift(lc, -1)] },
+    { name: "Last month vs a year ago", a: [lc], b: [shift(lc, -12)] },
+    { name: "Last 3 months vs a year ago", a: range(shift(lc, -2), lc), b: range(shift(lc, -14), shift(lc, -12)) },
+    { name: "Last 3 months vs 3 before", a: range(shift(lc, -2), lc), b: range(shift(lc, -5), shift(lc, -3)) },
+    { name: "Last 6 months vs 6 before", a: range(shift(lc, -5), lc), b: range(shift(lc, -11), shift(lc, -6)) },
+    { name: `${year} so far vs ${Number(year) - 1}`, a: range(`${year}-01`, latest), b: range(`${Number(year) - 1}-01`, shift(latest, -12)) },
   ].map((p) => ({ ...p, a: p.a.filter(has), b: p.b.filter(has) }));
 
   const aSorted = [...sel.a].sort();
   const yearEarlier = aSorted.map((m) => shift(m, -12)).filter((m) => has(m) && !sel.a.includes(m));
   const justBefore = aSorted.length && isRun(aSorted) ? range(shift(aSorted[0], -aSorted.length), shift(aSorted[0], -1)).filter(has) : [];
-  const fillB = (list: string[]) => {
-    setSel((s) => ({ a: s.a, b: list }));
-    setPicking("b");
-  };
+  const fillB = (list: string[]) => setSel((s) => ({ a: s.a, b: list }));
 
-  const toggle = (m: string) =>
-    setSel((s) => ({
-      a: picking === "a" ? flip(s.a, m) : s.a.filter((x) => x !== m),
-      b: picking === "b" ? flip(s.b, m) : s.b.filter((x) => x !== m),
-    }));
-  const addRange = () => {
-    if (!from || !to) return;
-    const list = range(from < to ? from : to, from < to ? to : from).filter(has);
-    setSel((s) => ({
-      a: picking === "a" ? [...new Set([...s.a, ...list])].sort() : s.a.filter((x) => !list.includes(x)),
-      b: picking === "b" ? [...new Set([...s.b, ...list])].sort() : s.b.filter((x) => !list.includes(x)),
-    }));
-  };
-  const pickBtn = (g: "a" | "b") => {
-    const on = picking === g;
-    const color = g === "a" ? A_COLOR : B_COLOR;
-    return (
-      <button
-        type="button"
-        className="btn"
-        onClick={() => setPicking(g)}
-        aria-pressed={on}
-        style={{ borderColor: color, borderWidth: 2, background: on ? color : "#fff", color: on ? "#fff" : color, fontWeight: 600 }}
-      >
-        {g === "a" ? "1. " : "2. "}Period {g.toUpperCase()}: {label(sel[g])}
+  const bShortcuts = sel.a.length ? (
+    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 10 }}>
+      <span style={{ fontSize: 12, color: MUTED }}>Quick fill:</span>
+      <button type="button" className="btn small" style={{ borderColor: B_COLOR, color: B_COLOR }} onClick={() => fillB(yearEarlier)} disabled={!yearEarlier.length}>
+        Same months a year earlier{yearEarlier.length ? ` (${periodName(yearEarlier)})` : ""}
       </button>
-    );
-  };
-  const pColor = picking === "a" ? A_COLOR : B_COLOR;
+      {isRun(aSorted) && (
+        <button type="button" className="btn small" style={{ borderColor: B_COLOR, color: B_COLOR }} onClick={() => fillB(justBefore)} disabled={!justBefore.length}>
+          Months just before{justBefore.length ? ` (${periodName(justBefore)})` : ""}
+        </button>
+      )}
+    </div>
+  ) : null;
 
   return (
     <div className="panel cmp-noprint" style={{ marginBottom: 16 }}>
-      <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        {pickBtn("a")}
-        <span className="muted">compared with</span>
-        {pickBtn("b")}
-        <button type="button" className="btn" onClick={() => setSel((s) => ({ a: s.b, b: s.a }))} disabled={!sel.a.length && !sel.b.length}>
-          Swap
-        </button>
-        <button type="button" className="btn" onClick={() => { setSel(() => ({ a: [], b: [] })); setPicking("a"); }}>Clear</button>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <b style={{ fontSize: 14, color: INK, marginRight: 4 }}>Quick picks:</b>
+        {presets.map((p) => {
+          const ok = p.a.length > 0 && p.b.length > 0;
+          return (
+            <button
+              key={p.name}
+              type="button"
+              className="btn small"
+              disabled={!ok}
+              title={ok ? `${periodName(p.a)} vs ${periodName(p.b)}` : "Not enough saved months yet"}
+              onClick={() => setSel(() => ({ a: p.a, b: p.b }))}
+            >
+              {p.name}
+            </button>
+          );
+        })}
       </div>
-
-      <p style={{ margin: "10px 0 0", fontSize: 14 }}>
-        Clicking a month adds it to <b style={{ color: pColor }}>Period {picking.toUpperCase()}</b>.
-        {picking === "a" && sel.a.length > 0 && !sel.b.length && <> When period A is ready, click <b style={{ color: B_COLOR }}>2. Period B</b> or use a button below.</>}
+      <p style={{ margin: "8px 0 12px", fontSize: 13, color: MUTED }}>
+        Or click months yourself: <b style={{ color: A_COLOR }}>left side</b> is what you want to see, <b style={{ color: B_COLOR }}>right side</b> is what to compare it with.
       </p>
 
-      {sel.a.length > 0 && (
-        <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
-          <span className="muted">Fill period B with:</span>
-          <button type="button" className="btn" style={{ borderColor: B_COLOR, color: B_COLOR }} onClick={() => fillB(yearEarlier)} disabled={!yearEarlier.length}>
-            The same months a year earlier{yearEarlier.length ? ` (${periodName(yearEarlier)})` : " (not saved)"}
-          </button>
-          {isRun(aSorted) && (
-            <button type="button" className="btn" style={{ borderColor: B_COLOR, color: B_COLOR }} onClick={() => fillB(justBefore)} disabled={!justBefore.length}>
-              The months just before{justBefore.length ? ` (${periodName(justBefore)})` : " (not saved)"}
-            </button>
-          )}
-        </div>
-      )}
+      <div style={{ display: "flex", alignItems: "stretch", gap: 12, flexWrap: "wrap" }}>
+        <MonthPanel side="a" byMonth={byMonth} years={years} sel={sel} setSel={setSel} />
 
-      <div className="row" style={{ gap: 12, alignItems: "center", flexWrap: "wrap", marginTop: 10 }}>
-        <label className="control" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-          Quick pick
-          <select
-            value=""
-            onChange={(e) => {
-              const p = presets[Number(e.target.value)];
-              if (p) setSel(() => ({ a: p.a, b: p.b }));
-            }}
-          >
-            <option value="">Choose…</option>
-            {presets.map((p, i) => (
-              <option key={p.name} value={i} disabled={!p.a.length || !p.b.length}>
-                {p.name}{!p.a.length || !p.b.length ? " (not enough saved months)" : ""}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="control" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-          Add a range: from
-          <select value={from} onChange={(e) => setFrom(e.target.value)}>
-            <option value="">…</option>
-            {avail.map((m) => <option key={m} value={m}>{mName(m)}</option>)}
-          </select>
-          to
-          <select value={to} onChange={(e) => setTo(e.target.value)}>
-            <option value="">…</option>
-            {avail.map((m) => <option key={m} value={m}>{mName(m)}</option>)}
-          </select>
-        </label>
-        <button type="button" className="btn" onClick={addRange} disabled={!from || !to}>
-          Add to period {picking.toUpperCase()}
-        </button>
-      </div>
-
-      <div style={{ marginTop: 10 }}>
-        {years.map((y) => (
-          <div key={y} className="row" style={{ alignItems: "center", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-            <b style={{ width: 48 }}>{y}</b>
-            {MON.map((mn, i) => {
-              const m = `${y}-${String(i + 1).padStart(2, "0")}`;
-              const t = byMonth.get(m);
-              const ok = !!t && !!(t.search || t.ga);
-              const inA = sel.a.includes(m);
-              const inB = sel.b.includes(m);
-              const tip = ok
-                ? `${mName(m)}${t!.partial ? ` · saved ${t!.from} to ${t!.through}` : ""}${t!.onlyHere ? " · no longer in Search Console, only in your saved history" : ""}`
-                : `${mName(m)} · nothing saved`;
-              return (
-                <button
-                  key={m}
-                  type="button"
-                  disabled={!ok}
-                  onClick={() => toggle(m)}
-                  title={tip}
-                  aria-pressed={inA || inB}
-                  style={{
-                    minWidth: 56, padding: "4px 8px", borderRadius: 8,
-                    border: `1px solid ${inA ? A_COLOR : inB ? B_COLOR : "#cfd6de"}`,
-                    background: inA ? A_COLOR : inB ? B_COLOR : ok ? "#fff" : "#f2f4f7",
-                    color: inA || inB ? "#fff" : ok ? "#1f2933" : "#a0a8b3",
-                    cursor: ok ? "pointer" : "default",
-                    fontWeight: inA || inB ? 600 : 400,
-                    fontStyle: t?.partial ? "italic" : undefined,
-                    boxShadow: ok && t?.onlyHere ? "inset 0 -3px 0 #7b1fa2" : undefined,
-                  }}
-                >
-                  {mn}{t?.partial ? "*" : ""}
-                </button>
-              );
-            })}
+        <div style={{ flex: "0 0 auto", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, padding: "0 2px" }}>
+          <div style={{ width: 2, flex: 1, minHeight: 16, background: "#dadce0" }} />
+          <div style={{ width: 46, height: 46, borderRadius: "50%", background: "#f1f3f4", border: "1px solid #dadce0", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, color: INK }}>
+            vs
           </div>
-        ))}
+          <button
+            type="button"
+            className="btn small"
+            onClick={() => setSel((s) => ({ a: s.b, b: s.a }))}
+            disabled={!sel.a.length && !sel.b.length}
+            title="Swap the left and right sides"
+          >
+            ⇄ Swap
+          </button>
+          <button type="button" className="btn small" onClick={() => setSel(() => ({ a: [], b: [] }))} disabled={!sel.a.length && !sel.b.length}>
+            Clear both
+          </button>
+          <div style={{ width: 2, flex: 1, minHeight: 16, background: "#dadce0" }} />
+        </div>
+
+        <MonthPanel side="b" byMonth={byMonth} years={years} sel={sel} setSel={setSel} extra={bShortcuts} />
       </div>
-      <p className="muted" style={{ marginBottom: 0 }}>
-        <span style={{ color: A_COLOR, fontWeight: 600 }}>Blue = period A</span>, <span style={{ color: B_COLOR, fontWeight: 600 }}>orange = period B</span>.
-        Purple underline = no longer in Search Console, only in your saved history. * = part of the month.
+
+      <p className="muted" style={{ margin: "12px 0 0", fontSize: 12 }}>
+        * = month still in progress (part of the month). Grey = nothing saved for that month. Crossed out = already on the other side.
+        Purple underline = no longer in Search Console, only in your saved history.
       </p>
     </div>
   );
@@ -988,7 +1011,7 @@ export default function CompareMode({ site, ga4, tab }: { site: string; ga4: str
             </ul>
           </div>
         )}
-        {!hasB && <div className="notice" style={{ marginTop: 12 }}>Choose months for period B to see the comparison. Until then, the charts show {names.a} on its own.</div>}
+        {!hasB && <div className="notice" style={{ marginTop: 12 }}>Choose months on the right side (Period B) to see the comparison. Until then, the charts show {names.a} on its own.</div>}
         <div style={{ marginTop: 16 }}>
           <ExecCards items={[...searchCards, ...gaCards, ...aiCards, ...crawlCards]} names={names} hasB={hasB} />
         </div>
@@ -1081,7 +1104,7 @@ export default function CompareMode({ site, ga4, tab }: { site: string; ga4: str
   return (
     <Section
       title="Compare months"
-      lede="Pick any months for period A and period B. Every tab compares them using the history saved in your Google Sheets, including months Search Console no longer shows."
+      lede="Pick months on the left (what you want to see) and on the right (what to compare it with). Every tab then compares the two, using the history saved in your Google Sheets, including months Search Console no longer shows."
     >
       <style>{PRINT_CSS}</style>
       {err && <div className="notice error">{err}</div>}
@@ -1106,9 +1129,9 @@ export default function CompareMode({ site, ga4, tab }: { site: string; ga4: str
           <div className="cmp-print">
             {(A || B) && (
               <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap", margin: "0 0 12px" }}>
-                <span style={{ background: "#e8f0fe", color: "#174ea6", fontWeight: 600, padding: "6px 12px", borderRadius: 8 }}>{names.a}</span>
+                <span style={{ background: A_TINT, color: "#174ea6", fontWeight: 600, padding: "6px 12px", borderRadius: 8 }}>{names.a}</span>
                 <span className="muted">compared with</span>
-                <span style={{ background: hasB ? "#feefe3" : "#f1f3f4", color: hasB ? "#b06000" : MUTED, fontWeight: 600, padding: "6px 12px", borderRadius: 8 }}>
+                <span style={{ background: hasB ? B_TINT : "#f1f3f4", color: hasB ? "#b06000" : MUTED, fontWeight: 600, padding: "6px 12px", borderRadius: 8 }}>
                   {hasB ? names.b : "nothing yet"}
                 </span>
                 <span className="muted" style={{ marginLeft: 8 }}>{site.replace(/^sc-domain:/, "")} · {tabLabel}</span>
@@ -1126,7 +1149,7 @@ export default function CompareMode({ site, ga4, tab }: { site: string; ga4: str
             {res && (A || B) ? (
               <div style={{ opacity: loading ? 0.6 : 1 }}>{views[tab]}</div>
             ) : (
-              !loading && <p className="muted">Choose months for period A and period B above.</p>
+              !loading && <p className="muted">Choose months on the left and on the right above.</p>
             )}
           </div>
         </>
