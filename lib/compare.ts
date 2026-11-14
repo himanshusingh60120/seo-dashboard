@@ -7,9 +7,13 @@
 //   average position is weighted by impressions (exactly how Search Console averages over a date range).
 // - GA4 sessions, new users, views and key events are added up; engagement rate and average session duration are
 //   weighted by sessions. Active users can't be added up (the same person visits in several months): one month uses
-//   GA4's own monthly figure, several months in a row are asked from GA4 directly, anything else is a labelled sum.
+//   GA4's own monthly figure, consecutive months (or a trimmed month) are asked from GA4 directly, anything else is a labelled sum.
+// - Like for like: when one period ends in a part month (say 1–11 Nov 2026) and the other period has the matching month
+//   in full, that month is counted to the same day (1–11 Nov 2025), so totals and charts compare equal days.
+//   Monthly lists (pages, queries, landing pages) can't be trimmed and still cover whole months; a note says so.
 // - Pages, queries and landing pages come from each month's saved lists (each month's top 1,000 are read); countries,
 //   devices and channels are read in full. Totals always come from the daily data, so they're exact.
+// - Visits from AI assistants (ChatGPT, Perplexity, Gemini…) are asked from GA4 live, by day, so they can be trimmed too.
 // - AI page lists cover the date range of the capture they came from, so they're shown per capture, never added up.
 // Server-only.
 import { batchRead, colLetter, tabs, type Book, type Row } from "./sheets";
@@ -20,6 +24,7 @@ import { GA4_PREFIX, SEARCH_PREFIX, readArchive } from "./archive";
 import { IDX_LABEL } from "./indexStats";
 import { runReport } from "./google";
 import { GSC_TZ, addDays, todayIn } from "./dates";
+import { AI_SOURCE_PATTERN, assistantOf } from "./aiSources";
 
 const GOOGLE_KEEPS_DAYS = 486;
 /** Rows read per month for long lists (pages, queries, landing pages). */
@@ -28,6 +33,7 @@ const TOP_PER_MONTH = 1000;
 const OUT_LIMIT = 1000;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 export const MONTH = /^\d{4}-\d{2}$/;
+const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 const s = (v: unknown) => (v == null ? "" : String(v).trim());
 const n = (v: unknown) => {
@@ -42,6 +48,11 @@ const shiftMonth = (m: string, k: number) => {
 };
 const monthEnd = (m: string) => addDays(`${shiftMonth(m, 1)}-01`, -1);
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+const minD = (a: string, b: string) => (a < b ? a : b);
+const gaDate = (d: string) => `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
+const mName = (m: string) => `${MON[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`;
+const isRun = (ms: string[]) => ms.every((m, i) => i === 0 || shiftMonth(ms[i - 1], 1) === m);
+const uniqSorted = (ms: string[]) => [...new Set(ms)].filter((m) => MONTH.test(m)).sort();
 
 export type SearchTotals = { clicks: number; impressions: number; ctr: number; position: number; days: number };
 export type GaTotals = {
@@ -53,14 +64,29 @@ export type MonthRow = {
   search: SearchTotals | null; ga: GaTotals | null; ai: number | null; crawl: number | null;
   indexed: number | null; notIndexed: number | null; indexedAsOf: string;
 };
+/** One month inside a period, after like-for-like trimming. */
+export type MonthPoint = {
+  month: string; through: string; trimmedTo: string; partial: boolean;
+  search: SearchTotals | null; ga: GaTotals | null; ai: number | null; crawl: number | null;
+  indexed: number | null; notIndexed: number | null; indexedAsOf: string; aiVisits: number | null;
+};
 export type SearchItem = { name: string; clicks: number; impressions: number; ctr: number; position: number };
 export type GaItem = { name: string; sessions: number; users: number; newUsers: number; views: number; engagementRate: number; avgSessionSec: number; keyEvents: number };
 export type AiItem = { name: string; impressions: number };
-export type DailyPoint = { date: string; clicks: number | null; impressions: number | null; sessions: number | null; users: number | null };
+export type DailyPoint = {
+  date: string; clicks: number | null; impressions: number | null; ctr: number | null; position: number | null;
+  sessions: number | null; users: number | null; organic: number | null; ai: number | null;
+};
+export type Coverage = { search: number; ga: number; ai: number; crawl: number; idx: number };
 export type Group = {
   months: string[]; partial: boolean; onlyHere: number; notes: string[];
   search: SearchTotals | null; ga: GaTotals | null; ai: number | null; crawl: number | null;
   indexed: number | null; notIndexed: number | null; indexedAsOf: string;
+  aiVisits: number | null; assistants: { name: string; sessions: number }[];
+  /** Months with saved data, per kind, so the screen can say "3 of 6 months saved". */
+  has: Coverage;
+  monthly: MonthPoint[];
+  trimmed: { month: string; through: string }[];
   pages: SearchItem[]; queries: SearchItem[]; countries: SearchItem[]; devices: SearchItem[];
   channels: GaItem[]; gaCountries: GaItem[]; gaDevices: GaItem[]; landing: GaItem[];
   aiPages: { from: string; to: string; items: AiItem[] } | null;
@@ -72,6 +98,7 @@ type GDay = { date: string; users: number; newUsers: number; sessions: number; v
 type GaTotalRow = { sessions: number; users: number; newUsers: number; views: number; er: number; avg: number; keyEvents: number };
 type TabRef = { name: string; part: Part };
 type Req = { part: Part; title: string; tag: string; range: (meta: { rows: number; cols: number }) => string };
+type AiVisit = { date: string; source: string; sessions: number };
 
 /* ---------------- Reading ---------------- */
 
@@ -285,7 +312,7 @@ function gaItems(lists: { rows: Row[]; v2: boolean }[]): GaItem[] {
     .slice(0, OUT_LIMIT);
 }
 
-/** Active users for consecutive months, asked from GA4 itself (users can't be added up across months). */
+/** Active users for a run of days, asked from GA4 itself (users can't be added up across months). */
 async function liveUsers(token: string, ga4: string, from: string, to: string): Promise<number | null> {
   try {
     const r = await runReport(token, ga4, { dateRanges: [{ startDate: from, endDate: to }], metrics: [{ name: "activeUsers" }] });
@@ -296,8 +323,28 @@ async function liveUsers(token: string, ga4: string, from: string, to: string): 
   }
 }
 
-const isRun = (ms: string[]) => ms.every((m, i) => i === 0 || shiftMonth(ms[i - 1], 1) === m);
-const mName = (m: string) => new Date(`${m}-01T00:00:00Z`).toLocaleDateString("en-GB", { month: "short", year: "numeric", timeZone: "UTC" });
+/** Sessions from AI assistants, by day and source, for every selected month (asked from GA4 live). Null if GA4 can't be read. */
+async function aiVisitsLive(token: string, ga4: string, months: string[]): Promise<AiVisit[] | null> {
+  if (!ga4 || !months.length) return null;
+  const from = `${months[0]}-01`;
+  const to = minD(monthEnd(months[months.length - 1]), todayIn(GSC_TZ));
+  if (from > to) return null;
+  try {
+    const r = await runReport(token, ga4, {
+      dateRanges: [{ startDate: from, endDate: to }],
+      dimensions: [{ name: "date" }, { name: "sessionSource" }],
+      metrics: [{ name: "sessions" }],
+      dimensionFilter: { filter: { fieldName: "sessionSource", stringFilter: { matchType: "PARTIAL_REGEXP", value: AI_SOURCE_PATTERN, caseSensitive: false } } },
+      limit: 25000,
+    });
+    const want = new Set(months);
+    return r.rows
+      .map((x) => ({ date: gaDate(x.dims[0]), source: x.dims[1], sessions: x.mets[0] ?? 0 }))
+      .filter((v) => want.has(monthOf(v.date)));
+  } catch {
+    return null;
+  }
+}
 
 /* ---------------- The comparison ---------------- */
 
@@ -362,27 +409,91 @@ export async function compareData(site: string, aMonths: string[], bMonths: stri
     });
   const tl = new Map(timeline.map((t) => [t.month, t]));
 
-  const group = async (wanted: string[]): Promise<Group | null> => {
-    const ms = [...new Set(wanted)].filter((m) => MONTH.test(m)).sort();
+  /* Like for like: months are paired in order (1st of A with 1st of B, …). When one side of a pair is a part month that
+     starts on the 1st, both sides are counted only to the earliest day both Search Console and GA4 have for it. */
+  const A = uniqSorted(aMonths);
+  const B = uniqSorted(bMonths);
+  const cuts = new Map<string, string>();
+  const partialThrough = (m: string) => {
+    const r = tl.get(m);
+    if (!r?.partial || r.from !== `${m}-01`) return "";
+    const sd = byMonth(main.search, m).map((d) => d.date).sort();
+    const gd = byMonth(main.ga, m).map((d) => d.date).sort();
+    const ends = [sd[sd.length - 1], gd[gd.length - 1]].filter((x): x is string => !!x).sort();
+    return ends[0] || "";
+  };
+  const setCut = (m: string, d: string) => {
+    if (d >= monthEnd(m)) return;
+    cuts.set(m, cuts.has(m) ? minD(cuts.get(m)!, d) : d);
+  };
+  if (A.length && A.length === B.length) {
+    A.forEach((x, i) => {
+      const y = B[i];
+      for (const [p, q] of [[x, y], [y, x]] as const) {
+        const d = partialThrough(p);
+        if (!d) continue;
+        setCut(p, d);
+        setCut(q, `${q}-${d.slice(8, 10)}`);
+      }
+    });
+  }
+
+  const aiVisits = await aiVisitsLive(token, ga4, uniqSorted([...A, ...B]));
+
+  const group = async (ms: string[]): Promise<Group | null> => {
     if (!ms.length) return null;
     const set = new Set(ms);
-    const rows = ms.map((m) => tl.get(m)).filter((x): x is MonthRow => !!x);
+    const keep = (date: string) => {
+      const m = monthOf(date);
+      if (!set.has(m)) return false;
+      const c = cuts.get(m);
+      return !c || date <= c;
+    };
+    const sDays = main.search.filter((d) => keep(d.date));
+    const gDays = main.ga.filter((d) => keep(d.date));
+    const aiDays = [...main.ai.entries()].filter(([d]) => keep(d));
+    const crawlDays = [...main.crawl.entries()].filter(([d]) => keep(d));
+    const idxDays = [...main.idx.entries()].filter(([d]) => keep(d)).sort((x, y) => x[0].localeCompare(y[0]));
+    const visits = aiVisits ? aiVisits.filter((v) => keep(v.date)) : null;
     const notes: string[] = [];
 
-    const search = searchTotals(main.search.filter((d) => set.has(monthOf(d.date))));
-    let ga = combineGa(rows.map((r) => r.ga).filter((x): x is GaTotals => !!x));
-    if (ga && ms.length > 1 && isRun(ms) && ga4) {
-      const last = rows[rows.length - 1];
-      const to = last?.through && last.through < monthEnd(last.month) ? last.through : monthEnd(ms[ms.length - 1]);
+    const monthly: MonthPoint[] = ms.map((m) => {
+      const row = tl.get(m);
+      const cut = cuts.get(m) || "";
+      const inM = (d: string) => monthOf(d) === m;
+      const sd = sDays.filter((d) => inM(d.date));
+      const gd = gDays.filter((d) => inM(d.date));
+      const ai = aiDays.filter(([d]) => inM(d)).map(([, v]) => v);
+      const cr = crawlDays.filter(([d]) => inM(d)).map(([, v]) => v);
+      const ix = idxDays.filter(([d]) => inM(d));
+      const li = ix[ix.length - 1];
+      const vs = visits ? visits.filter((v) => inM(v.date)) : null;
+      return {
+        month: m,
+        through: cut || row?.through || "",
+        trimmedTo: cut,
+        partial: !!row?.partial || !!cut,
+        search: searchTotals(sd),
+        ga: cut ? gaTotals(gd) : row?.ga ?? null,
+        ai: ai.length ? sum(ai) : null,
+        crawl: cr.length ? sum(cr) : null,
+        indexed: li ? li[1].indexed : null,
+        notIndexed: li ? li[1].notIndexed : null,
+        indexedAsOf: li ? li[0] : "",
+        aiVisits: vs ? sum(vs.map((v) => v.sessions)) : null,
+      };
+    });
+
+    const search = searchTotals(sDays);
+    let ga = combineGa(monthly.map((p) => p.ga).filter((x): x is GaTotals => !!x));
+    const lastP = monthly[monthly.length - 1];
+    const midCut = monthly.slice(0, -1).some((p) => p.trimmedTo);
+    if (ga && ga4 && isRun(ms) && !midCut && (ms.length > 1 || lastP.trimmedTo)) {
+      const to = lastP.trimmedTo || (lastP.through && lastP.through < monthEnd(lastP.month) ? lastP.through : monthEnd(lastP.month));
       const users = await liveUsers(token, ga4, `${ms[0]}-01`, to);
       if (users != null) ga = { ...ga, users, usersExact: true };
     }
     if (ga && !ga.usersExact) notes.push("Active users is the sum of each month's users: the same person can be counted in more than one month.");
-
-    const withIdx = rows.filter((r) => r.indexed != null);
-    const lastIdx = withIdx[withIdx.length - 1];
-    const aiVals = rows.map((r) => r.ai).filter((x): x is number => x != null);
-    const crawlVals = rows.map((r) => r.crawl).filter((x): x is number => x != null);
 
     // Lists from the monthly tabs.
     const sTabs = await readMonthTabs(searchTabs.filter((t) => set.has(t.name.slice(SEARCH_PREFIX.length))), SEARCH_PREFIX, 6, 7, { Page: TOP_PER_MONTH, Query: TOP_PER_MONTH });
@@ -391,7 +502,7 @@ export async function compareData(site: string, aMonths: string[], bMonths: stri
     const gList = (type: string) => gTabs.map((t) => ({ rows: t.byType.get(type) || [], v2: s(t.head[4]) === "New users" }));
     if (sTabs.length) notes.push(`Pages and queries: each month's top ${TOP_PER_MONTH.toLocaleString("en-US")} by clicks, added up over the selected months.`);
     const missingLists = ms.filter((m) => !sTabs.some((t) => t.month === m));
-    if (missingLists.length) notes.push(`No saved page and query lists for ${missingLists.map(mName).join(", ")}; totals still include those months.`);
+    if (missingLists.length) notes.push(`No saved page and query lists for ${missingLists.map(mName).join(", ")} yet; totals still include those months.`);
 
     // AI pages: the latest capture inside the selected months (captures cover their own date range, so never added up).
     let aiPages: Group["aiPages"] = null;
@@ -407,32 +518,62 @@ export async function compareData(site: string, aMonths: string[], bMonths: stri
       }
     }
 
-    const partial = rows.some((r) => r.partial);
-    if (partial) {
+    const trimmed = monthly.filter((p) => p.trimmedTo).map((p) => ({ month: p.month, through: p.trimmedTo }));
+    if (trimmed.length) {
       notes.push(
-        `Part-month data: ${rows.filter((r) => r.partial).map((r) => `${mName(r.month)} (${r.from} to ${r.through})`).join(", ")}.`
+        `Counted to the same day as the month it's compared with: ${trimmed.map((t) => `${mName(t.month)} (1–${Number(t.through.slice(8))})`).join(", ")}. ` +
+          "Page, query and landing-page lists still cover whole months."
       );
     }
+    const partialOnly = monthly.filter((p) => p.partial && !p.trimmedTo);
+    if (partialOnly.length) notes.push(`Part-month data: ${partialOnly.map((p) => `${mName(p.month)} (to ${p.through})`).join(", ")}.`);
+    const rows = ms.map((m) => tl.get(m)).filter((x): x is MonthRow => !!x);
     const onlyHere = rows.filter((r) => r.onlyHere).length;
     if (onlyHere) notes.push(`${onlyHere} of these months are no longer in Search Console; they come from your saved history.`);
 
-    // Day-by-day, for lining up the two periods.
-    const sDay = new Map(main.search.filter((d) => set.has(monthOf(d.date))).map((d) => [d.date, d]));
-    const gDay = new Map(main.ga.filter((d) => set.has(monthOf(d.date))).map((d) => [d.date, d]));
-    const daily: DailyPoint[] = [...new Set([...sDay.keys(), ...gDay.keys()])].sort().map((date) => ({
-      date,
-      clicks: sDay.get(date)?.clicks ?? null,
-      impressions: sDay.get(date)?.impressions ?? null,
-      sessions: gDay.get(date)?.sessions ?? null,
-      users: gDay.get(date)?.users ?? null,
-    }));
+    // Day by day, for lining up the two periods.
+    const sMap = new Map(sDays.map((d) => [d.date, d]));
+    const gMap = new Map(gDays.map((d) => [d.date, d]));
+    const aMap = new Map(aiDays);
+    const daily: DailyPoint[] = [...new Set([...sMap.keys(), ...gMap.keys(), ...aMap.keys()])].sort().map((date) => {
+      const sd = sMap.get(date);
+      const gd = gMap.get(date);
+      return {
+        date,
+        clicks: sd?.clicks ?? null,
+        impressions: sd?.impressions ?? null,
+        ctr: sd ? (sd.impressions ? sd.clicks / sd.impressions : 0) : null,
+        position: sd && sd.position ? sd.position : null,
+        sessions: gd?.sessions ?? null,
+        users: gd?.users ?? null,
+        organic: gd?.organic ?? null,
+        ai: aMap.get(date) ?? null,
+      };
+    });
+
+    const byAssistant = new Map<string, number>();
+    for (const v of visits || []) byAssistant.set(assistantOf(v.source), (byAssistant.get(assistantOf(v.source)) || 0) + v.sessions);
+    const aiVals = monthly.map((p) => p.ai).filter((x): x is number => x != null);
+    const crawlVals = monthly.map((p) => p.crawl).filter((x): x is number => x != null);
+    const withIdx = monthly.filter((p) => p.indexed != null);
+    const lastIdx = withIdx[withIdx.length - 1];
 
     return {
-      months: ms, partial, onlyHere, notes,
+      months: ms, partial: monthly.some((p) => p.partial), onlyHere, notes,
       search, ga,
       ai: aiVals.length ? sum(aiVals) : null,
       crawl: crawlVals.length ? sum(crawlVals) : null,
       indexed: lastIdx?.indexed ?? null, notIndexed: lastIdx?.notIndexed ?? null, indexedAsOf: lastIdx?.indexedAsOf || "",
+      aiVisits: visits ? sum(visits.map((v) => v.sessions)) : null,
+      assistants: [...byAssistant.entries()].map(([name, sessions]) => ({ name, sessions })).sort((x, y) => y.sessions - x.sessions),
+      has: {
+        search: monthly.filter((p) => p.search).length,
+        ga: monthly.filter((p) => p.ga).length,
+        ai: monthly.filter((p) => p.ai != null).length,
+        crawl: monthly.filter((p) => p.crawl != null).length,
+        idx: withIdx.length,
+      },
+      monthly, trimmed,
       pages: searchItems(sList("Page")), queries: searchItems(sList("Query")),
       countries: searchItems(sList("Country")), devices: searchItems(sList("Device")),
       channels: gaItems(gList("Channel")), gaCountries: gaItems(gList("Country")), gaDevices: gaItems(gList("Device")), landing: gaItems(gList("Landing page")),
@@ -440,6 +581,6 @@ export async function compareData(site: string, aMonths: string[], bMonths: stri
     };
   };
 
-  const [a, b] = await Promise.all([group(aMonths), group(bMonths)]);
+  const [a, b] = await Promise.all([group(A), group(B)]);
   return { timeline, googleKeepsFrom: keeps, ga4, a, b };
 }
