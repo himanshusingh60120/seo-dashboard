@@ -152,6 +152,8 @@ export default function Dashboard() {
   const [ctab, setCtab] = useState<CompareTab>("summary");
   const [canAudit, setCanAudit] = useState(false);
   const [canCapture, setCanCapture] = useState(false);
+  /** View-only account (VIEWER_EMAILS): sees everything, but can't run URL Inspection or change settings. */
+  const [viewer, setViewer] = useState(false);
   const [gsc, setGsc] = useState<GscData | null>(null);
   const [ga, setGa] = useState<Ga4Data | null>(null);
   const [loading, setLoading] = useState(false);
@@ -187,6 +189,14 @@ export default function Dashboard() {
     setLookup(null);
     setLookupErr(null);
   }, [site, bumpIndex]);
+
+  // Is this a view-only account? The routes that change things check again on the server (lib/viewers.ts).
+  useEffect(() => {
+    fetch("/api/role", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setViewer(!!d?.viewer))
+      .catch(() => {});
+  }, []);
 
   // The audit tab is shown only to the audit account; every audit API route checks the account again.
   useEffect(() => {
@@ -348,7 +358,7 @@ export default function Dashboard() {
   }, [site, ga4, days, customMonths, compare, searchType, compareMode]);
 
   // Save this property's Search Console and GA4 history in the Google Sheets when it's opened (see lib/archive.ts).
-  // The first open of the day does the work in the background; it keeps going while the page stays open.
+  // The first open of the day does the work in the background; later opens return at once.
   useEffect(() => {
     if (!site) return;
     let active = true;
@@ -431,7 +441,7 @@ export default function Dashboard() {
     ...BASE_TABS.filter((t) => t.id !== "captures" || canCapture),
     ...(canAudit ? [{ id: "audit" as Tab, label: "GSC audit (AI)" }] : []),
   ];
-  // Someone without access never stays on a hidden tab.
+  // Nobody stays on a tab they can't see.
   useEffect(() => {
     if (!tabs.some((t) => t.id === tab)) setTab("overview");
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -450,7 +460,14 @@ export default function Dashboard() {
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
             <div className="brand">
               Search &amp; traffic dashboard
-              <small>{session?.user?.email}</small>
+              <small>
+                {session?.user?.email}
+                {viewer && (
+                  <span style={{ marginLeft: 8, padding: "1px 8px", borderRadius: 999, background: "#f1f3f4", color: "#5f6368", fontSize: 11, fontWeight: 600 }}>
+                    View-only
+                  </span>
+                )}
+              </small>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <ViewSwitch compare={compareMode} onChange={setCompareMode} />
@@ -601,7 +618,7 @@ export default function Dashboard() {
           )}
 
           {compareMode ? (
-            site && <CompareMode site={site} ga4={ga4} tab={ctab} />
+            site && <CompareMode site={site} ga4={ga4} tab={ctab} readOnly={viewer} />
           ) : (
             <>
               {error && <div className="notice error">{error}</div>}
@@ -653,7 +670,8 @@ export default function Dashboard() {
                     waiting={idxWaiting || (!!idxInbox && !idxInboxReady)}
                     onInboxHandled={idxInboxHandled}
                   />
-                  <UrlCheck site={site} />
+                  {/* "Check specific pages" runs URL Inspection, which view-only accounts can't use. */}
+                  {!viewer && <UrlCheck site={site} />}
                 </>
               )}
 
