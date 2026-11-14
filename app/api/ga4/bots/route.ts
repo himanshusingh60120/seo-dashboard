@@ -7,7 +7,8 @@ import { ga4Window } from '@/lib/google';
 import { parseDays } from '@/lib/dates';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 60;
+// Long periods (up to 16 months) mean many hourly rows, so allow more than 60 seconds.
+export const maxDuration = 120;
 
 type Row = Record<string, any>;
 type Kind = 'location' | 'source' | 'tech' | 'language';
@@ -19,6 +20,10 @@ const SUSPECT_BOT_SECONDS = 0.1;
 const MIN_SESSIONS = 3;
 /** Pages listed per box. */
 const MAX_PAGES = 500;
+/** Rows per report. Hourly reports need more: 16 months is about 11,700 hours. */
+const ROW_LIMIT = 10000;
+const HOUR_LIMIT = 25000;
+const HOUR_PAGE_LIMIT = 50000;
 const RANK: Record<Level, number> = { 'Suspect bot': 0, High: 1, Medium: 2 };
 
 // Cities that are mostly cloud / data-centre traffic in GA4
@@ -119,7 +124,7 @@ export async function GET(req: NextRequest) {
   const base: Row = {
     // Filled in once the token is available: full days ending yesterday, property time zone
     dateRanges: [] as { startDate: string; endDate: string }[],
-    limit: 10000,
+    limit: ROW_LIMIT,
     metrics: METRICS.map(name => ({ name })),
   };
   if (scope === 'cta') {
@@ -128,7 +133,7 @@ export async function GET(req: NextRequest) {
     };
   }
 
-  const q = (dims: string[]) => ({ ...base, dimensions: dims.map(name => ({ name })) });
+  const q = (dims: string[], limit = ROW_LIMIT) => ({ ...base, limit, dimensions: dims.map(name => ({ name })) });
 
   try {
     const reports = await withGoogleToken(req, async token => {
@@ -141,11 +146,11 @@ export async function GET(req: NextRequest) {
           q(['sessionSource', 'sessionMedium']),
           q(['browser', 'operatingSystem', 'screenResolution']),
           q(['language']),
-          q(['dateHour']),
+          q(['dateHour'], HOUR_LIMIT),
         ]),
         batchReports(token, property, [
           q(['country', 'city', 'landingPage']),
-          q(['dateHour', 'landingPage']),
+          q(['dateHour', 'landingPage'], HOUR_PAGE_LIMIT),
         ]),
       ]);
       return [...main, ...pages];
@@ -225,7 +230,7 @@ export async function GET(req: NextRequest) {
       languages: langFlags,
       spikes,
       pages,
-      pagesCapped: locPages.length >= 10000 || hourPages.length >= 10000,
+      pagesCapped: locPages.length >= ROW_LIMIT || hourPages.length >= HOUR_PAGE_LIMIT,
     });
   } catch (e: any) {
     const status = e instanceof AuthError ? 401 : 500;
