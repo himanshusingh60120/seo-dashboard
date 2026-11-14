@@ -6,12 +6,16 @@ import {
   type SABody, type SARow, type SearchType,
 } from "@/lib/google";
 import { Recorder, gscPerformanceUrl, GSC_EXPLORER } from "@/lib/provenance";
-import { compareName, parseCompare, parseDays } from "@/lib/dates";
+import { GSC_TZ, addDays, compareName, parseCompare, parseDays, todayIn } from "@/lib/dates";
 import { brandFromSite } from "@/lib/url";
 import { fail } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// Long periods (up to 16 months) pull four lists of up to 50,000 rows each, so allow more than 60 seconds.
+export const maxDuration = 120;
+
+/** Search Console keeps about 16 months; a previous period starting before this is only partly available. */
+const GOOGLE_KEEPS_DAYS = 486;
 
 const QUESTION = /^(how|what|why|when|where|who|which|can|does|do|is|are|should|will)\b/i;
 const TYPE_LABEL: Record<string, string> = { web: "Web", image: "Image", video: "Video", news: "News" };
@@ -38,6 +42,7 @@ export async function GET(req: NextRequest) {
     const dropBy = int(p.get("dropBy"), 5, 1, 100);
     // Windows end on the latest day with final data for this property (looked up, not guessed).
     const { current, previous, dataThrough } = await gscWindow(token, siteUrl, days, compare, type);
+    const previousIncomplete = previous.startDate < addDays(todayIn(GSC_TZ), -GOOGLE_KEEPS_DAYS);
     const brand = (p.get("brand") ?? brandFromSite(siteUrl)).toLowerCase().replace(/\s+/g, "");
 
     const rec = new Recorder();
@@ -171,12 +176,16 @@ export async function GET(req: NextRequest) {
     const pct = (a: number, b: number) => (b ? round(((a - b) / b) * 100) : 0);
     const narrative = [
       `Search Console data is complete through ${dataThrough}. The site appeared for ${queries.length.toLocaleString()} distinct ${TYPE_LABEL[type].toLowerCase()} search queries between ${current.startDate} and ${current.endDate}, collecting ${tc.impressions.toLocaleString()} impressions and ${tc.clicks.toLocaleString()} clicks.`,
-      `Impressions are ${pct(tc.impressions, tp.impressions) >= 0 ? "up" : "down"} ${Math.abs(pct(tc.impressions, tp.impressions))}% and clicks ${pct(tc.clicks, tp.clicks) >= 0 ? "up" : "down"} ${Math.abs(pct(tc.clicks, tp.clicks))}% versus ${compareName(days, compare)} (${previous.startDate} to ${previous.endDate}); average position moved from ${round(tp.position)} to ${round(tc.position)}.`,
+      previousIncomplete
+        ? `The comparison period (${previous.startDate} to ${previous.endDate}) starts before Search Console's 16-month limit, so it's only partly available and changes against it aren't given. Use Compare months mode for older periods.`
+        : `Impressions are ${pct(tc.impressions, tp.impressions) >= 0 ? "up" : "down"} ${Math.abs(pct(tc.impressions, tp.impressions))}% and clicks ${pct(tc.clicks, tp.clicks) >= 0 ? "up" : "down"} ${Math.abs(pct(tc.clicks, tp.clicks))}% versus ${compareName(days, compare)} (${previous.startDate} to ${previous.endDate}); average position moved from ${round(tp.position)} to ${round(tc.position)}.`,
       `${qBuckets.top3 + qBuckets.top10} queries rank on page one (${qBuckets.top3} of them in the top 3), ${qBuckets.top20} sit on page two and ${qBuckets.top30} on page three.`,
       branded.queries
         ? `Queries containing “${brand}” account for ${branded.queries} queries and ${qClicks ? round((branded.clicks / qClicks) * 100) : 0}% of query-level clicks.`
         : `No queries containing “${brand}” were found, so traffic here is almost entirely non-branded.`,
-      `${newQueries.length} queries are new this period and ${lostQueries.length} from the previous period no longer show up.`,
+      previousIncomplete
+        ? "New and lost queries aren't counted, because the comparison period is only partly available."
+        : `${newQueries.length} queries are new this period and ${lostQueries.length} from the previous period no longer show up.`,
       opportunities.length
         ? `${opportunities.length} queries rank between positions 4 and 20 with at least ${minImpr} impressions — the closest candidates for moving up. The largest is “${opportunities[0].key}” (${opportunities[0].impressions.toLocaleString()} impressions at position ${round(opportunities[0].position)}).`
         : `No queries between positions 4 and 20 reached ${minImpr} impressions.`,
@@ -207,6 +216,7 @@ export async function GET(req: NextRequest) {
       compare,
       searchType: type,
       dataThrough,
+      previousIncomplete,
       capped,
       totals: { current: tc, previous: tp },
       trend: trend.map((r) => ({ date: r.keys[0], clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, position: r.position })),
