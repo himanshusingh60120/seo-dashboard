@@ -5,7 +5,7 @@
 // Written for executives: period names instead of A/B, plain-language headlines, every chart on screen, "Not saved"
 // instead of zeros, and a print / PDF button.
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Bar, BarChart, CartesianGrid, Cell, LabelList, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, Cell, LabelList, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { DataTable, PanelTitle, Section, compact, duration, num, pct, type Col } from "./ui";
 import type { Coverage, DailyPoint, Group, MonthPoint, MonthRow } from "@/lib/compare";
 
@@ -40,6 +40,8 @@ const TONE: Record<Tone, { bg: string; fg: string }> = {
   bad: { bg: "#fce8e6", fg: "#c5221f" },
   flat: { bg: "#f1f3f4", fg: MUTED },
 };
+/** Wait after the last click before asking the server, so picking several months sends one request. */
+const DEBOUNCE_MS = 900;
 
 /* ---------------- Month and number helpers ---------------- */
 
@@ -88,6 +90,14 @@ const short = (v: number | null | undefined, f: Fmt) =>
 const tickFmt = (v: number, f: Fmt) => (f === "pct" ? `${(v * 100).toFixed(1)}%` : f === "num" ? compact(v) : f === "dur" ? `${Math.round(v)}s` : String(Math.round(v)));
 const nameCell = (v: string) => (/^https?:\/\//.test(v) ? <a href={v} target="_blank" rel="noreferrer">{v}</a> : v);
 
+/** Google's quota error in plain words. */
+const friendly = (e: unknown, fallback: string) => {
+  const m = e instanceof Error ? e.message : "";
+  return /quota exceeded|read requests/i.test(m)
+    ? "Google Sheets is busy right now (too many reads in the last minute). Wait about a minute, then reload or change a month."
+    : m || fallback;
+};
+
 /** The change from B to A, worded for a reader: "+12.4%", "+0.03 pts", "3.1 better". */
 function change(a: number | null | undefined, b: number | null | undefined, f: Fmt, lowerBetter = false): { text: string; tone: Tone } | null {
   if (a == null || b == null) return null;
@@ -124,9 +134,9 @@ function Badge({ c }: { c: { text: string; tone: Tone } }) {
 }
 
 function Swatches({ names, hasB }: { names: Names; hasB: boolean }) {
-  const sw = (c: string, t: string, dashed = false) => (
+  const sw = (c: string, t: string) => (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      <i style={{ width: 14, height: dashed ? 0 : 10, borderTop: dashed ? `2px dashed ${c}` : undefined, background: dashed ? undefined : c, borderRadius: 2, display: "inline-block" }} />
+      <i style={{ width: 14, height: 10, background: c, borderRadius: 2, display: "inline-block" }} />
       {t}
     </span>
   );
@@ -220,21 +230,21 @@ function pairLabel(a?: MonthPoint, b?: MonthPoint) {
 
 type PairDatum = { label: string; A: number | null; B: number | null; aT: string; bT: string };
 
-function PairTip({ active, payload, f, names }: { active?: boolean; payload?: { payload: PairDatum }[]; f: Fmt; names: Names }) {
+function PairTip({ active, payload, f }: { active?: boolean; payload?: { payload: PairDatum }[]; f: Fmt }) {
   if (!active || !payload?.length) return null;
   const d = payload[0].payload;
-  const line = (c: string, t: string, v: number | null, fallback: string) =>
+  const line = (c: string, t: string, v: number | null) =>
     t ? (
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <i style={{ width: 10, height: 10, background: c, borderRadius: 2, display: "inline-block" }} />
         <span>{t}</span>
         <b style={{ marginLeft: "auto" }}>{v == null ? "not saved" : fmt(v, f)}</b>
       </div>
-    ) : fallback ? <div style={{ color: MUTED }}>{fallback}</div> : null;
+    ) : null;
   return (
     <div style={{ background: "#fff", border: "1px solid #dadce0", borderRadius: 8, padding: "8px 10px", fontSize: 13, minWidth: 200 }}>
-      {line(A_COLOR, d.aT, d.A, "")}
-      {line(B_COLOR, d.bT, d.B, names.b && !d.bT ? "" : "")}
+      {line(A_COLOR, d.aT, d.A)}
+      {line(B_COLOR, d.bT, d.B)}
     </div>
   );
 }
@@ -269,7 +279,7 @@ function PairChart({
             <CartesianGrid stroke="#eef1f4" vertical={false} />
             <XAxis dataKey="label" tick={axis} interval={0} />
             <YAxis tick={axis} width={52} tickFormatter={(v) => tickFmt(Number(v), f)} />
-            <Tooltip cursor={{ fill: "rgba(0,0,0,0.04)" }} content={<PairTip f={f} names={names} />} />
+            <Tooltip cursor={{ fill: "rgba(0,0,0,0.04)" }} content={<PairTip f={f} />} />
             <Bar dataKey="A" fill={A_COLOR} radius={[3, 3, 0, 0]} maxBarSize={44} isAnimationActive={false}>
               {labels && <LabelList dataKey="A" position="top" formatter={lbl} style={{ fontSize: 11, fill: INK }} />}
             </Bar>
@@ -435,9 +445,9 @@ function ChangeCell({ r, f, lowerBetter }: { r: MRow; f: Fmt; lowerBetter?: bool
 function CompareTable<T extends { name: string }>({
   title, a, b, metrics, csv, note, names,
 }: { title: string; a: T[]; b: T[]; metrics: TMetric<T>[]; csv: string; note?: string; names: Names }) {
-  const [mi2, setMi] = useState(0);
+  const [mIdx, setMIdx] = useState(0);
   const [filter, setFilter] = useState("all");
-  const m = metrics[Math.min(mi2, metrics.length - 1)];
+  const m = metrics[Math.min(mIdx, metrics.length - 1)];
   const rows = useMemo<MRow[]>(() => {
     const A = new Map(a.map((x) => [x.name, Number(x[m.key]) || 0]));
     const B = new Map(b.map((x) => [x.name, Number(x[m.key]) || 0]));
@@ -468,7 +478,7 @@ function CompareTable<T extends { name: string }>({
         <PanelTitle>{title}</PanelTitle>
         <div className="row cmp-noprint" style={{ gap: 8 }}>
           {metrics.length > 1 && (
-            <select value={mi2} onChange={(e) => setMi(Number(e.target.value))} aria-label="Compare by">
+            <select value={mIdx} onChange={(e) => setMIdx(Number(e.target.value))} aria-label="Compare by">
               {metrics.map((x, i) => <option key={String(x.key)} value={i}>{x.label}</option>)}
             </select>
           )}
@@ -797,7 +807,7 @@ export default function CompareMode({ site, ga4, tab }: { site: string; ga4: str
           setSel(last ? { a: [last], b: have.has(shift(last, -1)) ? [shift(last, -1)] : [] } : { a: [], b: [] });
         }
       })
-      .catch((e) => live && setErr(e instanceof Error ? e.message : "Couldn't load the saved months"));
+      .catch((e) => live && setErr(friendly(e, "Couldn't load the saved months")));
     // Status of the saved history (shown when GA4 is missing).
     fetch(`/api/archive?site=${encodeURIComponent(site)}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
@@ -808,7 +818,7 @@ export default function CompareMode({ site, ga4, tab }: { site: string; ga4: str
     };
   }, [site]);
 
-  // The comparison itself, whenever the selection changes.
+  // The comparison itself, once the selection has stopped changing.
   useEffect(() => {
     if (!base) return;
     try {
@@ -835,9 +845,9 @@ export default function CompareMode({ site, ga4, tab }: { site: string; ga4: str
             setErr(null);
           }
         })
-        .catch((e) => live && setErr(e instanceof Error ? e.message : "Couldn't load the comparison"))
+        .catch((e) => live && setErr(friendly(e, "Couldn't load the comparison")))
         .finally(() => live && setLoading(false));
-    }, 300);
+    }, DEBOUNCE_MS);
     return () => {
       live = false;
       clearTimeout(t);
@@ -852,7 +862,7 @@ export default function CompareMode({ site, ga4, tab }: { site: string; ga4: str
       if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
       setBase((b) => (b ? { ...b, ga4 } : b));
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Couldn't change the GA4 property");
+      setErr(friendly(e, "Couldn't change the GA4 property"));
     }
     setBusy(false);
   };
