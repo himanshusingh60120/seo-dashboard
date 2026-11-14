@@ -15,6 +15,10 @@
 //   devices and channels are read in full. Totals always come from the daily data, so they're exact.
 // - Visits from AI assistants (ChatGPT, Perplexity, Gemini…) are asked from GA4 live, by day, so they can be trimmed too.
 // - AI page lists cover the date range of the capture they came from, so they're shown per capture, never added up.
+//
+// Google Sheets allows 60 read requests per minute for the service account, shared by everyone using the dashboard.
+// So this file reads as little as possible: each Sheet's tab list is kept for 60 seconds, the property's saved history
+// for 2 minutes, and finished comparisons for 2 minutes. When Google still says "quota exceeded", reads wait and retry.
 // Server-only.
 import { batchRead, colLetter, tabs, type Book, type Row } from "./sheets";
 import { SEC, sectionRange, type SectionKey } from "./sheetLayout";
@@ -31,6 +35,13 @@ const GOOGLE_KEEPS_DAYS = 486;
 const TOP_PER_MONTH = 1000;
 /** Rows sent per list per period. */
 const OUT_LIMIT = 1000;
+/** How long things read from the Sheets are reused. */
+const TABS_MS = 60_000;
+const BASE_MS = 2 * 60_000;
+const RESULT_MS = 2 * 60_000;
+const MAX_RESULTS = 100;
+/** Waits before retrying a read that hit Google's per-minute quota (about 40 seconds in total). */
+const RETRY_WAITS = [2_000, 5_000, 10_000, 20_000];
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 export const MONTH = /^\d{4}-\d{2}$/;
 const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -92,6 +103,7 @@ export type Group = {
   aiPages: { from: string; to: string; items: AiItem[] } | null;
   daily: DailyPoint[];
 };
+export type CompareResult = { timeline: MonthRow[]; googleKeepsFrom: string; ga4: string; a: Group | null; b: Group | null };
 
 type SDay = { date: string; clicks: number; impressions: number; position: number };
 type GDay = { date: string; users: number; newUsers: number; sessions: number; views: number; er: number; avg: number; organic: number };
@@ -100,14 +112,49 @@ type TabRef = { name: string; part: Part };
 type Req = { part: Part; title: string; tag: string; range: (meta: { rows: number; cols: number }) => string };
 type AiVisit = { date: string; source: string; sessions: number };
 
-/* ---------------- Reading ---------------- */
+/* ---------------- Reading, gently ---------------- */
+
+const isQuota = (e: unknown) =>
+  /quota exceeded|rate ?limit|too many requests|RESOURCE_EXHAUSTED|\b429\b/i.test(e instanceof Error ? e.message : String(e ?? ""));
+
+/** Runs a Sheets read; if Google says the per-minute quota is used up, waits and tries again. */
+async function retry<T>(fn: () => Promise<T>): Promise<T> {
+  for (let i = 0; ; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (i >= RETRY_WAITS.length || !isQuota(e)) throw e;
+      await new Promise((r) => setTimeout(r, RETRY_WAITS[i] + Math.random() * 1000));
+    }
+  }
+}
+
+type TabsP = ReturnType<typeof tabs>;
+const tabsMemo = new Map<unknown, { at: number; p: TabsP }>();
+const bookKey = (book: Book): unknown => {
+  try {
+    return typeof book === "string" ? book : JSON.stringify(book);
+  } catch {
+    return book;
+  }
+};
+/** A Sheet's tab list (names and sizes), read once a minute at most instead of once per range. */
+function tabsOf(book: Book): TabsP {
+  const k = bookKey(book);
+  const hit = tabsMemo.get(k);
+  if (hit && Date.now() - hit.at < TABS_MS) return hit.p;
+  const p = retry(() => tabs(book)) as TabsP;
+  tabsMemo.set(k, { at: Date.now(), p });
+  p.catch(() => tabsMemo.delete(k));
+  return p;
+}
 
 /** Reads many ranges from many tabs, fitted to each tab's size (Google rejects ranges outside the grid). */
 async function readMany(reqs: Req[]): Promise<Map<string, Row[]>> {
   const out = new Map<string, Row[]>();
   const byBook = new Map<Book, { title: string; range: string; tag: string }[]>();
   for (const r of reqs) {
-    const meta = (await tabs(r.part.book)).get(r.title);
+    const meta = (await tabsOf(r.part.book)).get(r.title);
     if (!meta) continue;
     const list = byBook.get(r.part.book) || [];
     list.push({ title: r.title, range: r.range(meta), tag: r.tag });
@@ -116,7 +163,7 @@ async function readMany(reqs: Req[]): Promise<Map<string, Row[]>> {
   for (const [book, list] of byBook) {
     for (let i = 0; i < list.length; i += 40) {
       const chunk = list.slice(i, i + 40);
-      const got = await batchRead(book, chunk.map((c) => ({ title: c.title, range: c.range })));
+      const got = await retry(() => batchRead(book, chunk.map((c) => ({ title: c.title, range: c.range }))));
       chunk.forEach((c, k) => out.set(c.tag, got[k] || []));
     }
   }
@@ -181,10 +228,10 @@ async function readMonthTabs(items: TabRef[], prefix: string, dataCols: number, 
 
 /** The property tab's saved daily data and weekly reports. */
 async function mainData(book: Book, title: string) {
-  const t = (await tabs(book)).get(title);
+  const t = (await tabsOf(book)).get(title);
   const keys: SectionKey[] = ["ai", "crawl", "pages"];
   if (t && t.cols >= SEC.gaDaily.end) keys.push("searchDaily", "gaDaily");
-  const got = await batchRead(book, keys.map((k) => ({ title, range: sectionRange(k) })));
+  const got = await retry(() => batchRead(book, keys.map((k) => ({ title, range: sectionRange(k) }))));
   const part = (k: SectionKey) => got[keys.indexOf(k)] || [];
 
   const search: SDay[] = part("searchDaily")
@@ -346,17 +393,21 @@ async function aiVisitsLive(token: string, ga4: string, months: string[]): Promi
   }
 }
 
-/* ---------------- The comparison ---------------- */
+/* ---------------- The property's saved history (shared by every comparison for 2 minutes) ---------------- */
 
-export async function compareData(site: string, aMonths: string[], bMonths: string[], token: string) {
+async function loadBase(site: string) {
   const keeps = addDays(todayIn(GSC_TZ), -GOOGLE_KEEPS_DAYS);
-  const arch = (await readArchive()).find((r) => r.site === site) || null;
+  const arch = (await retry(() => readArchive())).find((r) => r.site === site) || null;
   const ga4 = arch?.ga4 || "";
-  const ref = await findSheet(site);
-  if (!ref) return { timeline: [] as MonthRow[], googleKeepsFrom: keeps, ga4, a: null, b: null };
+  const ref = await retry(() => findSheet(site));
+  if (!ref) return null;
 
   const main = await mainData(ref.book, ref.title);
-  const [searchTabs, gaTabs, aiTabs] = await Promise.all([listTabs(site, SEARCH_PREFIX), listTabs(site, GA4_PREFIX), listTabs(site, AI_PAGES_PREFIX)]);
+  const [searchTabs, gaTabs, aiTabs] = await Promise.all([
+    retry(() => listTabs(site, SEARCH_PREFIX)),
+    retry(() => listTabs(site, GA4_PREFIX)),
+    retry(() => listTabs(site, AI_PAGES_PREFIX)),
+  ]);
 
   // GA4's own monthly totals (first row of each month's tab).
   const gaHeads = await readMany(
@@ -407,12 +458,35 @@ export async function compareData(site: string, aMonths: string[], bMonths: stri
         indexedAsOf: lastIdx || "",
       };
     });
+  return { keeps, ga4, main, searchTabs, gaTabs, aiTabs, timeline };
+}
+
+type Base = NonNullable<Awaited<ReturnType<typeof loadBase>>>;
+const baseMemo = new Map<string, { at: number; p: Promise<Base | null> }>();
+function getBase(site: string) {
+  const hit = baseMemo.get(site);
+  if (hit && Date.now() - hit.at < BASE_MS) return hit.p;
+  const p = loadBase(site);
+  baseMemo.set(site, { at: Date.now(), p });
+  p.catch(() => baseMemo.delete(site));
+  return p;
+}
+
+/* ---------------- The comparison ---------------- */
+
+async function compute(site: string, A: string[], B: string[], token: string): Promise<CompareResult> {
+  const base = await getBase(site);
+  if (!base) {
+    const arch = (await retry(() => readArchive())).find((r) => r.site === site) || null;
+    return { timeline: [], googleKeepsFrom: addDays(todayIn(GSC_TZ), -GOOGLE_KEEPS_DAYS), ga4: arch?.ga4 || "", a: null, b: null };
+  }
+  const { keeps, ga4, main, searchTabs, gaTabs, aiTabs, timeline } = base;
+  if (!A.length && !B.length) return { timeline, googleKeepsFrom: keeps, ga4, a: null, b: null };
   const tl = new Map(timeline.map((t) => [t.month, t]));
+  const byMonth = <T extends { date: string }>(list: T[], m: string) => list.filter((d) => monthOf(d.date) === m);
 
   /* Like for like: months are paired in order (1st of A with 1st of B, …). When one side of a pair is a part month that
      starts on the 1st, both sides are counted only to the earliest day both Search Console and GA4 have for it. */
-  const A = uniqSorted(aMonths);
-  const B = uniqSorted(bMonths);
   const cuts = new Map<string, string>();
   const partialThrough = (m: string) => {
     const r = tl.get(m);
@@ -581,6 +655,27 @@ export async function compareData(site: string, aMonths: string[], bMonths: stri
     };
   };
 
-  const [a, b] = await Promise.all([group(A), group(B)]);
+  // One period after the other, so the two don't read the Sheets at the same moment.
+  const a = await group(A);
+  const b = await group(B);
   return { timeline, googleKeepsFrom: keeps, ga4, a, b };
+}
+
+const resultMemo = new Map<string, { at: number; p: Promise<CompareResult> }>();
+
+/** The comparison for two sets of months. Identical requests within 2 minutes reuse the same answer. */
+export function compareData(site: string, aMonths: string[], bMonths: string[], token: string): Promise<CompareResult> {
+  const A = uniqSorted(aMonths);
+  const B = uniqSorted(bMonths);
+  const key = `${site}|${A.join(",")}|${B.join(",")}`;
+  const hit = resultMemo.get(key);
+  if (hit && Date.now() - hit.at < RESULT_MS) return hit.p;
+  const p = compute(site, A, B, token);
+  resultMemo.set(key, { at: Date.now(), p });
+  p.catch(() => resultMemo.delete(key));
+  if (resultMemo.size > MAX_RESULTS) {
+    const oldest = [...resultMemo.entries()].sort((x, y) => x[1].at - y[1].at)[0];
+    if (oldest) resultMemo.delete(oldest[0]);
+  }
+  return p;
 }
