@@ -3,11 +3,14 @@
 // Compare months mode. Pick any months for period A (left) and period B (right); every tab then compares them,
 // using the history saved in the Google Sheets (lib/compare.ts), including months Search Console no longer shows.
 // Written for executives: period names instead of A/B, plain-language headlines, every chart on screen, "Not saved"
-// instead of zeros, and a print / PDF button.
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Bar, BarChart, CartesianGrid, Cell, LabelList, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+// instead of zeros, Google's ranking updates marked on the charts, and a print / PDF button.
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Bar, BarChart, CartesianGrid, Cell, LabelList, Line, LineChart, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { DataTable, PanelTitle, Section, compact, duration, num, pct, type Col } from "./ui";
 import type { Coverage, DailyPoint, Group, MonthPoint, MonthRow } from "@/lib/compare";
+import {
+  UPDATE_COLOR, UpdatesList, fmtDay, shortUpdateName, todayStr, updatesInMonths, useGoogleUpdates, type GoogleUpdate,
+} from "./googleUpdates";
 
 export type CompareTab = "summary" | "search" | "pages" | "queries" | "where" | "traffic" | "sources" | "ai" | "crawl";
 export const COMPARE_TABS: { id: CompareTab; label: string }[] = [
@@ -45,6 +48,9 @@ const TONE: Record<Tone, { bg: string; fg: string }> = {
 };
 /** Wait after the last click before asking the server, so picking several months sends one request. */
 const DEBOUNCE_MS = 900;
+
+/** Google's ranking updates, shared with every chart below. */
+const UpdatesCtx = createContext<GoogleUpdate[]>([]);
 
 /* ---------------- Month and number helpers ---------------- */
 
@@ -207,6 +213,20 @@ function headlines(A: Group | null, B: Group | null, names: Names): { text: stri
   return out.slice(0, 8);
 }
 
+/** Headlines about Google core updates that fell in only one of the two periods. */
+function updateHeadlines(updates: GoogleUpdate[], sel: Sel, names: Names): { text: string; tone: Tone }[] {
+  const inA = updatesInMonths(updates, sel.a).filter((u) => u.kind === "core");
+  const inB = updatesInMonths(updates, sel.b).filter((u) => u.kind === "core");
+  const out: { text: string; tone: Tone }[] = [];
+  for (const u of inA) {
+    if (!inB.some((x) => x.id === u.id)) out.push({ text: `Google's ${u.name} rolled out during ${names.a} (from ${fmtDay(u.start)}), so part of the change may come from it.`, tone: "flat" });
+  }
+  for (const u of inB) {
+    if (sel.b.length && !inA.some((x) => x.id === u.id)) out.push({ text: `Google's ${u.name} rolled out during ${names.b} (from ${fmtDay(u.start)}), the period being compared with.`, tone: "flat" });
+  }
+  return out.slice(0, 2);
+}
+
 /* ---------------- Charts ---------------- */
 
 const monthTitle = (p: MonthPoint) =>
@@ -223,7 +243,14 @@ function pairLabel(a?: MonthPoint, b?: MonthPoint) {
   return `${MON[mi(p.month)]} ${yy(p.month)}${star(p)}`;
 }
 
-type PairDatum = { label: string; A: number | null; B: number | null; aT: string; bT: string };
+/** The strongest Google update in either month of a pair: "core", "spam", "other" or "". */
+function pairMark(updates: GoogleUpdate[], a?: MonthPoint, b?: MonthPoint): "" | GoogleUpdate["kind"] {
+  const kinds = new Set<string>();
+  for (const p of [a, b]) if (p) for (const u of updatesInMonths(updates, [p.month])) kinds.add(u.kind);
+  return kinds.has("core") ? "core" : kinds.has("spam") ? "spam" : kinds.size ? "other" : "";
+}
+
+type PairDatum = { label: string; A: number | null; B: number | null; aT: string; bT: string; mark: "" | GoogleUpdate["kind"]; marks: string };
 
 function PairTip({ active, payload, f }: { active?: boolean; payload?: { payload: PairDatum }[]; f: Fmt }) {
   if (!active || !payload?.length) return null;
@@ -240,7 +267,24 @@ function PairTip({ active, payload, f }: { active?: boolean; payload?: { payload
     <div style={{ background: "#fff", border: "1px solid #dadce0", borderRadius: 8, padding: "8px 10px", fontSize: 13, minWidth: 200 }}>
       {line(A_COLOR, d.aT, d.A)}
       {line(B_COLOR, d.bT, d.B)}
+      {d.marks && <div style={{ marginTop: 4, color: d.mark ? UPDATE_COLOR[d.mark] : MUTED, fontSize: 12 }}>◆ {d.marks}</div>}
     </div>
+  );
+}
+
+/** X-axis label with a "◆ core update" tag under months that had a Google update. */
+function PairTick(props: { x?: number; y?: number; payload?: { value: string; index: number }; data: PairDatum[] }) {
+  const { x = 0, y = 0, payload, data } = props;
+  const d = payload ? data[payload.index] : undefined;
+  return (
+    <g transform={`translate(${x},${y})`}>
+      <text dy={12} textAnchor="middle" fontSize={12} fill={MUTED}>{payload?.value}</text>
+      {d?.mark && (
+        <text dy={26} textAnchor="middle" fontSize={10} fill={UPDATE_COLOR[d.mark]}>
+          ◆ {d.mark === "core" ? "core update" : d.mark === "spam" ? "spam update" : "update"}
+        </text>
+      )}
+    </g>
   );
 }
 
@@ -248,17 +292,24 @@ function PairTip({ active, payload, f }: { active?: boolean; payload?: { payload
 function PairChart({
   title, A, B, get, f, names, note,
 }: { title: string; A: Group | null; B: Group | null; get: (p: MonthPoint) => number | null; f: Fmt; names: Names; note?: string }) {
+  const updates = useContext(UpdatesCtx);
   const am = A?.monthly || [];
   const bm = B?.monthly || [];
   const n = Math.max(am.length, bm.length);
-  const data: PairDatum[] = Array.from({ length: n }, (_, i) => ({
-    label: pairLabel(am[i], bm[i]),
-    A: am[i] ? get(am[i]) : null,
-    B: bm[i] ? get(bm[i]) : null,
-    aT: am[i] ? monthTitle(am[i]) : "",
-    bT: bm[i] ? monthTitle(bm[i]) : "",
-  }));
+  const data: PairDatum[] = Array.from({ length: n }, (_, i) => {
+    const names2 = [...new Set([am[i], bm[i]].filter((p): p is MonthPoint => !!p).flatMap((p) => updatesInMonths(updates, [p.month]).map((u) => u.name)))];
+    return {
+      label: pairLabel(am[i], bm[i]),
+      A: am[i] ? get(am[i]) : null,
+      B: bm[i] ? get(bm[i]) : null,
+      aT: am[i] ? monthTitle(am[i]) : "",
+      bT: bm[i] ? monthTitle(bm[i]) : "",
+      mark: pairMark(updates, am[i], bm[i]),
+      marks: names2.join(", "),
+    };
+  });
   const any = data.some((d) => d.A != null || d.B != null);
+  const anyMark = data.some((d) => d.mark);
   const labels = n <= 8;
   const lbl = (v: unknown) => (v == null ? "" : short(Number(v), f));
   return (
@@ -269,10 +320,10 @@ function PairChart({
           Not saved for these months
         </div>
       ) : (
-        <ResponsiveContainer width="100%" height={240}>
+        <ResponsiveContainer width="100%" height={anyMark ? 254 : 240}>
           <BarChart data={data} margin={{ top: 22, right: 8, left: 0, bottom: 0 }} barGap={3}>
             <CartesianGrid stroke="#eef1f4" vertical={false} />
-            <XAxis dataKey="label" tick={axis} interval={0} />
+            <XAxis dataKey="label" interval={0} height={anyMark ? 44 : 30} tick={(p: any) => <PairTick {...p} data={data} />} />
             <YAxis tick={axis} width={52} tickFormatter={(v) => tickFmt(Number(v), f)} />
             <Tooltip cursor={{ fill: "rgba(0,0,0,0.04)" }} content={<PairTip f={f} />} />
             <Bar dataKey="A" fill={A_COLOR} radius={[3, 3, 0, 0]} maxBarSize={44} isAnimationActive={false}>
@@ -293,7 +344,7 @@ function PairChart({
 }
 
 type DKey = Exclude<keyof DailyPoint, "date">;
-type DRow = { x: number; tick: string; label: string; A: number | null; B: number | null };
+type DRow = { x: number; tick: string; label: string; aDate: string; bDate: string; A: number | null; B: number | null };
 
 /** Both periods day by day on real dates: day 1 of each month lines up, with a break between months that aren't next to each other. */
 function alignDaily(A: Group | null, B: Group | null, k: DKey): DRow[] {
@@ -310,28 +361,67 @@ function alignDaily(A: Group | null, B: Group | null, k: DKey): DRow[] {
       const dd = String(d).padStart(2, "0");
       const okA = !!ma && d <= daysIn(ma);
       const okB = !!mb && d <= daysIn(mb);
-      const pa = okA ? amap.get(`${ma}-${dd}`) : undefined;
-      const pb = okB ? bmap.get(`${mb}-${dd}`) : undefined;
+      const aDate = okA ? `${ma}-${dd}` : "";
+      const bDate = okB ? `${mb}-${dd}` : "";
+      const pa = aDate ? amap.get(aDate) : undefined;
+      const pb = bDate ? bmap.get(bDate) : undefined;
       const m0 = (ma || mb)!;
       rows.push({
         x: rows.length,
         tick: d === 1 ? `${MON[mi(m0)]} ${yy(m0)}` : "",
         label: [okA ? `${d} ${mName(ma!)}` : "", okB ? `${d} ${mName(mb!)}` : ""].filter(Boolean).join(" vs "),
+        aDate,
+        bDate,
         A: pa ? pa[k] ?? null : null,
         B: pb ? pb[k] ?? null : null,
       });
     }
     const jumpA = !!ma && !!am[i + 1] && shift(ma, 1) !== am[i + 1];
     const jumpB = !!mb && !!bm[i + 1] && shift(mb, 1) !== bm[i + 1];
-    if (i < n - 1 && (jumpA || jumpB)) rows.push({ x: rows.length, tick: "", label: "", A: null, B: null });
+    if (i < n - 1 && (jumpA || jumpB)) rows.push({ x: rows.length, tick: "", label: "", aDate: "", bDate: "", A: null, B: null });
   }
   return rows;
 }
 
+/** Index ranges of the rows whose date (for one period) falls inside an update. */
+function segments(rows: DRow[], key: "aDate" | "bDate", u: GoogleUpdate, today: string): [number, number][] {
+  const end = u.end || today;
+  const out: [number, number][] = [];
+  let s = -1;
+  rows.forEach((r, i) => {
+    const d = r[key];
+    const inside = !!d && d >= u.start && d <= end;
+    if (inside && s < 0) s = i;
+    if (!inside && s >= 0) {
+      out.push([s, i - 1]);
+      s = -1;
+    }
+  });
+  if (s >= 0) out.push([s, rows.length - 1]);
+  return out;
+}
+
 function DailyChart({ title, A, B, k, f, names, note }: { title: string; A: Group | null; B: Group | null; k: DKey; f: Fmt; names: Names; note?: string }) {
+  const updates = useContext(UpdatesCtx);
   const rows = useMemo(() => alignDaily(A, B, k), [A, B, k]);
   const ticks = rows.filter((r) => r.tick).map((r) => r.x);
   const any = rows.some((r) => r.A != null || r.B != null);
+  const today = todayStr();
+  const bands = (key: "aDate" | "bDate", opacity: number, suffix: string) =>
+    updates.flatMap((u) =>
+      segments(rows, key, u, today).map(([s, e], j) => (
+        <ReferenceArea
+          key={`${key}-${u.id}-${j}`}
+          x1={s}
+          x2={Math.max(e, s + 0.9)}
+          fill={UPDATE_COLOR[u.kind]}
+          fillOpacity={opacity}
+          stroke="none"
+          ifOverflow="visible"
+          label={j === 0 ? { value: `${shortUpdateName(u)}${suffix}`, position: key === "aDate" ? "insideTopLeft" : "insideBottomLeft", fontSize: 10, fill: UPDATE_COLOR[u.kind] } : undefined}
+        />
+      ))
+    );
   return (
     <div className="panel" style={{ margin: 0, breakInside: "avoid" }}>
       <PanelTitle>{title}</PanelTitle>
@@ -346,6 +436,8 @@ function DailyChart({ title, A, B, k, f, names, note }: { title: string; A: Grou
             <XAxis dataKey="x" type="number" domain={[0, Math.max(0, rows.length - 1)]} ticks={ticks} tickFormatter={(x) => rows[Number(x)]?.tick || ""} tick={axis} allowDecimals={false} />
             <YAxis tick={axis} width={52} tickFormatter={(v) => tickFmt(Number(v), f)} />
             <Tooltip labelFormatter={(x) => rows[Number(x)]?.label || ""} formatter={(v) => fmt(Number(v), f)} />
+            {bands("aDate", 0.12, "")}
+            {B && bands("bDate", 0.06, ` (${names.b})`)}
             <Line dataKey="A" name={names.a} stroke={A_COLOR} strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />
             {B && <Line dataKey="B" name={names.b} stroke={B_COLOR} strokeWidth={2} strokeDasharray="5 3" dot={false} connectNulls={false} isAnimationActive={false} />}
           </LineChart>
@@ -354,6 +446,7 @@ function DailyChart({ title, A, B, k, f, names, note }: { title: string; A: Grou
       <Swatches names={names} hasB={!!B} />
       <p className="muted" style={{ margin: "6px 0 0", fontSize: 12 }}>
         {note || "Day 1 of each month lines up with day 1 of the month it's compared with. Gaps mark months that aren't next to each other."}
+        {" "}Shaded bands are Google updates (purple = core, red = spam).
       </p>
     </div>
   );
@@ -790,7 +883,7 @@ const PRINT_CSS = `
 
 /* ---------------- The mode ---------------- */
 
-export default function CompareMode({ site, ga4, tab }: { site: string; ga4: string; tab: CompareTab }) {
+export default function CompareMode({ site, ga4, tab, readOnly = false }: { site: string; ga4: string; tab: CompareTab; readOnly?: boolean }) {
   const [base, setBase] = useState<Resp | null>(null);
   const [res, setRes] = useState<Resp | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -798,6 +891,7 @@ export default function CompareMode({ site, ga4, tab }: { site: string; ga4: str
   const [busy, setBusy] = useState(false);
   const [sel, setSel] = useState<Sel>({ a: [], b: [] });
   const [archMsg, setArchMsg] = useState("");
+  const updates = useGoogleUpdates();
   const storeKey = `dash:compare:${site}`;
 
   // Which months are saved (for the picker), and the last selection for this property.
@@ -832,14 +926,16 @@ export default function CompareMode({ site, ga4, tab }: { site: string; ga4: str
       })
       .catch((e) => live && setErr(friendly(e, "Couldn't load the saved months")));
     // Status of the saved history (shown when GA4 is missing).
-    fetch(`/api/archive?site=${encodeURIComponent(site)}`, { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j) => live && setArchMsg(String(j?.link?.message ?? j?.status?.link?.message ?? "")))
-      .catch(() => {});
+    if (!readOnly) {
+      fetch(`/api/archive?site=${encodeURIComponent(site)}`, { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((j) => live && setArchMsg(String(j?.link?.message ?? j?.status?.link?.message ?? "")))
+        .catch(() => {});
+    }
     return () => {
       live = false;
     };
-  }, [site]);
+  }, [site, readOnly]);
 
   // The comparison itself, once the selection has stopped changing.
   useEffect(() => {
@@ -899,7 +995,17 @@ export default function CompareMode({ site, ga4, tab }: { site: string; ga4: str
   const notes = [...new Set([...(A?.notes || []), ...(B?.notes || [])])];
   const gaMissing = !!A && !A.ga && !B?.ga;
   const usersNote = A?.ga && !A.ga.usersExact ? "sum of monthly users" : "";
-  const heads = headlines(A, B, names);
+  const heads = [...headlines(A, B, names), ...updateHeadlines(updates, sel, names)];
+
+  // Google updates that fell in either period, for the box in the Summary.
+  const aUpd = updatesInMonths(updates, sel.a);
+  const bUpd = updatesInMonths(updates, sel.b);
+  const updRows = [...new Map([...aUpd, ...bUpd].map((u) => [u.id, u])).values()]
+    .sort((x, y) => x.start.localeCompare(y.start))
+    .map((u) => ({
+      u,
+      note: `during ${[aUpd.some((x) => x.id === u.id) ? names.a : "", bUpd.some((x) => x.id === u.id) ? names.b : ""].filter(Boolean).join(" and ")}`,
+    }));
 
   const gaNotice = gaMissing ? (
     <div className="notice" style={{ marginTop: 12 }}>
@@ -920,7 +1026,11 @@ export default function CompareMode({ site, ga4, tab }: { site: string; ga4: str
       month: t.month, period: sel.a.includes(t.month) ? "A" : "B",
       clicks: t.search?.clicks ?? null, impressions: t.search?.impressions ?? null, ctr: t.search?.ctr ?? null, position: t.search?.position || null,
       users: t.ga?.users ?? null, sessions: t.ga?.sessions ?? null, organic: t.ga?.organicSessions ?? null, ai: t.ai, crawl: t.crawl,
-      flags: [t.partial ? `part month (${t.from} to ${t.through})` : "", t.onlyHere ? "only in saved history" : ""].filter(Boolean).join(" · "),
+      flags: [
+        t.partial ? `part month (${t.from} to ${t.through})` : "",
+        t.onlyHere ? "only in saved history" : "",
+        ...updatesInMonths(updates, [t.month]).map((u) => `◆ ${shortUpdateName(u)}`),
+      ].filter(Boolean).join(" · "),
     }));
   const cell = (v: number | null, f: Fmt) => (v == null ? <span style={{ color: "#9aa0a6" }}>Not saved</span> : fmt(v, f));
   const MONTH_COLS: Col<MonthLine>[] = [
@@ -1015,6 +1125,11 @@ export default function CompareMode({ site, ga4, tab }: { site: string; ga4: str
         <div style={{ marginTop: 16 }}>
           <ExecCards items={[...searchCards, ...gaCards, ...aiCards, ...crawlCards]} names={names} hasB={hasB} />
         </div>
+        {updRows.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <UpdatesList rows={updRows} title="Google updates during these periods" />
+          </div>
+        )}
         <Block title="Site traffic (Google Analytics 4)">{gaNotice || pTraffic}</Block>
         <Block title="Google Search">{pSearch}</Block>
         <Block title="AI visibility">{pAi}</Block>
@@ -1030,6 +1145,11 @@ export default function CompareMode({ site, ga4, tab }: { site: string; ga4: str
       <>
         <ExecCards items={searchCards} names={names} hasB={hasB} />
         <div style={{ marginTop: 16 }}>{pSearch}</div>
+        {updRows.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <UpdatesList rows={updRows} title="Google updates during these periods" />
+          </div>
+        )}
         <MonthChart timeline={timeline} sel={sel} defs={SEARCH_DEFS} title="Google Search, every saved month" names={names} />
       </>
     ),
@@ -1118,40 +1238,42 @@ export default function CompareMode({ site, ga4, tab }: { site: string; ga4: str
       {base && timeline.length > 0 && (
         <>
           <Picker timeline={timeline} sel={sel} setSel={(f) => setSel((s) => f(s))} />
-          {savedGa4 && ga4 && savedGa4 !== ga4 && (
+          {!readOnly && savedGa4 && ga4 && savedGa4 !== ga4 && (
             <div className="notice cmp-noprint" style={{ marginBottom: 12 }}>
               GA4 history is saved for property {savedGa4}, but the top bar shows {ga4}.{" "}
               <button className="btn small" onClick={switchGa4} disabled={busy}>{busy ? "Switching…" : `Save history for ${ga4} instead`}</button>
             </div>
           )}
-          {!savedGa4 && <div className="notice cmp-noprint" style={{ marginBottom: 12 }}>No GA4 property is linked yet. Pick one in the top bar; it links the next time this property is opened.</div>}
+          {!readOnly && !savedGa4 && <div className="notice cmp-noprint" style={{ marginBottom: 12 }}>No GA4 property is linked yet. Pick one in the top bar; it links the next time this property is opened.</div>}
 
-          <div className="cmp-print">
-            {(A || B) && (
-              <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap", margin: "0 0 12px" }}>
-                <span style={{ background: A_TINT, color: "#174ea6", fontWeight: 600, padding: "6px 12px", borderRadius: 8 }}>{names.a}</span>
-                <span className="muted">compared with</span>
-                <span style={{ background: hasB ? B_TINT : "#f1f3f4", color: hasB ? "#b06000" : MUTED, fontWeight: 600, padding: "6px 12px", borderRadius: 8 }}>
-                  {hasB ? names.b : "nothing yet"}
-                </span>
-                <span className="muted" style={{ marginLeft: 8 }}>{site.replace(/^sc-domain:/, "")} · {tabLabel}</span>
-                <button type="button" className="btn cmp-noprint" style={{ marginLeft: "auto" }} onClick={() => window.print()}>
-                  Download PDF
-                </button>
-              </div>
-            )}
-            {loading && <p className="muted cmp-noprint">Comparing…</p>}
-            {notes.length > 0 && (
-              <ul className="muted" style={{ margin: "0 0 12px", paddingLeft: 18, fontSize: 13 }}>
-                {notes.map((x) => <li key={x}>{x}</li>)}
-              </ul>
-            )}
-            {res && (A || B) ? (
-              <div style={{ opacity: loading ? 0.6 : 1 }}>{views[tab]}</div>
-            ) : (
-              !loading && <p className="muted">Choose months on the left and on the right above.</p>
-            )}
-          </div>
+          <UpdatesCtx.Provider value={updates}>
+            <div className="cmp-print">
+              {(A || B) && (
+                <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap", margin: "0 0 12px" }}>
+                  <span style={{ background: A_TINT, color: "#174ea6", fontWeight: 600, padding: "6px 12px", borderRadius: 8 }}>{names.a}</span>
+                  <span className="muted">compared with</span>
+                  <span style={{ background: hasB ? B_TINT : "#f1f3f4", color: hasB ? "#b06000" : MUTED, fontWeight: 600, padding: "6px 12px", borderRadius: 8 }}>
+                    {hasB ? names.b : "nothing yet"}
+                  </span>
+                  <span className="muted" style={{ marginLeft: 8 }}>{site.replace(/^sc-domain:/, "")} · {tabLabel}</span>
+                  <button type="button" className="btn cmp-noprint" style={{ marginLeft: "auto" }} onClick={() => window.print()}>
+                    Download PDF
+                  </button>
+                </div>
+              )}
+              {loading && <p className="muted cmp-noprint">Comparing…</p>}
+              {notes.length > 0 && (
+                <ul className="muted" style={{ margin: "0 0 12px", paddingLeft: 18, fontSize: 13 }}>
+                  {notes.map((x) => <li key={x}>{x}</li>)}
+                </ul>
+              )}
+              {res && (A || B) ? (
+                <div style={{ opacity: loading ? 0.6 : 1 }}>{views[tab]}</div>
+              ) : (
+                !loading && <p className="muted">Choose months on the left and on the right above.</p>
+              )}
+            </div>
+          </UpdatesCtx.Provider>
         </>
       )}
     </Section>
