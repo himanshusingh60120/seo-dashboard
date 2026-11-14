@@ -14,6 +14,8 @@ export const maxDuration = 60;
 
 /** Session sources that are AI assistants (domains and the utm_source names they use). */
 const AI_SOURCE = /chatgpt|openai|perplexity|gemini\.google|bard\.google|copilot|claude\.ai|anthropic|deepseek|grok|meta\.ai|mistral|phind|you\.com|poe\.com/i;
+/** Daily rows: periods can be up to 16 months (486 days). */
+const DAILY_LIMIT = 1000;
 
 type PageTotals = { views: number; users: number; engagementSec: number; keyEvents: number };
 type LandingTotals = { sessions: number; users: number; engagedSessions: number; keyEvents: number };
@@ -82,7 +84,7 @@ export async function GET(req: NextRequest) {
           dimensions: dims(["date"]),
           metrics: metrics(["screenPageViews", "activeUsers"]),
           orderBys: [{ dimension: { dimensionName: "date" } }],
-          limit: 400,
+          limit: DAILY_LIMIT,
         },
         {
           dateRanges: [win.current],
