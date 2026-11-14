@@ -4,6 +4,7 @@
 // using the history saved in the Google Sheets (lib/compare.ts), including months Search Console no longer shows.
 // Written for executives: period names instead of A/B, plain-language headlines, every chart on screen, "Not saved"
 // instead of zeros, Google's ranking updates marked on the charts, and a print / PDF button.
+// Works on phones too: the phone layout rules (cmp-mid, cmp-line) live in components/Dashboard.tsx.
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Bar, BarChart, CartesianGrid, Cell, LabelList, Line, LineChart, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { DataTable, PanelTitle, Section, compact, duration, num, pct, type Col } from "./ui";
@@ -155,7 +156,7 @@ type Card = { label: string; a: number | null | undefined; b: number | null | un
 
 function ExecCards({ items, names, hasB }: { items: Card[]; names: Names; hasB: boolean }) {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12 }}>
       {items.map((k) => {
         const c = k.ok === false ? null : change(k.a, k.b, k.f, k.lowerBetter);
         return (
@@ -827,8 +828,9 @@ function Picker({ timeline, sel, setSel }: { timeline: MonthRow[]; sel: Sel; set
       <div style={{ display: "flex", alignItems: "stretch", gap: 12, flexWrap: "wrap" }}>
         <MonthPanel side="a" byMonth={byMonth} years={years} sel={sel} setSel={setSel} />
 
-        <div style={{ flex: "0 0 auto", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, padding: "0 2px" }}>
-          <div style={{ width: 2, flex: 1, minHeight: 16, background: "#dadce0" }} />
+        {/* Middle: "vs", Swap and Clear both. On phones (boxes stacked) this becomes a row; see MOBILE_CSS in Dashboard.tsx. */}
+        <div className="cmp-mid" style={{ flex: "0 0 auto", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, padding: "0 2px" }}>
+          <div className="cmp-line" style={{ width: 2, flex: 1, minHeight: 16, background: "#dadce0" }} />
           <div style={{ width: 46, height: 46, borderRadius: "50%", background: "#f1f3f4", border: "1px solid #dadce0", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, color: INK }}>
             vs
           </div>
@@ -844,7 +846,7 @@ function Picker({ timeline, sel, setSel }: { timeline: MonthRow[]; sel: Sel; set
           <button type="button" className="btn small" onClick={() => setSel(() => ({ a: [], b: [] }))} disabled={!sel.a.length && !sel.b.length}>
             Clear both
           </button>
-          <div style={{ width: 2, flex: 1, minHeight: 16, background: "#dadce0" }} />
+          <div className="cmp-line" style={{ width: 2, flex: 1, minHeight: 16, background: "#dadce0" }} />
         </div>
 
         <MonthPanel side="b" byMonth={byMonth} years={years} sel={sel} setSel={setSel} extra={bShortcuts} />
@@ -868,8 +870,9 @@ function Block({ title, children }: { title: string; children: ReactNode }) {
     </div>
   );
 }
+/** Charts two per row on wide screens, one per row on phones. */
 const Grid = ({ children }: { children: ReactNode }) => (
-  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))", gap: 16 }}>{children}</div>
+  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(380px, 100%), 1fr))", gap: 16 }}>{children}</div>
 );
 
 const PRINT_CSS = `
@@ -1114,7 +1117,7 @@ export default function CompareMode({ site, ga4, tab, readOnly = false }: { site
             <ul style={{ margin: 0, paddingLeft: 0, listStyle: "none" }}>
               {heads.map((h) => (
                 <li key={h.text} style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 15, lineHeight: 1.7 }}>
-                  <span style={{ color: TONE[h.tone].fg, fontWeight: 700, width: 14 }}>{h.tone === "good" ? "▲" : h.tone === "bad" ? "▼" : "•"}</span>
+                  <span style={{ color: TONE[h.tone].fg, fontWeight: 700, width: 14, flex: "0 0 14px" }}>{h.tone === "good" ? "▲" : h.tone === "bad" ? "▼" : "•"}</span>
                   <span>{h.text}</span>
                 </li>
               ))}
