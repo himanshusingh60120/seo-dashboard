@@ -1,14 +1,15 @@
 // app/api/captures/route.ts
-//   GET  ?site=…   → the weekly Search Console captures for this property: the latest update of each report, the update
-//                    history (who saved what, and when) from the control Sheet's _Updates tab, and whether the property
-//                    is in the weekly captures. canCapture says whether the signed-in person runs the captures.
-//   POST { site }  → adds the property to the weekly captures (capture accounts only, and only if the person can open
-//                    the property in Search Console). The page then asks the Chrome extension to capture it right away.
+// GET ?site=… → the weekly Search Console captures for this property: the latest update of each report, the update
+// history (who saved what, and when) from the control Sheet's _Updates tab, and whether the property
+// is in the weekly captures. Capture accounts only (CAPTURE_EMAILS): the "Weekly captures" tab is shown only to them.
+// Everyone else still sees who updated each report, and when, on the Overview, Indexing and Crawl activity screens.
+// POST { site } → adds the property to the weekly captures (capture accounts only, and only if the person can open
+// the property in Search Console). The page then asks the Chrome extension to capture it right away.
 import { NextRequest, NextResponse } from "next/server";
 import { getGoogleAccessToken, HttpError, requireUser } from "@/lib/token";
 import { assertSiteAccess } from "@/lib/google";
 import { serviceAccountReady } from "@/lib/serviceAccount";
-import { assertCaptureEmail, isCaptureEmail } from "@/lib/captureAccess";
+import { assertCaptureEmail } from "@/lib/captureAccess";
 import { addToCaptureList, captureList } from "@/lib/captureList";
 import { readJobs } from "@/lib/indexJob";
 import { batchRead, controlBook } from "@/lib/sheets";
@@ -72,13 +73,13 @@ async function updatesFor(site: string) {
 export async function GET(req: NextRequest) {
   try {
     const email = await requireUser(req);
+    assertCaptureEmail(email); // the Weekly captures tab is only for the people who run the captures
     const token = await getGoogleAccessToken(req);
     const site = req.nextUrl.searchParams.get("site") || "";
     await assertSiteAccess(token, site);
-    const canCapture = isCaptureEmail(email);
-    if (!serviceAccountReady()) return NextResponse.json({ configured: false, canCapture });
+    if (!serviceAccountReady()) return NextResponse.json({ configured: false, canCapture: true });
     const [updates, weekly] = await Promise.all([updatesFor(site), weeklyFor(site)]);
-    return NextResponse.json({ configured: true, canCapture, ...updates, ...weekly });
+    return NextResponse.json({ configured: true, canCapture: true, ...updates, ...weekly });
   } catch (e) {
     return fail(e);
   }
