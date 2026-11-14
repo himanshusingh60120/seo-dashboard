@@ -5,7 +5,7 @@ import { signOut, useSession } from "next-auth/react";
 import type { GscData, Ga4Data, Properties, Sources } from "@/lib/types";
 import { indexScanSource, loadIndexCache, peekIndexCache } from "@/lib/indexCache";
 import { downloadJson, fileSafe } from "@/lib/evidence";
-import { DEFAULT_DAYS, WINDOWS, yoyAllowed, type Compare } from "@/lib/dates";
+import { DEFAULT_DAYS, MAX_DAYS, yoyAllowed, type Compare } from "@/lib/dates";
 import { urlInProperty } from "@/lib/url";
 import { SourcesProvider } from "./ui";
 import Overview from "./Overview";
@@ -22,9 +22,9 @@ import ChannelDrilldown from "./ChannelDrilldown";
 import Audit from "./Audit";
 import IndexChecks from "./IndexChecks";
 import WeeklyCaptures from "./WeeklyCaptures";
-import History from "./History";
+import CompareMode, { COMPARE_TABS, type CompareTab } from "./CompareMode";
 
-type Tab = "overview" | "rankings" | "indexing" | "checks" | "captures" | "history" | "crawl" | "queries" | "growth" | "audience" | "cta" | "audit";
+type Tab = "overview" | "rankings" | "indexing" | "checks" | "captures" | "crawl" | "queries" | "growth" | "audience" | "cta" | "audit";
 
 const BASE_TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -32,7 +32,6 @@ const BASE_TABS: { id: Tab; label: string }[] = [
   { id: "indexing", label: "Indexing" },
   { id: "checks", label: "Index checks" },
   { id: "captures", label: "Weekly captures" },
-  { id: "history", label: "History" },
   { id: "crawl", label: "Crawl activity" },
   { id: "queries", label: "Queries" },
   { id: "growth", label: "Query growth" },
@@ -41,6 +40,28 @@ const BASE_TABS: { id: Tab; label: string }[] = [
 ];
 
 const SEARCH_TYPES: [string, string][] = [["web", "Web"], ["image", "Image"], ["video", "Video"], ["news", "News"]];
+
+/** Period presets (days). "Custom" picks any number of months up to Search Console's 16. */
+const PERIODS: [number, string][] = [
+  [7, "Last 7 days"],
+  [15, "Last 15 days"],
+  [30, "Last 30 days"],
+  [90, "Last 3 months (90 days)"],
+  [180, "Last 6 months (180 days)"],
+  [365, "Last 12 months (365 days)"],
+  [480, "Last 16 months (480 days)"],
+];
+const MAX_CUSTOM_MONTHS = 16;
+
+/** Days in the last N calendar months, ending yesterday (capped at what Search Console keeps). */
+function daysForMonths(months: number) {
+  const end = new Date();
+  end.setUTCHours(0, 0, 0, 0);
+  end.setUTCDate(end.getUTCDate() - 1);
+  const start = new Date(end);
+  start.setUTCMonth(start.getUTCMonth() - months);
+  return Math.min(MAX_DAYS, Math.max(1, Math.round((end.getTime() - start.getTime()) / 864e5)));
+}
 
 /** Search Console data changes about once a day, so 10 minutes is plenty (only GA4 realtime moves faster). */
 const REFRESH_MS = 10 * 60 * 1000;
@@ -75,9 +96,12 @@ export default function Dashboard() {
   const [site, setSite] = useState("");
   const [ga4, setGa4] = useState("");
   const [days, setDays] = useState<number>(DEFAULT_DAYS);
+  const [customMonths, setCustomMonths] = useState<number | null>(null);
   const [compare, setCompare] = useState<Compare>("previous");
   const [searchType, setSearchType] = useState("web");
   const [tab, setTab] = useState<Tab>("overview");
+  const [compareMode, setCompareMode] = useState(false);
+  const [ctab, setCtab] = useState<CompareTab>("summary");
   const [canAudit, setCanAudit] = useState(false);
   const [gsc, setGsc] = useState<GscData | null>(null);
   const [ga, setGa] = useState<Ga4Data | null>(null);
@@ -235,9 +259,16 @@ export default function Dashboard() {
         const s = p.gsc.find((x) => x.siteUrl === prefs.site)?.siteUrl || p.gsc[0]?.siteUrl || "";
         setSite(s);
         setGa4(prefs.map?.[s] ?? p.gsc.find((x) => x.siteUrl === s)?.ga4Id ?? "");
-        if ((WINDOWS as readonly number[]).includes(prefs.days)) setDays(prefs.days);
+        const cm = Number(prefs.customMonths);
+        if (Number.isInteger(cm) && cm >= 1 && cm <= MAX_CUSTOM_MONTHS) {
+          setCustomMonths(cm);
+          setDays(daysForMonths(cm));
+        } else if (Number.isInteger(prefs.days) && prefs.days >= 1 && prefs.days <= MAX_DAYS) {
+          setDays(prefs.days);
+        }
         if (prefs.compare === "yoy") setCompare("yoy");
         if (SEARCH_TYPES.some(([id]) => id === prefs.searchType)) setSearchType(prefs.searchType);
+        if (prefs.compareMode === true) setCompareMode(true);
       })
       .catch((e) => setError(e.message));
   }, []);
@@ -254,9 +285,9 @@ export default function Dashboard() {
     const prefs = readPrefs();
     localStorage.setItem(
       "dash:prefs",
-      JSON.stringify({ ...prefs, site, days, compare, searchType, map: { ...(prefs.map || {}), [site]: ga4 } })
+      JSON.stringify({ ...prefs, site, days, customMonths, compare, searchType, compareMode, map: { ...(prefs.map || {}), [site]: ga4 } })
     );
-  }, [site, ga4, days, compare, searchType]);
+  }, [site, ga4, days, customMonths, compare, searchType, compareMode]);
 
   // Save this property's Search Console and GA4 history in the Google Sheets when it's opened (see lib/archive.ts).
   // The first open of the day does the work in the background; it keeps going while the page stays open.
@@ -285,7 +316,7 @@ export default function Dashboard() {
   }, [days, compare]);
 
   const load = useCallback(async () => {
-    if (!site) return;
+    if (!site || compareMode) return; // Compare months mode reads the saved history instead
     const id = ++reqId.current;
     setLoading(true);
     setError(null);
@@ -304,7 +335,7 @@ export default function Dashboard() {
     }
     setUpdated(new Date());
     setLoading(false);
-  }, [site, ga4, days, compare, searchType]);
+  }, [site, ga4, days, compare, searchType, compareMode]);
 
   useEffect(() => {
     setGsc(null);
@@ -321,9 +352,26 @@ export default function Dashboard() {
     return () => clearInterval(t);
   }, [live, load]);
 
+  const changePeriod = (v: string) => {
+    if (v === "custom") {
+      const m = customMonths || 4;
+      setCustomMonths(m);
+      setDays(daysForMonths(m));
+      return;
+    }
+    setCustomMonths(null);
+    setDays(Number(v));
+  };
+  const changeCustom = (v: string) => {
+    const m = Math.min(MAX_CUSTOM_MONTHS, Math.max(1, Math.floor(Number(v)) || 1));
+    setCustomMonths(m);
+    setDays(daysForMonths(m));
+  };
+
   const tabs: { id: Tab; label: string }[] = canAudit ? [...BASE_TABS, { id: "audit", label: "GSC audit (AI)" }] : BASE_TABS;
   const noGa4Notice = <div className="notice">Pick a GA4 property in the top bar to see this data.</div>;
   const needsGsc = ["overview", "rankings", "queries"].includes(tab);
+  const previousIncomplete = !compareMode && compare === "previous" && days * 2 > MAX_DAYS;
 
   return (
     <>
@@ -354,31 +402,53 @@ export default function Dashboard() {
             </select>
           </label>
 
-          <label className="control">
-            Period
-            <select value={days} onChange={(e) => setDays(Number(e.target.value))} style={{ minWidth: 120 }}>
-              {WINDOWS.map((d) => (
-                <option key={d} value={d}>Last {d} days</option>
-              ))}
-            </select>
-          </label>
+          {!compareMode && (
+            <>
+              <label className="control">
+                Period
+                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <select value={customMonths ? "custom" : String(days)} onChange={(e) => changePeriod(e.target.value)} style={{ minWidth: 150 }}>
+                    {!customMonths && !PERIODS.some(([d]) => d === days) && <option value={String(days)}>Last {days} days</option>}
+                    {PERIODS.map(([d, l]) => (
+                      <option key={d} value={String(d)}>{l}</option>
+                    ))}
+                    <option value="custom">Custom: last N months…</option>
+                  </select>
+                  {customMonths && (
+                    <>
+                      <input
+                        type="number"
+                        min={1}
+                        max={MAX_CUSTOM_MONTHS}
+                        value={customMonths}
+                        onChange={(e) => changeCustom(e.target.value)}
+                        aria-label="Number of months"
+                        style={{ width: 64 }}
+                      />
+                      <span className="muted" style={{ whiteSpace: "nowrap" }}>months ({days} days)</span>
+                    </>
+                  )}
+                </div>
+              </label>
 
-          <label className="control">
-            Compare with
-            <select value={compare} onChange={(e) => setCompare(e.target.value as Compare)} style={{ minWidth: 150 }}>
-              <option value="previous">Previous period</option>
-              <option value="yoy" disabled={!yoyAllowed(days)}>Same days last year</option>
-            </select>
-          </label>
+              <label className="control">
+                Compare with
+                <select value={compare} onChange={(e) => setCompare(e.target.value as Compare)} style={{ minWidth: 150 }}>
+                  <option value="previous">Previous period</option>
+                  <option value="yoy" disabled={!yoyAllowed(days)}>Same days last year</option>
+                </select>
+              </label>
 
-          <label className="control">
-            Search type
-            <select value={searchType} onChange={(e) => setSearchType(e.target.value)}>
-              {SEARCH_TYPES.map(([id, label]) => (
-                <option key={id} value={id}>{label}</option>
-              ))}
-            </select>
-          </label>
+              <label className="control">
+                Search type
+                <select value={searchType} onChange={(e) => setSearchType(e.target.value)}>
+                  {SEARCH_TYPES.map(([id, label]) => (
+                    <option key={id} value={id}>{label}</option>
+                  ))}
+                </select>
+              </label>
+            </>
+          )}
 
           <form className="control" onSubmit={openLookup}>
             Look up a URL
@@ -391,132 +461,162 @@ export default function Dashboard() {
                 aria-label="Page URL to look up"
                 style={{ minWidth: 260 }}
               />
-              <button className="btn" type="submit" disabled={!site || !lookupText.trim()}>
+              <button className="btn" type="submit" disabled={!site || !lookupText.trim() || compareMode}>
                 Look up
               </button>
             </div>
           </form>
 
-          <button className="btn" onClick={load} disabled={loading || !site}>{loading ? "Refreshing…" : "Refresh"}</button>
-          <button className="btn" onClick={downloadEvidence} disabled={!gsc} title="Download every number with the exact Google API request behind it">
-            Download evidence
-          </button>
-          <button className="live btn" onClick={() => setLive(!live)} aria-pressed={live} title="Refresh automatically every 10 minutes while this tab is visible">
-            <span className={`live-dot ${live ? "" : "off"}`} /> {live ? "Auto-refresh on" : "Auto-refresh off"}
+          {!compareMode && (
+            <>
+              <button className="btn" onClick={load} disabled={loading || !site}>{loading ? "Refreshing…" : "Refresh"}</button>
+              <button className="btn" onClick={downloadEvidence} disabled={!gsc} title="Download every number with the exact Google API request behind it">
+                Download evidence
+              </button>
+              <button className="live btn" onClick={() => setLive(!live)} aria-pressed={live} title="Refresh automatically every 10 minutes while this tab is visible">
+                <span className={`live-dot ${live ? "" : "off"}`} /> {live ? "Auto-refresh on" : "Auto-refresh off"}
+              </button>
+            </>
+          )}
+          <button
+            className="live btn"
+            onClick={() => setCompareMode(!compareMode)}
+            aria-pressed={compareMode}
+            title="Compare any months side by side, including months Search Console no longer shows"
+          >
+            <span className={`live-dot ${compareMode ? "" : "off"}`} /> {compareMode ? "Compare months: on" : "Compare months: off"}
           </button>
           <button className="btn" onClick={() => signOut({ callbackUrl: "/login" })}>Sign out</button>
         </div>
 
         <nav className="tabs" role="tablist">
-          {tabs.map((t) => (
-            <button key={t.id} role="tab" className="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
-              {t.label}
-            </button>
-          ))}
+          {compareMode
+            ? COMPARE_TABS.map((t) => (
+                <button key={t.id} role="tab" className="tab" aria-selected={ctab === t.id} onClick={() => setCtab(t.id)}>
+                  {t.label}
+                </button>
+              ))
+            : tabs.map((t) => (
+                <button key={t.id} role="tab" className="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
+                  {t.label}
+                </button>
+              ))}
         </nav>
       </header>
 
       <SourcesProvider value={sources}>
         <main>
-          {error && <div className="notice error">{error}</div>}
-          {lookupErr && <div className="notice error">{lookupErr}</div>}
-          {lookup && !gsc && <div className="notice">Loading Search Console data before opening {lookup}…</div>}
           {props && props.gsc.length === 0 && (
             <div className="notice">This Google account has no verified Search Console properties. Sign in with an account that has access.</div>
           )}
 
-          {updated && (
-            <p className="muted" style={{ margin: 0 }}>
-              Updated {updated.toLocaleTimeString()}
-              {gsc && ` · Search data ${gsc.range.startDate} to ${gsc.range.endDate} vs ${gsc.previousRange.startDate} to ${gsc.previousRange.endDate}`}
-              {gsc?.dataThrough && ` · Search Console is complete through ${gsc.dataThrough}`}
-              {ga?.timeZone && ` · GA4 dates in ${ga.timeZone}`}
-              {gsc && " · Every figure has a Source button showing the Google API call behind it."}
-            </p>
-          )}
-
-          {!gsc && !error && needsGsc && (
-            <div className="notice">Loading data for {site || "your properties"}…</div>
-          )}
-
-          {gsc && tab === "overview" && (
-            <Overview
-              gsc={gsc}
-              ga={ga}
-              gaError={gaError}
-              hasGa4={!!ga4}
-              site={site}
-              ga4={ga4} // for "Visits from AI assistants"
-              days={days}
-              compare={compare}
-              aiInbox={aiInboxReady ? aiInbox : null}
-              aiWaiting={aiWaiting || (!!aiInbox && !aiInboxReady)}
-              onAiInboxHandled={aiInboxHandled}
-            />
-          )}
-          {gsc && tab === "rankings" && <Rankings gsc={gsc} site={site} />}
-
-          {site && tab === "indexing" && (
+          {compareMode ? (
+            site && <CompareMode site={site} ga4={ga4} tab={ctab} />
+          ) : (
             <>
-              <IndexReport
-                site={site}
-                inbox={idxInboxReady ? idxInbox : null}
-                waiting={idxWaiting || (!!idxInbox && !idxInboxReady)}
-                onInboxHandled={idxInboxHandled}
-              />
-              <UrlCheck site={site} />
-            </>
-          )}
+              {error && <div className="notice error">{error}</div>}
+              {lookupErr && <div className="notice error">{lookupErr}</div>}
+              {lookup && !gsc && <div className="notice">Loading Search Console data before opening {lookup}…</div>}
 
-          {site && tab === "checks" && <IndexChecks site={site} />}
-          {site && tab === "captures" && <WeeklyCaptures site={site} />}
-          {site && tab === "history" && <History site={site} ga4={ga4} />}
-
-          {site && tab === "crawl" && (
-            <CrawlActivity
-              site={site}
-              inbox={inboxReady ? inbox : null}
-              waiting={inboxWaiting || (!!inbox && !inboxReady)}
-              onInboxHandled={() => {
-                setInbox(null);
-                setInboxWaiting(false);
-              }}
-            />
-          )}
-          {gsc && tab === "queries" && <Queries gsc={gsc} />}
-          {site && tab === "growth" && <QueryGrowth site={site} days={days} compare={compare} />}
-
-          {tab === "audience" && (
-            <>
-              <Audience ga={ga} gaError={gaError} hasGa4={!!ga4} loading={loading} />
-              <section className="section">
-                <h2>Channel drill-down</h2>
-                <p className="lede">
-                  Click a channel to see exactly where its traffic came from: source and medium, landing pages, countries, devices and
-                  campaigns. Rows with many sessions but almost no engagement are usually bots or tracking problems.
+              {updated && (
+                <p className="muted" style={{ margin: 0 }}>
+                  Updated {updated.toLocaleTimeString()}
+                  {gsc && ` · Search data ${gsc.range.startDate} to ${gsc.range.endDate} vs ${gsc.previousRange.startDate} to ${gsc.previousRange.endDate}`}
+                  {gsc?.dataThrough && ` · Search Console is complete through ${gsc.dataThrough}`}
+                  {ga?.timeZone && ` · GA4 dates in ${ga.timeZone}`}
+                  {gsc && " · Every figure has a Source button showing the Google API call behind it."}
                 </p>
-                {ga4 ? <ChannelDrilldown key={`ch-${ga4}-${days}`} propertyId={ga4} days={days} /> : noGa4Notice}
-              </section>
+              )}
+              {previousIncomplete && (
+                <div className="notice" style={{ marginTop: 8 }}>
+                  Search Console keeps about 16 months, so the previous {days} days are only partly available and its change figures
+                  aren&apos;t reliable. To compare older periods, switch on <b>Compare months</b>: it uses your saved history.
+                </div>
+              )}
+
+              {!gsc && !error && needsGsc && (
+                <div className="notice">Loading data for {site || "your properties"}…</div>
+              )}
+
+              {gsc && tab === "overview" && (
+                <Overview
+                  gsc={gsc}
+                  ga={ga}
+                  gaError={gaError}
+                  hasGa4={!!ga4}
+                  site={site}
+                  ga4={ga4} // for "Visits from AI assistants"
+                  days={days}
+                  compare={compare}
+                  aiInbox={aiInboxReady ? aiInbox : null}
+                  aiWaiting={aiWaiting || (!!aiInbox && !aiInboxReady)}
+                  onAiInboxHandled={aiInboxHandled}
+                />
+              )}
+              {gsc && tab === "rankings" && <Rankings gsc={gsc} site={site} />}
+
+              {site && tab === "indexing" && (
+                <>
+                  <IndexReport
+                    site={site}
+                    inbox={idxInboxReady ? idxInbox : null}
+                    waiting={idxWaiting || (!!idxInbox && !idxInboxReady)}
+                    onInboxHandled={idxInboxHandled}
+                  />
+                  <UrlCheck site={site} />
+                </>
+              )}
+
+              {site && tab === "checks" && <IndexChecks site={site} />}
+              {site && tab === "captures" && <WeeklyCaptures site={site} />}
+
+              {site && tab === "crawl" && (
+                <CrawlActivity
+                  site={site}
+                  inbox={inboxReady ? inbox : null}
+                  waiting={inboxWaiting || (!!inbox && !inboxReady)}
+                  onInboxHandled={() => {
+                    setInbox(null);
+                    setInboxWaiting(false);
+                  }}
+                />
+              )}
+              {gsc && tab === "queries" && <Queries gsc={gsc} />}
+              {site && tab === "growth" && <QueryGrowth site={site} days={days} compare={compare} />}
+
+              {tab === "audience" && (
+                <>
+                  <Audience ga={ga} gaError={gaError} hasGa4={!!ga4} loading={loading} />
+                  <section className="section">
+                    <h2>Channel drill-down</h2>
+                    <p className="lede">
+                      Click a channel to see exactly where its traffic came from: source and medium, landing pages, countries, devices and
+                      campaigns. Rows with many sessions but almost no engagement are usually bots or tracking problems.
+                    </p>
+                    {ga4 ? <ChannelDrilldown key={`ch-${ga4}-${days}`} propertyId={ga4} days={days} /> : noGa4Notice}
+                  </section>
+                </>
+              )}
+
+              {tab === "cta" && (
+                <section className="section">
+                  <h2>CTA clicks</h2>
+                  <p className="lede">
+                    Visits to the Buy / License, Request sample, Talk to expert, Customization and Connect pages. Click a CTA to filter every
+                    table below to it: which channel and source the visitor came from, their country, region and city, which report they
+                    were interested in, and the page they clicked from.
+                  </p>
+                  {ga4 ? <CtaSection key={`cta-${ga4}-${days}`} propertyId={ga4} days={days} /> : noGa4Notice}
+                </section>
+              )}
+
+              {site && tab === "audit" && canAudit && <Audit site={site} />}
             </>
           )}
-
-          {tab === "cta" && (
-            <section className="section">
-              <h2>CTA clicks</h2>
-              <p className="lede">
-                Visits to the Buy / License, Request sample, Talk to expert, Customization and Connect pages. Click a CTA to filter every
-                table below to it: which channel and source the visitor came from, their country, region and city, which report they
-                were interested in, and the page they clicked from.
-              </p>
-              {ga4 ? <CtaSection key={`cta-${ga4}-${days}`} propertyId={ga4} days={days} /> : noGa4Notice}
-            </section>
-          )}
-
-          {site && tab === "audit" && canAudit && <Audit site={site} />}
         </main>
       </SourcesProvider>
 
-      {lookup && gsc && (
+      {!compareMode && lookup && gsc && (
         <UrlReport site={site} url={lookup} gsc={gsc} ga4={ga4} days={days} compare={compare} onClose={closeLookup} />
       )}
     </>
