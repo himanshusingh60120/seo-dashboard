@@ -22,8 +22,9 @@ import ChannelDrilldown from "./ChannelDrilldown";
 import Audit from "./Audit";
 import IndexChecks from "./IndexChecks";
 import WeeklyCaptures from "./WeeklyCaptures";
+import History from "./History";
 
-type Tab = "overview" | "rankings" | "indexing" | "checks" | "captures" | "crawl" | "queries" | "growth" | "audience" | "cta" | "audit";
+type Tab = "overview" | "rankings" | "indexing" | "checks" | "captures" | "history" | "crawl" | "queries" | "growth" | "audience" | "cta" | "audit";
 
 const BASE_TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -31,6 +32,7 @@ const BASE_TABS: { id: Tab; label: string }[] = [
   { id: "indexing", label: "Indexing" },
   { id: "checks", label: "Index checks" },
   { id: "captures", label: "Weekly captures" },
+  { id: "history", label: "History" },
   { id: "crawl", label: "Crawl activity" },
   { id: "queries", label: "Queries" },
   { id: "growth", label: "Query growth" },
@@ -122,9 +124,9 @@ export default function Dashboard() {
   }, []);
 
   // Receive data from the old bookmarks. Each opens this page with a "wait" hash first, then the data:
-  //   Copy crawl stats:    #crawl-wait, then #crawlstats=<data>
-  //   Copy AI impressions: #ai-wait,    then #aistats=<data>
-  //   Copy page indexing:  #idx-wait,   then #idxstats=<data>
+  //   Copy crawl stats:     #crawl-wait, then #crawlstats=<data>
+  //   Copy AI impressions:  #ai-wait,    then #aistats=<data>
+  //   Copy page indexing:   #idx-wait,   then #idxstats=<data>
   useEffect(() => {
     const take = () => {
       const h = window.location.hash;
@@ -255,6 +257,28 @@ export default function Dashboard() {
       JSON.stringify({ ...prefs, site, days, compare, searchType, map: { ...(prefs.map || {}), [site]: ga4 } })
     );
   }, [site, ga4, days, compare, searchType]);
+
+  // Save this property's Search Console and GA4 history in the Google Sheets when it's opened (see lib/archive.ts).
+  // The first open of the day does the work in the background; it keeps going while the page stays open.
+  useEffect(() => {
+    if (!site) return;
+    let active = true;
+    (async () => {
+      for (let round = 0; round < 8 && active; round++) {
+        const r = await fetch("/api/archive/refresh", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ site, ga4 }),
+        }).catch(() => null);
+        const j = r && r.ok ? await r.json().catch(() => null) : null;
+        window.dispatchEvent(new Event("archive:updated"));
+        if (!j || j.done) break;
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [site, ga4]);
 
   useEffect(() => {
     if (compare === "yoy" && !yoyAllowed(days)) setCompare("previous");
@@ -446,6 +470,7 @@ export default function Dashboard() {
 
           {site && tab === "checks" && <IndexChecks site={site} />}
           {site && tab === "captures" && <WeeklyCaptures site={site} />}
+          {site && tab === "history" && <History site={site} ga4={ga4} />}
 
           {site && tab === "crawl" && (
             <CrawlActivity
