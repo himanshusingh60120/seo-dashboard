@@ -13,6 +13,9 @@ import { fail } from "@/lib/api";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
+/** Daily rows: periods can be up to 16 months (486 days). */
+const DAILY_LIMIT = 1000;
+
 type Totals = { sessions: number; users: number; engaged: number; keyEvents: number };
 export type AiAssistantRow = {
   name: string;
@@ -70,7 +73,7 @@ export async function GET(req: NextRequest) {
         metrics: metrics(["sessions", "totalUsers", "engagedSessions", "keyEvents"]),
         limit: 200,
       },
-      { dateRanges: [win.current], dimensionFilter: fromAi, dimensions: dims(["date"]), metrics: metrics(["sessions"]), limit: 400 },
+      { dateRanges: [win.current], dimensionFilter: fromAi, dimensions: dims(["date"]), metrics: metrics(["sessions"]), limit: DAILY_LIMIT },
       {
         dateRanges: [win.current],
         dimensionFilter: fromAi,
@@ -104,7 +107,7 @@ export async function GET(req: NextRequest) {
     // Every day of the period, including days with no AI visits.
     const byDay = new Map((r[3] || []).map((row) => [ymd(String(row.date)), row.sessions || 0] as [string, number]));
     const daily: { date: string; sessions: number }[] = [];
-    for (let d = win.current.startDate; d <= win.current.endDate && daily.length < 400; d = addDays(d, 1)) {
+    for (let d = win.current.startDate; d <= win.current.endDate && daily.length < DAILY_LIMIT; d = addDays(d, 1)) {
       daily.push({ date: d, sessions: byDay.get(d) || 0 });
     }
 
