@@ -31,7 +31,7 @@ const BASE_TABS: { id: Tab; label: string }[] = [
   { id: "rankings", label: "Rankings" },
   { id: "indexing", label: "Indexing" },
   { id: "checks", label: "Index checks" },
-  { id: "captures", label: "Weekly captures" },
+  { id: "captures", label: "Weekly captures" }, // capture accounts only (CAPTURE_EMAILS)
   { id: "crawl", label: "Crawl activity" },
   { id: "queries", label: "Queries" },
   { id: "growth", label: "Query growth" },
@@ -151,6 +151,7 @@ export default function Dashboard() {
   const [compareMode, setCompareMode] = useState(false);
   const [ctab, setCtab] = useState<CompareTab>("summary");
   const [canAudit, setCanAudit] = useState(false);
+  const [canCapture, setCanCapture] = useState(false);
   const [gsc, setGsc] = useState<GscData | null>(null);
   const [ga, setGa] = useState<Ga4Data | null>(null);
   const [loading, setLoading] = useState(false);
@@ -192,6 +193,15 @@ export default function Dashboard() {
     fetch("/api/audit/access", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => setCanAudit(!!d?.allowed))
+      .catch(() => {});
+  }, []);
+
+  // The Weekly captures tab is shown only to the people who run the captures (CAPTURE_EMAILS);
+  // its API routes check the account again. Everyone sees who updated each report on the charts themselves.
+  useEffect(() => {
+    fetch("/api/capture/access", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setCanCapture(!!d?.allowed))
       .catch(() => {});
   }, []);
 
@@ -416,7 +426,17 @@ export default function Dashboard() {
     setDays(daysForMonths(m));
   };
 
-  const tabs: { id: Tab; label: string }[] = canAudit ? [...BASE_TABS, { id: "audit", label: "GSC audit (AI)" }] : BASE_TABS;
+  // Tabs this person can see: Weekly captures only for capture accounts, the audit only for the audit account.
+  const tabs: { id: Tab; label: string }[] = [
+    ...BASE_TABS.filter((t) => t.id !== "captures" || canCapture),
+    ...(canAudit ? [{ id: "audit" as Tab, label: "GSC audit (AI)" }] : []),
+  ];
+  // Someone without access never stays on a hidden tab.
+  useEffect(() => {
+    if (!tabs.some((t) => t.id === tab)) setTab("overview");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canCapture, canAudit, tab]);
+
   const noGa4Notice = <div className="notice">Pick a GA4 property in the top bar to see this data.</div>;
   const needsGsc = ["overview", "rankings", "queries"].includes(tab);
   const previousIncomplete = !compareMode && compare === "previous" && days * 2 > MAX_DAYS;
@@ -638,7 +658,7 @@ export default function Dashboard() {
               )}
 
               {site && tab === "checks" && <IndexChecks site={site} />}
-              {site && tab === "captures" && <WeeklyCaptures site={site} />}
+              {site && tab === "captures" && canCapture && <WeeklyCaptures site={site} />}
 
               {site && tab === "crawl" && (
                 <CrawlActivity
