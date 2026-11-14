@@ -3,13 +3,15 @@
 // Google stops showing them (Search Console keeps about 16 months). There's no scheduled job: when someone opens a
 // property in the dashboard, it calls /api/archive/refresh, which brings that property's history up to date using the
 // signed-in person's own Google access. The first open of a Pacific day does the work; later opens return at once.
+// The saved history feeds the dashboard's Compare months mode (lib/compare.ts).
 //
 // Daily totals are two sections (columns) at the far right of each property's tab:
 //   "Search daily"  – clicks, impressions, CTR and position for every day
 //   "Traffic daily" – GA4 active users, new users, sessions, views, engagement and organic sessions for every day
 // Monthly lists each get a tab of their own, placed by lib/sheetParts.ts (which adds continuation Sheets when one fills up):
-//   "Search · 2026-11" – the month's top pages and queries
-//   "GA4 · 2026-11"    – the month's channels, countries and landing pages
+//   "Search · 2026-11" – the month's top pages and queries, all countries and devices
+//   "GA4 · 2026-11"    – the month's totals (GA4's own monthly active users), channels, devices, countries, landing pages
+// Each monthly tab's header row records where each block of rows starts and ends, so readers fetch only what they need.
 //
 // Numbers keep settling after the fact (GA4 goes on processing for a few days), so every update fetches the last 14
 // days again and overwrites them, together with every day missed since the last update. Saving this week therefore
@@ -22,10 +24,9 @@
 import { appendRows, batchRead, controlBook, ensureTab, readRange, tabs, writeRange, type Book, type Row } from "./sheets";
 import { SEC, ensureSections, sectionRange, writeSection } from "./sheetLayout";
 import { findSheet, propertySheet } from "./sheetBooks";
-import { AI_PAGES_PREFIX, partsOf, readTab, writeTab } from "./sheetParts";
+import { AI_PAGES_PREFIX, partsOf, writeTab } from "./sheetParts";
 import { ga4TimeZone, latestFinalDate, runReport, searchAnalyticsAll } from "./google";
 import { GSC_TZ, addDays, todayIn } from "./dates";
-import { HttpError } from "./token";
 
 export const ARCHIVE_TAB = "_Archive";
 const HEADERS = [
@@ -45,7 +46,8 @@ const HISTORY_DAYS = 480;
 const GOOGLE_KEEPS_DAYS = 486;
 /** Top pages and top queries kept per month (each). */
 const ROWS_PER_MONTH = Math.max(1000, Math.min(25_000, Math.floor(Number(process.env.ARCHIVE_ROWS_PER_MONTH) || 10_000)));
-const GA_METRICS = ["activeUsers", "newUsers", "sessions", "screenPageViews", "engagementRate", "averageSessionDuration"];
+const GA_DAILY_METRICS = ["activeUsers", "newUsers", "sessions", "screenPageViews", "engagementRate", "averageSessionDuration"];
+const GA_MONTH_METRICS = ["sessions", "activeUsers", "newUsers", "screenPageViews", "engagementRate", "averageSessionDuration", "keyEvents"];
 const PROBE = { dateRanges: [{ startDate: "yesterday", endDate: "yesterday" }], metrics: [{ name: "sessions" }], limit: 1 };
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -75,6 +77,19 @@ function monthsToRefresh(listsThrough: string, end: string) {
   const out: string[] = [];
   for (let m = monthOf(start); m <= monthOf(end); m = shiftMonth(m, 1)) out.push(m);
   return out;
+}
+
+/** Rows grouped into blocks by type, plus the index of where each block sits ({ Page: [2, 10001], … }, 1-based rows). */
+function blocked(groups: [string, Row[]][]) {
+  const rows: Row[] = [];
+  const blocks: Record<string, [number, number]> = {};
+  for (const [type, list] of groups) {
+    if (!list.length) continue;
+    const start = rows.length + 2;
+    rows.push(...list);
+    blocks[type] = [start, rows.length + 1];
+  }
+  return { rows, index: JSON.stringify({ v: 2, blocks }) };
 }
 
 /* ---------------- _Archive (control Sheet): one row per property ---------------- */
@@ -126,7 +141,7 @@ async function ensureRow(site: string, ga4: string, by: string): Promise<Archive
   return a;
 }
 
-/** Changes a property's GA4 property (History tab). Its saved GA4 daily totals start again for the new property. */
+/** Changes a property's GA4 property. Its saved GA4 daily totals start again for the new property. */
 export async function linkArchive(site: string, ga4: string, by: string) {
   const a = await ensureRow(site, "", by);
   if (a.ga4 === ga4) return;
@@ -167,17 +182,25 @@ async function searchMonth(site: string, token: string, m: string, end: string) 
   const to = minD(monthEnd(m), end);
   if (from > to) return;
   const body = { startDate: from, endDate: to };
-  const [pages, queries] = await Promise.all([
+  const [pages, queries, countries, devices] = await Promise.all([
     searchAnalyticsAll(token, site, { ...body, dimensions: ["page"] }, ROWS_PER_MONTH),
     searchAnalyticsAll(token, site, { ...body, dimensions: ["query"] }, ROWS_PER_MONTH),
+    searchAnalyticsAll(token, site, { ...body, dimensions: ["country"] }, 300),
+    searchAnalyticsAll(token, site, { ...body, dimensions: ["device"] }, 10),
   ]);
   const row = (type: string) => (r: { keys: string[]; clicks: number; impressions: number; ctr: number; position: number }): Row =>
     [type, r.keys[0], r.clicks, r.impressions, round(r.ctr), round(r.position, 2)];
+  const { rows, index } = blocked([
+    ["Page", pages.map(row("Page"))],
+    ["Query", queries.map(row("Query"))],
+    ["Country", countries.map(row("Country"))],
+    ["Device", devices.map(row("Device"))],
+  ]);
   await writeTab(
     site,
     SEARCH_PREFIX + m,
-    ["Type", "Name", "Clicks", "Impressions", "CTR", "Position", `${from} to ${to} · saved ${new Date().toISOString()} · top ${ROWS_PER_MONTH.toLocaleString("en-US")} pages and queries`],
-    [...pages.map(row("Page")), ...queries.map(row("Query"))]
+    ["Type", "Name", "Clicks", "Impressions", "CTR", "Position", `${from} to ${to} · saved ${new Date().toISOString()} · top ${ROWS_PER_MONTH.toLocaleString("en-US")} pages and queries`, index],
+    rows
   );
 }
 
@@ -186,7 +209,7 @@ async function gaDaily(a: ArchiveRow, token: string, book: Book, title: string, 
   const from = a.gDaily ? maxD(earliest, addDays(minD(a.gDaily, yesterday), -(RESTATE_DAYS - 1))) : earliest;
   const range = { startDate: from, endDate: yesterday };
   const [main, organic] = await Promise.all([
-    runReport(token, a.ga4, { dateRanges: [range], dimensions: [{ name: "date" }], metrics: GA_METRICS.map((name) => ({ name })), limit: 1000 }),
+    runReport(token, a.ga4, { dateRanges: [range], dimensions: [{ name: "date" }], metrics: GA_DAILY_METRICS.map((name) => ({ name })), limit: 1000 }),
     runReport(token, a.ga4, {
       dateRanges: [range], dimensions: [{ name: "date" }], metrics: [{ name: "sessions" }],
       dimensionFilter: { filter: { fieldName: "sessionDefaultChannelGroup", stringFilter: { value: "Organic Search" } } },
@@ -211,22 +234,32 @@ async function gaMonth(a: ArchiveRow, token: string, m: string, yesterday: strin
   const from = `${m}-01`;
   const to = minD(monthEnd(m), yesterday);
   if (from > to) return;
-  const q = (dim: string, limit: number) =>
+  const q = (dim: string | null, limit: number) =>
     runReport(token, a.ga4, {
       dateRanges: [{ startDate: from, endDate: to }],
-      dimensions: [{ name: dim }],
-      metrics: [{ name: "sessions" }, { name: "activeUsers" }, { name: "engagementRate" }],
-      orderBys: [{ metric: { metricName: "sessions" }, desc: true }],
+      ...(dim ? { dimensions: [{ name: dim }], orderBys: [{ metric: { metricName: "sessions" }, desc: true }] } : {}),
+      metrics: GA_MONTH_METRICS.map((name) => ({ name })),
       limit,
     });
-  const [channels, countries, landing] = await Promise.all([q("sessionDefaultChannelGroup", 50), q("country", 250), q("landingPage", 5000)]);
-  const rows = (type: string, r: { rows: { dims: string[]; mets: number[] }[] }): Row[] =>
-    r.rows.map((x) => [type, x.dims[0], x.mets[0] ?? 0, x.mets[1] ?? 0, round(x.mets[2] ?? 0)]);
+  const [total, channels, devices, countries, landing] = await Promise.all([
+    q(null, 1), q("sessionDefaultChannelGroup", 50), q("deviceCategory", 10), q("country", 250), q("landingPage", 5000),
+  ]);
+  const row = (type: string, name: string, m2: number[]): Row => [
+    type, name, m2[0] ?? 0, m2[1] ?? 0, m2[2] ?? 0, m2[3] ?? 0, round(m2[4] ?? 0), round(m2[5] ?? 0, 1), m2[6] ?? 0,
+  ];
+  const list = (type: string, r: { rows: { dims: string[]; mets: number[] }[] }) => r.rows.map((x) => row(type, x.dims[0], x.mets));
+  const { rows, index } = blocked([
+    ["Total", total.rows.length ? [row("Total", "All traffic", total.rows[0].mets)] : []],
+    ["Channel", list("Channel", channels)],
+    ["Device", list("Device", devices)],
+    ["Country", list("Country", countries)],
+    ["Landing page", list("Landing page", landing)],
+  ]);
   await writeTab(
     a.site,
     GA4_PREFIX + m,
-    ["Type", "Name", "Sessions", "Active users", "Engagement rate", `GA4 property ${a.ga4} · ${from} to ${to} · saved ${new Date().toISOString()}`],
-    [...rows("Channel", channels), ...rows("Country", countries), ...rows("Landing page", landing)]
+    ["Type", "Name", "Sessions", "Active users", "New users", "Views", "Engagement rate", "Avg session (s)", "Key events", `GA4 property ${a.ga4} · ${from} to ${to} · saved ${new Date().toISOString()}`, index],
+    rows
   );
 }
 
@@ -337,35 +370,25 @@ export async function refreshArchive(o: { site: string; ga4: string; by: string;
   return { done, message: a.message };
 }
 
-/* ---------------- Reading, for the History tab ---------------- */
+/* ---------------- Status ---------------- */
 
-export type SearchDay = { date: string; clicks: number; impressions: number; ctr: number; position: number };
-export type GaDay = {
-  date: string; users: number; newUsers: number; sessions: number; views: number; engagementRate: number; avgSessionSec: number; organicSessions: number;
-};
-
+/** How far the saved history goes for a property, and which Sheets hold it. */
 export async function archiveStatus(site: string) {
   const a = (await readArchive()).find((r) => r.site === site) || null;
   const ref = await findSheet(site);
-  let searchDays: SearchDay[] = [];
-  let gaDays: GaDay[] = [];
-  const names: string[] = [];
   const parts = ref ? await partsOf(site) : [];
+  const names: string[] = [];
+  let searchDays = 0;
+  let gaDays = 0;
   if (ref) {
     const t = (await tabs(ref.book)).get(ref.title);
     if (t && t.cols >= SEC.gaDaily.end) {
       const [sd, gd] = await batchRead(ref.book, [
-        { title: ref.title, range: sectionRange("searchDaily") },
-        { title: ref.title, range: sectionRange("gaDaily") },
+        { title: ref.title, range: `${SEC.searchDaily.L}3:${SEC.searchDaily.L}` },
+        { title: ref.title, range: `${SEC.gaDaily.L}3:${SEC.gaDaily.L}` },
       ]);
-      searchDays = sd
-        .filter((r) => DATE.test(s(r[0])))
-        .map((r) => ({ date: s(r[0]), clicks: n(r[1]), impressions: n(r[2]), ctr: n(r[3]), position: n(r[4]) }));
-      gaDays = gd
-        .filter((r) => DATE.test(s(r[0])))
-        .map((r) => ({
-          date: s(r[0]), users: n(r[1]), newUsers: n(r[2]), sessions: n(r[3]), views: n(r[4]), engagementRate: n(r[5]), avgSessionSec: n(r[6]), organicSessions: n(r[7]),
-        }));
+      searchDays = sd.filter((r) => DATE.test(s(r[0]))).length;
+      gaDays = gd.filter((r) => DATE.test(s(r[0]))).length;
     }
     for (const p of parts) for (const name of (await tabs(p.book)).keys()) names.push(name);
   }
@@ -375,35 +398,10 @@ export async function archiveStatus(site: string) {
       ga4: a.ga4, linkedBy: a.linkedBy, linkedAt: a.linkedAt, searchThrough: a.sDaily, searchFrom: a.sFrom,
       gaThrough: a.gDaily, gaFrom: a.gFrom, lastRun: a.lastRun, lastBy: a.lastBy, message: a.message,
     },
-    searchDaily: searchDays,
-    gaDaily: gaDays,
+    searchDays,
+    gaDays,
     months: { search: months(SEARCH_PREFIX), ga4: months(GA4_PREFIX), ai: months(AI_PAGES_PREFIX) },
     parts: parts.map((p) => ({ part: p.part, url: p.url })),
     googleKeepsFrom: addDays(todayIn(GSC_TZ), -GOOGLE_KEEPS_DAYS),
-  };
-}
-
-/** One saved month: top pages and queries (search), GA4 breakdowns (ga4) or AI pages (ai). */
-export async function archiveMonth(site: string, kind: "search" | "ga4" | "ai", month: string) {
-  const prefix = kind === "search" ? SEARCH_PREFIX : kind === "ga4" ? GA4_PREFIX : AI_PAGES_PREFIX;
-  const rows = await readTab(site, prefix + month, "A1:G");
-  if (!rows) throw new HttpError(404, `Nothing is saved for ${month} yet.`);
-  const [head = [], ...data] = rows;
-  if (kind === "search") {
-    return {
-      note: s(head[6]),
-      rows: data.filter((r) => s(r[1])).map((r) => ({ type: s(r[0]), name: s(r[1]), clicks: n(r[2]), impressions: n(r[3]), ctr: n(r[4]), position: n(r[5]) })),
-    };
-  }
-  if (kind === "ga4") {
-    return {
-      note: s(head[5]),
-      rows: data.filter((r) => s(r[1])).map((r) => ({ type: s(r[0]), name: s(r[1]), sessions: n(r[2]), users: n(r[3]), engagementRate: n(r[4]) })),
-    };
-  }
-  const first = data[0] || [];
-  return {
-    note: first.length ? `${s(first[0])} to ${s(first[1])} · saved ${s(first[2]).slice(0, 16).replace("T", " ")} UTC` : "",
-    rows: data.filter((r) => s(r[5])).map((r) => ({ type: "Page", name: s(r[5]), impressions: n(r[6]) })),
   };
 }
