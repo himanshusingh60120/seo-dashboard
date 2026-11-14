@@ -1,0 +1,445 @@
+// lib/compare.ts
+// Month-by-month comparisons from the saved history (lib/archive.ts), for the dashboard's Compare months mode.
+// Everything comes from the Google Sheets, so months Search Console no longer shows can be compared too.
+//
+// How the numbers are put together, so they match Google:
+// - Search Console clicks and impressions are added up from the saved daily totals; CTR = clicks ÷ impressions;
+//   average position is weighted by impressions (exactly how Search Console averages over a date range).
+// - GA4 sessions, new users, views and key events are added up; engagement rate and average session duration are
+//   weighted by sessions. Active users can't be added up (the same person visits in several months): one month uses
+//   GA4's own monthly figure, several months in a row are asked from GA4 directly, anything else is a labelled sum.
+// - Pages, queries and landing pages come from each month's saved lists (each month's top 1,000 are read); countries,
+//   devices and channels are read in full. Totals always come from the daily data, so they're exact.
+// - AI page lists cover the date range of the capture they came from, so they're shown per capture, never added up.
+// Server-only.
+import { batchRead, colLetter, tabs, type Book, type Row } from "./sheets";
+import { SEC, sectionRange, type SectionKey } from "./sheetLayout";
+import { findSheet } from "./sheetBooks";
+import { AI_PAGES_PREFIX, listTabs, type Part } from "./sheetParts";
+import { GA4_PREFIX, SEARCH_PREFIX, readArchive } from "./archive";
+import { IDX_LABEL } from "./indexStats";
+import { runReport } from "./google";
+import { GSC_TZ, addDays, todayIn } from "./dates";
+
+const GOOGLE_KEEPS_DAYS = 486;
+/** Rows read per month for long lists (pages, queries, landing pages). */
+const TOP_PER_MONTH = 1000;
+/** Rows sent per list per period. */
+const OUT_LIMIT = 1000;
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
+export const MONTH = /^\d{4}-\d{2}$/;
+
+const s = (v: unknown) => (v == null ? "" : String(v).trim());
+const n = (v: unknown) => {
+  const x = Number(v);
+  return Number.isFinite(x) ? x : 0;
+};
+const monthOf = (d: string) => d.slice(0, 7);
+const shiftMonth = (m: string, k: number) => {
+  const [y, mo] = m.split("-").map(Number);
+  const t = y * 12 + (mo - 1) + k;
+  return `${Math.floor(t / 12)}-${String((t % 12) + 1).padStart(2, "0")}`;
+};
+const monthEnd = (m: string) => addDays(`${shiftMonth(m, 1)}-01`, -1);
+const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+export type SearchTotals = { clicks: number; impressions: number; ctr: number; position: number; days: number };
+export type GaTotals = {
+  users: number; usersExact: boolean; newUsers: number; sessions: number; views: number; engagementRate: number;
+  avgSessionSec: number; keyEvents: number | null; organicSessions: number; days: number;
+};
+export type MonthRow = {
+  month: string; from: string; through: string; partial: boolean; onlyHere: boolean;
+  search: SearchTotals | null; ga: GaTotals | null; ai: number | null; crawl: number | null;
+  indexed: number | null; notIndexed: number | null; indexedAsOf: string;
+};
+export type SearchItem = { name: string; clicks: number; impressions: number; ctr: number; position: number };
+export type GaItem = { name: string; sessions: number; users: number; newUsers: number; views: number; engagementRate: number; avgSessionSec: number; keyEvents: number };
+export type AiItem = { name: string; impressions: number };
+export type DailyPoint = { date: string; clicks: number | null; impressions: number | null; sessions: number | null; users: number | null };
+export type Group = {
+  months: string[]; partial: boolean; onlyHere: number; notes: string[];
+  search: SearchTotals | null; ga: GaTotals | null; ai: number | null; crawl: number | null;
+  indexed: number | null; notIndexed: number | null; indexedAsOf: string;
+  pages: SearchItem[]; queries: SearchItem[]; countries: SearchItem[]; devices: SearchItem[];
+  channels: GaItem[]; gaCountries: GaItem[]; gaDevices: GaItem[]; landing: GaItem[];
+  aiPages: { from: string; to: string; items: AiItem[] } | null;
+  daily: DailyPoint[];
+};
+
+type SDay = { date: string; clicks: number; impressions: number; position: number };
+type GDay = { date: string; users: number; newUsers: number; sessions: number; views: number; er: number; avg: number; organic: number };
+type GaTotalRow = { sessions: number; users: number; newUsers: number; views: number; er: number; avg: number; keyEvents: number };
+type TabRef = { name: string; part: Part };
+type Req = { part: Part; title: string; tag: string; range: (meta: { rows: number; cols: number }) => string };
+
+/* ---------------- Reading ---------------- */
+
+/** Reads many ranges from many tabs, fitted to each tab's size (Google rejects ranges outside the grid). */
+async function readMany(reqs: Req[]): Promise<Map<string, Row[]>> {
+  const out = new Map<string, Row[]>();
+  const byBook = new Map<Book, { title: string; range: string; tag: string }[]>();
+  for (const r of reqs) {
+    const meta = (await tabs(r.part.book)).get(r.title);
+    if (!meta) continue;
+    const list = byBook.get(r.part.book) || [];
+    list.push({ title: r.title, range: r.range(meta), tag: r.tag });
+    byBook.set(r.part.book, list);
+  }
+  for (const [book, list] of byBook) {
+    for (let i = 0; i < list.length; i += 40) {
+      const chunk = list.slice(i, i + 40);
+      const got = await batchRead(book, chunk.map((c) => ({ title: c.title, range: c.range })));
+      chunk.forEach((c, k) => out.set(c.tag, got[k] || []));
+    }
+  }
+  return out;
+}
+
+/** { Page: [2, 10001], … } from a monthly tab's header cell, or null for tabs written before the index existed. */
+function blocksOf(v: unknown): Record<string, [number, number]> | null {
+  try {
+    const o = JSON.parse(s(v));
+    const b = o && typeof o === "object" ? o.blocks : null;
+    if (!b || typeof b !== "object") return null;
+    const out: Record<string, [number, number]> = {};
+    for (const [k, x] of Object.entries(b)) {
+      if (Array.isArray(x) && x.length === 2 && x.every((y) => Number.isInteger(y) && y >= 2)) out[k] = [x[0], x[1]];
+    }
+    return Object.keys(out).length ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+type MonthTab = { month: string; head: Row; byType: Map<string, Row[]> };
+
+/** Reads monthly tabs: the header, then each block (long blocks only up to their limit). */
+async function readMonthTabs(items: TabRef[], prefix: string, dataCols: number, indexCol: number, limits: Record<string, number>): Promise<MonthTab[]> {
+  if (!items.length) return [];
+  const heads = await readMany(
+    items.map((it) => ({ part: it.part, title: it.name, tag: it.name, range: (m) => `A1:${colLetter(Math.min(m.cols, indexCol + 1))}1` }))
+  );
+  const reqs: Req[] = [];
+  const byName = new Map<string, MonthTab>();
+  for (const it of items) {
+    const head = heads.get(it.name)?.[0] || [];
+    byName.set(it.name, { month: it.name.slice(prefix.length), head, byType: new Map() });
+    const blocks = blocksOf(head[indexCol]);
+    if (blocks) {
+      for (const [type, [a, b]] of Object.entries(blocks)) {
+        const end = Math.min(b, a + (limits[type] ?? Infinity) - 1);
+        reqs.push({ part: it.part, title: it.name, tag: `${it.name}\u0000${type}`, range: (m) => `A${a}:${colLetter(Math.min(m.cols, dataCols))}${Math.min(end, m.rows)}` });
+      }
+    } else {
+      reqs.push({ part: it.part, title: it.name, tag: `${it.name}\u0000`, range: (m) => `A2:${colLetter(Math.min(m.cols, dataCols))}` });
+    }
+  }
+  const got = await readMany(reqs);
+  for (const [tag, rows] of got) {
+    const [name, type] = tag.split("\u0000");
+    const entry = byName.get(name);
+    if (!entry) continue;
+    for (const r of rows) {
+      const t = type || s(r[0]);
+      if (!t || s(r[0]) !== t) continue;
+      const list = entry.byType.get(t) || [];
+      if (list.length >= (limits[t] ?? Infinity)) continue;
+      list.push(r);
+      entry.byType.set(t, list);
+    }
+  }
+  return [...byName.values()];
+}
+
+/** The property tab's saved daily data and weekly reports. */
+async function mainData(book: Book, title: string) {
+  const t = (await tabs(book)).get(title);
+  const keys: SectionKey[] = ["ai", "crawl", "pages"];
+  if (t && t.cols >= SEC.gaDaily.end) keys.push("searchDaily", "gaDaily");
+  const got = await batchRead(book, keys.map((k) => ({ title, range: sectionRange(k) })));
+  const part = (k: SectionKey) => got[keys.indexOf(k)] || [];
+
+  const search: SDay[] = part("searchDaily")
+    .filter((r) => DATE.test(s(r[0])))
+    .map((r) => ({ date: s(r[0]), clicks: n(r[1]), impressions: n(r[2]), position: n(r[4]) }));
+  const ga: GDay[] = part("gaDaily")
+    .filter((r) => DATE.test(s(r[0])))
+    .map((r) => ({ date: s(r[0]), users: n(r[1]), newUsers: n(r[2]), sessions: n(r[3]), views: n(r[4]), er: n(r[5]), avg: n(r[6]), organic: n(r[7]) }));
+  const ai = new Map<string, number>();
+  for (const r of part("ai")) if (DATE.test(s(r[0]))) ai.set(s(r[0]), n(r[1]));
+
+  // Crawl requests per day: "All crawl requests", or Refresh + Discovery when only those were captured.
+  const total = new Map<string, number>(), refresh = new Map<string, number>(), discovery = new Map<string, number>();
+  for (const r of part("crawl")) {
+    const key = s(r[0]), d = s(r[2]);
+    if (!DATE.test(d)) continue;
+    if (key === "total") total.set(d, n(r[3]));
+    else if (key === "refresh") refresh.set(d, n(r[3]));
+    else if (key === "discovery") discovery.set(d, n(r[3]));
+  }
+  const crawl = new Map<string, number>();
+  for (const d of new Set([...total.keys(), ...refresh.keys()])) {
+    const v = total.get(d) ?? (refresh.has(d) && discovery.has(d) ? refresh.get(d)! + discovery.get(d)! : undefined);
+    if (v != null) crawl.set(d, v);
+  }
+  const idx = new Map<string, { indexed: number; notIndexed: number }>();
+  for (const r of part("pages")) if (s(r[0]) === IDX_LABEL.ALL_URLS && DATE.test(s(r[1]))) idx.set(s(r[1]), { indexed: n(r[2]), notIndexed: n(r[3]) });
+  return { search, ga, ai, crawl, idx };
+}
+
+/* ---------------- Adding up ---------------- */
+
+function searchTotals(days: SDay[]): SearchTotals | null {
+  if (!days.length) return null;
+  const clicks = sum(days.map((d) => d.clicks));
+  const impressions = sum(days.map((d) => d.impressions));
+  const pw = sum(days.map((d) => d.position * d.impressions));
+  return { clicks, impressions, ctr: impressions ? clicks / impressions : 0, position: impressions ? pw / impressions : 0, days: days.length };
+}
+
+function gaTotals(days: GDay[], total?: GaTotalRow): GaTotals | null {
+  const organic = sum(days.map((d) => d.organic));
+  if (total) {
+    return {
+      users: total.users, usersExact: true, newUsers: total.newUsers, sessions: total.sessions, views: total.views,
+      engagementRate: total.er, avgSessionSec: total.avg, keyEvents: total.keyEvents, organicSessions: organic, days: days.length,
+    };
+  }
+  if (!days.length) return null;
+  const sessions = sum(days.map((d) => d.sessions));
+  return {
+    users: sum(days.map((d) => d.users)), usersExact: days.length === 1, newUsers: sum(days.map((d) => d.newUsers)), sessions,
+    views: sum(days.map((d) => d.views)),
+    engagementRate: sessions ? sum(days.map((d) => d.er * d.sessions)) / sessions : 0,
+    avgSessionSec: sessions ? sum(days.map((d) => d.avg * d.sessions)) / sessions : 0,
+    keyEvents: null, organicSessions: organic, days: days.length,
+  };
+}
+
+function combineGa(list: GaTotals[]): GaTotals | null {
+  if (!list.length) return null;
+  const sessions = sum(list.map((x) => x.sessions));
+  return {
+    users: sum(list.map((x) => x.users)),
+    usersExact: list.length === 1 && list[0].usersExact,
+    newUsers: sum(list.map((x) => x.newUsers)),
+    sessions,
+    views: sum(list.map((x) => x.views)),
+    engagementRate: sessions ? sum(list.map((x) => x.engagementRate * x.sessions)) / sessions : 0,
+    avgSessionSec: sessions ? sum(list.map((x) => x.avgSessionSec * x.sessions)) / sessions : 0,
+    keyEvents: list.every((x) => x.keyEvents != null) ? sum(list.map((x) => x.keyEvents ?? 0)) : null,
+    organicSessions: sum(list.map((x) => x.organicSessions)),
+    days: sum(list.map((x) => x.days)),
+  };
+}
+
+function searchItems(lists: Row[][]): SearchItem[] {
+  const m = new Map<string, { c: number; i: number; pw: number }>();
+  for (const rows of lists) {
+    for (const r of rows) {
+      const name = s(r[1]);
+      if (!name) continue;
+      const e = m.get(name) || { c: 0, i: 0, pw: 0 };
+      const imp = n(r[3]);
+      e.c += n(r[2]);
+      e.i += imp;
+      e.pw += n(r[5]) * imp;
+      m.set(name, e);
+    }
+  }
+  return [...m.entries()]
+    .map(([name, e]) => ({ name, clicks: e.c, impressions: e.i, ctr: e.i ? e.c / e.i : 0, position: e.i ? e.pw / e.i : 0 }))
+    .sort((a, b) => b.clicks - a.clicks || b.impressions - a.impressions)
+    .slice(0, OUT_LIMIT);
+}
+
+function gaItems(lists: { rows: Row[]; v2: boolean }[]): GaItem[] {
+  const m = new Map<string, { s: number; u: number; nu: number; v: number; erw: number; avgw: number; k: number }>();
+  for (const { rows, v2 } of lists) {
+    for (const r of rows) {
+      const name = s(r[1]);
+      if (!name) continue;
+      const e = m.get(name) || { s: 0, u: 0, nu: 0, v: 0, erw: 0, avgw: 0, k: 0 };
+      const sessions = n(r[2]);
+      e.s += sessions;
+      e.u += n(r[3]);
+      if (v2) {
+        e.nu += n(r[4]);
+        e.v += n(r[5]);
+        e.erw += n(r[6]) * sessions;
+        e.avgw += n(r[7]) * sessions;
+        e.k += n(r[8]);
+      } else {
+        e.erw += n(r[4]) * sessions;
+      }
+      m.set(name, e);
+    }
+  }
+  return [...m.entries()]
+    .map(([name, e]) => ({
+      name, sessions: e.s, users: e.u, newUsers: e.nu, views: e.v,
+      engagementRate: e.s ? e.erw / e.s : 0, avgSessionSec: e.s ? e.avgw / e.s : 0, keyEvents: e.k,
+    }))
+    .sort((a, b) => b.sessions - a.sessions)
+    .slice(0, OUT_LIMIT);
+}
+
+/** Active users for consecutive months, asked from GA4 itself (users can't be added up across months). */
+async function liveUsers(token: string, ga4: string, from: string, to: string): Promise<number | null> {
+  try {
+    const r = await runReport(token, ga4, { dateRanges: [{ startDate: from, endDate: to }], metrics: [{ name: "activeUsers" }] });
+    const v = r.rows[0]?.mets[0];
+    return Number.isFinite(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+const isRun = (ms: string[]) => ms.every((m, i) => i === 0 || shiftMonth(ms[i - 1], 1) === m);
+const mName = (m: string) => new Date(`${m}-01T00:00:00Z`).toLocaleDateString("en-GB", { month: "short", year: "numeric", timeZone: "UTC" });
+
+/* ---------------- The comparison ---------------- */
+
+export async function compareData(site: string, aMonths: string[], bMonths: string[], token: string) {
+  const keeps = addDays(todayIn(GSC_TZ), -GOOGLE_KEEPS_DAYS);
+  const arch = (await readArchive()).find((r) => r.site === site) || null;
+  const ga4 = arch?.ga4 || "";
+  const ref = await findSheet(site);
+  if (!ref) return { timeline: [] as MonthRow[], googleKeepsFrom: keeps, ga4, a: null, b: null };
+
+  const main = await mainData(ref.book, ref.title);
+  const [searchTabs, gaTabs, aiTabs] = await Promise.all([listTabs(site, SEARCH_PREFIX), listTabs(site, GA4_PREFIX), listTabs(site, AI_PAGES_PREFIX)]);
+
+  // GA4's own monthly totals (first row of each month's tab).
+  const gaHeads = await readMany(
+    gaTabs.map((t) => ({ part: t.part, title: t.name, tag: t.name, range: (m) => `A1:${colLetter(Math.min(m.cols, 9))}2` }))
+  );
+  const gaTotal = new Map<string, GaTotalRow>();
+  for (const [name, rows] of gaHeads) {
+    const h = rows[0] || [], r = rows[1] || [];
+    if (s(h[4]) === "New users" && s(r[0]) === "Total") {
+      gaTotal.set(name.slice(GA4_PREFIX.length), { sessions: n(r[2]), users: n(r[3]), newUsers: n(r[4]), views: n(r[5]), er: n(r[6]), avg: n(r[7]), keyEvents: n(r[8]) });
+    }
+  }
+
+  // One row per month with any saved data.
+  const months = new Set<string>();
+  for (const d of main.search) months.add(monthOf(d.date));
+  for (const d of main.ga) months.add(monthOf(d.date));
+  for (const d of main.ai.keys()) months.add(monthOf(d));
+  for (const d of main.crawl.keys()) months.add(monthOf(d));
+  for (const d of main.idx.keys()) months.add(monthOf(d));
+  for (const t of [...searchTabs, ...gaTabs]) months.add(t.name.slice(t.name.indexOf("·") + 2));
+  const byMonth = <T extends { date: string }>(list: T[], m: string) => list.filter((d) => monthOf(d.date) === m);
+  const mapMonth = (map: Map<string, number>, m: string) => {
+    const vals = [...map.entries()].filter(([d]) => monthOf(d) === m).map(([, v]) => v);
+    return vals.length ? sum(vals) : null;
+  };
+  const timeline: MonthRow[] = [...months]
+    .filter((m) => MONTH.test(m))
+    .sort()
+    .map((m) => {
+      const sd = byMonth(main.search, m);
+      const gd = byMonth(main.ga, m);
+      const dates = [...sd.map((d) => d.date), ...gd.map((d) => d.date)].sort();
+      const from = dates[0] || "";
+      const through = dates[dates.length - 1] || "";
+      const idxDays = [...main.idx.keys()].filter((d) => monthOf(d) === m).sort();
+      const lastIdx = idxDays[idxDays.length - 1];
+      return {
+        month: m, from, through,
+        partial: !!from && (from > `${m}-01` || through < monthEnd(m)),
+        onlyHere: monthEnd(m) < keeps,
+        search: searchTotals(sd),
+        ga: gaTotals(gd, gaTotal.get(m)),
+        ai: mapMonth(main.ai, m),
+        crawl: mapMonth(main.crawl, m),
+        indexed: lastIdx ? main.idx.get(lastIdx)!.indexed : null,
+        notIndexed: lastIdx ? main.idx.get(lastIdx)!.notIndexed : null,
+        indexedAsOf: lastIdx || "",
+      };
+    });
+  const tl = new Map(timeline.map((t) => [t.month, t]));
+
+  const group = async (wanted: string[]): Promise<Group | null> => {
+    const ms = [...new Set(wanted)].filter((m) => MONTH.test(m)).sort();
+    if (!ms.length) return null;
+    const set = new Set(ms);
+    const rows = ms.map((m) => tl.get(m)).filter((x): x is MonthRow => !!x);
+    const notes: string[] = [];
+
+    const search = searchTotals(main.search.filter((d) => set.has(monthOf(d.date))));
+    let ga = combineGa(rows.map((r) => r.ga).filter((x): x is GaTotals => !!x));
+    if (ga && ms.length > 1 && isRun(ms) && ga4) {
+      const last = rows[rows.length - 1];
+      const to = last?.through && last.through < monthEnd(last.month) ? last.through : monthEnd(ms[ms.length - 1]);
+      const users = await liveUsers(token, ga4, `${ms[0]}-01`, to);
+      if (users != null) ga = { ...ga, users, usersExact: true };
+    }
+    if (ga && !ga.usersExact) notes.push("Active users is the sum of each month's users: the same person can be counted in more than one month.");
+
+    const withIdx = rows.filter((r) => r.indexed != null);
+    const lastIdx = withIdx[withIdx.length - 1];
+    const aiVals = rows.map((r) => r.ai).filter((x): x is number => x != null);
+    const crawlVals = rows.map((r) => r.crawl).filter((x): x is number => x != null);
+
+    // Lists from the monthly tabs.
+    const sTabs = await readMonthTabs(searchTabs.filter((t) => set.has(t.name.slice(SEARCH_PREFIX.length))), SEARCH_PREFIX, 6, 7, { Page: TOP_PER_MONTH, Query: TOP_PER_MONTH });
+    const gTabs = await readMonthTabs(gaTabs.filter((t) => set.has(t.name.slice(GA4_PREFIX.length))), GA4_PREFIX, 9, 10, { "Landing page": TOP_PER_MONTH });
+    const sList = (type: string) => sTabs.map((t) => t.byType.get(type) || []);
+    const gList = (type: string) => gTabs.map((t) => ({ rows: t.byType.get(type) || [], v2: s(t.head[4]) === "New users" }));
+    if (sTabs.length) notes.push(`Pages and queries: each month's top ${TOP_PER_MONTH.toLocaleString("en-US")} by clicks, added up over the selected months.`);
+    const missingLists = ms.filter((m) => !sTabs.some((t) => t.month === m));
+    if (missingLists.length) notes.push(`No saved page and query lists for ${missingLists.map(mName).join(", ")}; totals still include those months.`);
+
+    // AI pages: the latest capture inside the selected months (captures cover their own date range, so never added up).
+    let aiPages: Group["aiPages"] = null;
+    const aiTab = aiTabs.filter((t) => set.has(t.name.slice(AI_PAGES_PREFIX.length))).sort((x, y) => y.name.localeCompare(x.name))[0];
+    if (aiTab) {
+      const got = await readMany([{ part: aiTab.part, title: aiTab.name, tag: "ai", range: () => "A2:G" }]);
+      const r = got.get("ai") || [];
+      if (r.length) {
+        aiPages = {
+          from: s(r[0][0]), to: s(r[0][1]),
+          items: r.filter((x) => s(x[5])).map((x) => ({ name: s(x[5]), impressions: n(x[6]) })).sort((a, b) => b.impressions - a.impressions).slice(0, OUT_LIMIT),
+        };
+      }
+    }
+
+    const partial = rows.some((r) => r.partial);
+    if (partial) {
+      notes.push(
+        `Part-month data: ${rows.filter((r) => r.partial).map((r) => `${mName(r.month)} (${r.from} to ${r.through})`).join(", ")}.`
+      );
+    }
+    const onlyHere = rows.filter((r) => r.onlyHere).length;
+    if (onlyHere) notes.push(`${onlyHere} of these months are no longer in Search Console; they come from your saved history.`);
+
+    // Day-by-day, for lining up the two periods.
+    const sDay = new Map(main.search.filter((d) => set.has(monthOf(d.date))).map((d) => [d.date, d]));
+    const gDay = new Map(main.ga.filter((d) => set.has(monthOf(d.date))).map((d) => [d.date, d]));
+    const daily: DailyPoint[] = [...new Set([...sDay.keys(), ...gDay.keys()])].sort().map((date) => ({
+      date,
+      clicks: sDay.get(date)?.clicks ?? null,
+      impressions: sDay.get(date)?.impressions ?? null,
+      sessions: gDay.get(date)?.sessions ?? null,
+      users: gDay.get(date)?.users ?? null,
+    }));
+
+    return {
+      months: ms, partial, onlyHere, notes,
+      search, ga,
+      ai: aiVals.length ? sum(aiVals) : null,
+      crawl: crawlVals.length ? sum(crawlVals) : null,
+      indexed: lastIdx?.indexed ?? null, notIndexed: lastIdx?.notIndexed ?? null, indexedAsOf: lastIdx?.indexedAsOf || "",
+      pages: searchItems(sList("Page")), queries: searchItems(sList("Query")),
+      countries: searchItems(sList("Country")), devices: searchItems(sList("Device")),
+      channels: gaItems(gList("Channel")), gaCountries: gaItems(gList("Country")), gaDevices: gaItems(gList("Device")), landing: gaItems(gList("Landing page")),
+      aiPages, daily,
+    };
+  };
+
+  const [a, b] = await Promise.all([group(aMonths), group(bMonths)]);
+  return { timeline, googleKeepsFrom: keeps, ga4, a, b };
+}
