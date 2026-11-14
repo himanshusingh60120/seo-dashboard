@@ -1,18 +1,22 @@
 // lib/reportStore.ts
 // Search Console reports that have no API (Page indexing, Crawl stats, the Generative AI report), kept with their full
 // history in sections of the property's own Google Sheet (see lib/sheetBooks.ts and lib/sheetLayout.ts):
-//   Page indexing · Google's report   one row per view and day: Indexed, Not indexed, Impressions
-//   Why pages aren't indexed          the reasons table, one block per update
-//   Crawl stats                       one row per series (All / Refresh / Discovery / other) and day
-//   Crawled URLs                      example crawled URLs (from Crawl stats exports)
-//   AI impressions                    one row per day
-//   AI pages, countries, devices      one block per update
+// Page indexing · Google's report   one row per view and day: Indexed, Not indexed, Impressions
+// Why pages aren't indexed          the reasons table, one block per update
+// Crawl stats                       one row per series (All / Refresh / Discovery / other) and day
+// Crawled URLs                      example crawled URLs (from Crawl stats exports)
+// AI impressions                    one row per day
+// AI countries and devices          one block per update
+// AI pages                          one tab per month ("AI pages · 2026-11") with the month's latest page list, so the
+//                                   main tab doesn't grow by 1,000 rows every week (lib/sheetParts.ts places the tabs
+//                                   and adds continuation Sheets when one fills up)
 // plus the hidden _Updates tab in the control Sheet (who saved what, and when, for all properties).
 // The dashboard still receives the same shapes (IdxStore, CrawlStore, AiStore), so its screens don't change.
 // Server-only.
 import { appendRows, batchRead, controlBook, ensureTab, tabs, type Row } from "./sheets";
 import { assertLayout, sectionRange, writeSection, type SectionKey } from "./sheetLayout";
 import { findSheet, propertySheet } from "./sheetBooks";
+import { AI_PAGES_PREFIX, listTabs, readTabs, writeTab } from "./sheetParts";
 import { writeOverview } from "./overview";
 import { IDX_LABEL, IDX_VIEWS, emptyIdxStore, mergeIdx, type IdxImport, type IdxParsed, type IdxStore, type IdxView, type IdxViewData } from "./indexStats";
 import { emptyAiStore, mergeAi, type AiImport, type AiParsed, type AiSnapshot, type AiStore } from "./aiStore";
@@ -330,16 +334,54 @@ export async function clearCrawl(site: string, by: string) {
 
 /* ---------- AI impressions (Generative AI report) ---------- */
 
+const AI_PAGE_HEADERS = ["From", "To", "Saved at", "By", "Source", "Page", "AI impressions"];
+
+/**
+ * Page lists go into one tab per month ("AI pages · 2026-11"), holding the month's most recent list, so the main tab
+ * doesn't grow by 1,000 rows every week. A tab is only rewritten when a newer update arrived for that month. Lists
+ * kept in the main tab by earlier versions move to their month's tab the next time anything is saved.
+ */
+async function saveAiPages(site: string, snaps: AiSnapshot[]) {
+  const latest = new Map<string, AiSnapshot>();
+  for (const x of snaps) {
+    if (!DATE.test(x.to) || !Object.keys(x.pages || {}).length) continue;
+    const m = x.to.slice(0, 7);
+    const cur = latest.get(m);
+    if (!cur || String(x.importedAt) > String(cur.importedAt)) latest.set(m, x);
+  }
+  if (!latest.size) return;
+  const saved = await readTabs(await listTabs(site, AI_PAGES_PREFIX), "C2:C2");
+  for (const [m, x] of latest) {
+    const name = AI_PAGES_PREFIX + m;
+    if (s(saved.get(name)?.[0]?.[0]) === s(x.importedAt)) continue;
+    const rows: Row[] = Object.entries(x.pages)
+      .sort((a, b) => b[1] - a[1])
+      .map(([page, v]) => [x.from, x.to, x.importedAt, x.by || "", x.file, page, v]);
+    await writeTab(site, name, AI_PAGE_HEADERS, rows);
+  }
+}
+
+/** Page rows from every month's tab, in the same shape as the main tab's rows. */
+async function aiPageRows(site: string): Promise<Row[]> {
+  const have = await listTabs(site, AI_PAGES_PREFIX);
+  if (!have.length) return [];
+  const out: Row[] = [];
+  for (const rows of (await readTabs(have, "A2:G")).values()) {
+    for (const r of rows) out.push([r[0], r[1], r[2], r[3], r[4], "Page", r[5], r[6]]);
+  }
+  return out;
+}
+
 async function writeAi(site: string, store: AiStore, by: string) {
   const { book, title } = await propertySheet(site, by);
   const days: Row[] = Object.keys(store.days).sort().map((d) => [d, store.days[d]]);
   const split: Row[] = [];
   for (const x of store.snapshots) {
     const head: Row = [x.from, x.to, x.importedAt, x.by || "", x.file];
-    for (const [k, v] of Object.entries(x.pages)) split.push([...head, "Page", k, v]);
     for (const [k, v] of Object.entries(x.countries)) split.push([...head, "Country", k, v]);
     for (const [k, v] of Object.entries(x.devices)) split.push([...head, "Device", k, v]);
   }
+  await saveAiPages(site, store.snapshots); // first, so no page list is lost if a later step fails
   await writeSection(book, title, "ai", days);
   await writeSection(book, title, "aiSplit", split);
 }
@@ -350,13 +392,14 @@ export function loadAi(site: string, fresh = false): Promise<AiStore> {
       parts: [rows, split],
       log,
     } = await readProperty(site, ["ai", "aiSplit"], fresh);
+    const pageRows = await aiPageRows(site).catch(() => [] as Row[]);
     const store = emptyAiStore();
     for (const r of rows) {
       const d = s(r[0]);
       if (DATE.test(d)) store.days[d] = n(r[1]);
     }
     const snaps = new Map<string, AiSnapshot>();
-    for (const r of split) {
+    for (const r of [...split, ...pageRows]) {
       const from = s(r[0]), to = s(r[1]), at = s(r[2]), name = s(r[6]);
       if (!DATE.test(from) || !DATE.test(to) || !name) continue;
       const k = `${from}|${to}|${at}`;
