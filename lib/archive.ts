@@ -13,11 +13,13 @@
 //   "GA4 · 2026-11"    – the month's totals (GA4's own monthly active users), channels, devices, countries, landing pages
 // Each monthly tab's header row records where each block of rows starts and ends, so readers fetch only what they need.
 //
+// Order of work on each update (so GA4 never waits for the long Search Console backfill):
+//   1. Search Console: latest days and the current months' lists
+//   2. GA4: latest days and the current months' lists
+//   3. Search Console: older months, back to the 16 months Google still has
+//   4. GA4: older months, back as far
 // Numbers keep settling after the fact (GA4 goes on processing for a few days), so every update fetches the last 14
-// days again and overwrites them, together with every day missed since the last update. Saving this week therefore
-// refreshes last week too, and a property nobody opened for a while catches up on its next open (as long as Google
-// still has those days: about 16 months for Search Console). The first opens also fill in the 16 months Google still
-// has, a few months per request, until the history is complete.
+// days again and overwrites them, together with every day missed since the last update.
 //
 // The control Sheet's hidden _Archive tab has one row per property: its GA4 property and how far the history goes.
 // Server-only.
@@ -52,10 +54,6 @@ const PROBE = { dateRanges: [{ startDate: "yesterday", endDate: "yesterday" }], 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 const s = (v: unknown) => (v == null ? "" : String(v).trim());
-const n = (v: unknown) => {
-  const x = Number(v);
-  return Number.isFinite(x) ? x : 0;
-};
 const round = (x: number, d = 4) => Math.round(x * 10 ** d) / 10 ** d;
 const minD = (a: string, b: string) => (a < b ? a : b);
 const maxD = (a: string, b: string) => (a > b ? a : b);
@@ -263,20 +261,45 @@ async function gaMonth(a: ArchiveRow, token: string, m: string, yesterday: strin
   );
 }
 
-/** Search Console part of an update. Returns false if it ran out of time (the dashboard then asks again). */
-async function searchPart(a: ArchiveRow, token: string, book: Book, title: string, end: string, day: string, timeLeft: () => boolean) {
-  if (a.sDay !== day || !a.sDaily) {
-    await searchDaily(a, token, book, title, end);
+/* ---------------- The four steps of an update ---------------- */
+// Each returns false if it ran out of time (the dashboard then asks again).
+
+/** Step 1: Search Console's latest days and the current months' lists (once per Pacific day). */
+async function searchRecent(a: ArchiveRow, token: string, book: Book, title: string, end: string, day: string, timeLeft: () => boolean) {
+  if (a.sDay === day && a.sDaily) return true;
+  if (!timeLeft()) return false;
+  await searchDaily(a, token, book, title, end);
+  await saveRow(a);
+  for (const m of monthsToRefresh(a.sLists, end)) {
+    if (!timeLeft()) return false;
+    await searchMonth(a.site, token, m, end);
+    a.sLists = minD(monthEnd(m), end);
+    if (!a.sFrom || m < a.sFrom) a.sFrom = m;
     await saveRow(a);
-    for (const m of monthsToRefresh(a.sLists, end)) {
-      if (!timeLeft()) return false;
-      await searchMonth(a.site, token, m, end);
-      a.sLists = minD(monthEnd(m), end);
-      if (!a.sFrom || m < a.sFrom) a.sFrom = m;
-      await saveRow(a);
-    }
-    a.sDay = day;
   }
+  a.sDay = day;
+  return true;
+}
+
+/** Step 2: GA4's latest days and the current months' lists (once per Pacific day). */
+async function gaRecent(a: ArchiveRow, token: string, book: Book, title: string, yesterday: string, day: string, timeLeft: () => boolean) {
+  if (a.gDay === day && a.gDaily) return true;
+  if (!timeLeft()) return false;
+  await gaDaily(a, token, book, title, yesterday);
+  await saveRow(a);
+  for (const m of monthsToRefresh(a.gLists, yesterday)) {
+    if (!timeLeft()) return false;
+    await gaMonth(a, token, m, yesterday);
+    a.gLists = minD(monthEnd(m), yesterday);
+    if (!a.gFrom || m < a.gFrom) a.gFrom = m;
+    await saveRow(a);
+  }
+  a.gDay = day;
+  return true;
+}
+
+/** Step 3: Search Console's older months, one at a time, back to the 16 months Google still has. */
+async function searchBackfill(a: ArchiveRow, token: string, end: string, timeLeft: () => boolean) {
   const target = firstMonth(end);
   while (a.sFrom && a.sFrom > target) {
     if (!timeLeft()) return false;
@@ -288,22 +311,8 @@ async function searchPart(a: ArchiveRow, token: string, book: Book, title: strin
   return true;
 }
 
-/** GA4 part of an update. Returns false if it ran out of time. */
-async function gaPart(a: ArchiveRow, token: string, book: Book, title: string, day: string, timeLeft: () => boolean) {
-  const tz = await ga4TimeZone(token, a.ga4);
-  const yesterday = addDays(todayIn(tz), -1);
-  if (a.gDay !== day || !a.gDaily) {
-    await gaDaily(a, token, book, title, yesterday);
-    await saveRow(a);
-    for (const m of monthsToRefresh(a.gLists, yesterday)) {
-      if (!timeLeft()) return false;
-      await gaMonth(a, token, m, yesterday);
-      a.gLists = minD(monthEnd(m), yesterday);
-      if (!a.gFrom || m < a.gFrom) a.gFrom = m;
-      await saveRow(a);
-    }
-    a.gDay = day;
-  }
+/** Step 4: GA4's older months, one at a time, back as far. */
+async function gaBackfill(a: ArchiveRow, token: string, yesterday: string, timeLeft: () => boolean) {
   const target = firstMonth(yesterday);
   while (a.gFrom && a.gFrom > target) {
     if (!timeLeft()) return false;
@@ -339,11 +348,13 @@ export async function refreshArchive(o: { site: string; ga4: string; by: string;
     const { book, title } = await propertySheet(o.site, "Saved history");
     await ensureSections(book, title);
     const end = await latestFinalDate(o.token, o.site);
-    if (!(await searchPart(a, o.token, book, title, end, day, timeLeft))) done = false;
-    notes.push(`Search Console saved through ${a.sDaily || "–"} (monthly lists from ${a.sFrom || "–"})`);
 
+    // 1. Search Console, latest days
+    if (!(await searchRecent(a, o.token, book, title, end, day, timeLeft))) done = false;
+
+    // 2. GA4, latest days (before any backfill, so GA4 never waits for the long Search Console history)
+    let gaYesterday = "";
     if (!a.ga4) notes.push("No GA4 property linked yet");
-    else if (!timeLeft()) done = false;
     else {
       let canRead = true;
       try {
@@ -353,10 +364,18 @@ export async function refreshArchive(o: { site: string; ga4: string; by: string;
       }
       if (!canRead) notes.push(`GA4 ${a.ga4} not updated: ${o.by} can't open it`);
       else {
-        if (!(await gaPart(a, o.token, book, title, day, timeLeft))) done = false;
-        notes.push(`GA4 ${a.ga4} saved through ${a.gDaily || "–"} (monthly lists from ${a.gFrom || "–"})`);
+        gaYesterday = addDays(todayIn(await ga4TimeZone(o.token, a.ga4)), -1);
+        if (!(await gaRecent(a, o.token, book, title, gaYesterday, day, timeLeft))) done = false;
       }
     }
+
+    // 3 and 4. Older months for both
+    if (!(await searchBackfill(a, o.token, end, timeLeft))) done = false;
+    if (gaYesterday && !(await gaBackfill(a, o.token, gaYesterday, timeLeft))) done = false;
+
+    notes.unshift(`Search Console saved through ${a.sDaily || "–"} (monthly lists from ${a.sFrom || "–"})`);
+    if (gaYesterday) notes.push(`GA4 ${a.ga4} saved through ${a.gDaily || "–"} (monthly lists from ${a.gFrom || "–"})`);
+    if (!done) notes.push("still filling in older months; it continues while the dashboard is open");
     a.message = notes.join(" · ");
   } catch (e) {
     a.message = `Stopped: ${e instanceof Error ? e.message : "error"}`;
