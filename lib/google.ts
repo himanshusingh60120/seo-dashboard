@@ -5,15 +5,34 @@ import { GSC_TZ, addDays, gscFallbackEnd, todayIn, windowEnding, type Compare } 
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+type GOpts = {
+  /** False when a 429 means "daily quota used up", so retrying is pointless. */
+  retry429?: boolean;
+  /** One time limit for the whole call, retries included. A slow answer then fails in time instead of running into
+   *  Vercel's function limit (which shows up as a 504 with no message). */
+  timeoutMs?: number;
+};
+
 /** JSON in/out. Retries 5xx, and 429 unless the caller says a 429 means "daily quota used up". */
-async function g<T = any>(token: string, url: string, init: RequestInit = {}, opts: { retry429?: boolean } = {}): Promise<T> {
+async function g<T = any>(token: string, url: string, init: RequestInit = {}, opts: GOpts = {}): Promise<T> {
+  const signal = opts.timeoutMs ? AbortSignal.timeout(opts.timeoutMs) : undefined;
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(url, {
-      ...init,
-      cache: "no-store",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(init.headers || {}) },
-    });
-    const text = await res.text();
+    let res: Response;
+    let text: string;
+    try {
+      res = await fetch(url, {
+        ...init,
+        signal,
+        cache: "no-store",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(init.headers || {}) },
+      });
+      text = await res.text();
+    } catch (e) {
+      if (signal?.aborted) {
+        throw new HttpError(504, `Google didn't answer within ${Math.round((opts.timeoutMs || 0) / 1000)} seconds. Try again in a minute.`);
+      }
+      throw e;
+    }
     let data: any = {};
     try {
       data = text ? JSON.parse(text) : {};
@@ -22,7 +41,7 @@ async function g<T = any>(token: string, url: string, init: RequestInit = {}, op
     }
     if (res.ok) return data as T;
     const retry = res.status >= 500 || (res.status === 429 && opts.retry429 !== false);
-    if (retry && attempt < 2) {
+    if (retry && attempt < 2 && !signal?.aborted) {
       await sleep(800 * 2 ** attempt);
       continue;
     }
@@ -211,6 +230,12 @@ export function errorInspection(url: string, message: string): InspectionResult 
 const ADMIN = "https://analyticsadmin.googleapis.com/v1beta";
 const DATA = "https://analyticsdata.googleapis.com/v1beta";
 
+/** Time limits for GA4 calls, retries included. A normal report answers in 1–5 seconds. */
+export const GA_REPORT_MS = 20_000;
+export const GA_REALTIME_MS = 10_000;
+const GA_ADMIN_MS = 10_000;
+const GA_TZ_MS = 8_000;
+
 export const ga4Endpoint = (propertyId: string, realtime = false) =>
   `POST ${DATA}/properties/${propertyId}:${realtime ? "runRealtimeReport" : "runReport"}`;
 
@@ -218,7 +243,12 @@ export async function listGa4Properties(token: string) {
   const out: { id: string; name: string; account: string }[] = [];
   let pageToken = "";
   do {
-    const data = await g<any>(token, `${ADMIN}/accountSummaries?pageSize=200${pageToken ? `&pageToken=${enc(pageToken)}` : ""}`);
+    const data = await g<any>(
+      token,
+      `${ADMIN}/accountSummaries?pageSize=200${pageToken ? `&pageToken=${enc(pageToken)}` : ""}`,
+      {},
+      { timeoutMs: 15_000 }
+    );
     for (const acc of data.accountSummaries || []) {
       for (const p of acc.propertySummaries || []) {
         out.push({ id: String(p.property).replace("properties/", ""), name: p.displayName, account: acc.displayName });
@@ -231,7 +261,7 @@ export async function listGa4Properties(token: string) {
 
 export async function listWebStreamHosts(token: string, propertyId: string): Promise<string[]> {
   try {
-    const data = await g<any>(token, `${ADMIN}/properties/${propertyId}/dataStreams?pageSize=50`);
+    const data = await g<any>(token, `${ADMIN}/properties/${propertyId}/dataStreams?pageSize=50`, {}, { timeoutMs: GA_ADMIN_MS });
     return (data.dataStreams || []).map((s: any) => s.webStreamData?.defaultUri).filter(Boolean).map((u: string) => normalizeHost(u));
   } catch {
     return [];
@@ -254,13 +284,14 @@ export async function ga4TimeZone(token: string, propertyId: string) {
   const hit = tzCache.get(propertyId);
   if (hit) return hit;
   try {
-    const p = await g<any>(token, `${ADMIN}/properties/${propertyId}`);
+    // Runs before any report, so it gets a short limit: a slow answer must not hold up the whole page.
+    const p = await g<any>(token, `${ADMIN}/properties/${propertyId}`, {}, { timeoutMs: GA_TZ_MS });
     if (p?.timeZone) {
       tzCache.set(propertyId, String(p.timeZone));
       return String(p.timeZone);
     }
   } catch {
-    /* fall back to UTC */
+    /* fall back to UTC; not cached, so the next request tries again */
   }
   return "UTC";
 }
@@ -273,12 +304,12 @@ export async function ga4Window(token: string, propertyId: string, days: number,
 
 export type GaReport = { rows: { dims: string[]; mets: number[] }[]; totals: number[] };
 
-export async function runReport(token: string, propertyId: string, body: Record<string, unknown>): Promise<GaReport> {
-  return parseGa(await g<any>(token, `${DATA}/properties/${propertyId}:runReport`, { method: "POST", body: JSON.stringify(body) }));
+export async function runReport(token: string, propertyId: string, body: Record<string, unknown>, timeoutMs = GA_REPORT_MS): Promise<GaReport> {
+  return parseGa(await g<any>(token, `${DATA}/properties/${propertyId}:runReport`, { method: "POST", body: JSON.stringify(body) }, { timeoutMs }));
 }
 
-export async function runRealtime(token: string, propertyId: string, body: Record<string, unknown>): Promise<GaReport> {
-  return parseGa(await g<any>(token, `${DATA}/properties/${propertyId}:runRealtimeReport`, { method: "POST", body: JSON.stringify(body) }));
+export async function runRealtime(token: string, propertyId: string, body: Record<string, unknown>, timeoutMs = GA_REALTIME_MS): Promise<GaReport> {
+  return parseGa(await g<any>(token, `${DATA}/properties/${propertyId}:runRealtimeReport`, { method: "POST", body: JSON.stringify(body) }, { timeoutMs }));
 }
 
 function parseGa(data: any): GaReport {
