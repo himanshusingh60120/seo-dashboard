@@ -4,12 +4,16 @@ import { getGoogleAccessToken } from "@/lib/token";
 import { assertSiteAccess, gscWindow, searchAnalytics, searchAnalyticsAll, MAX_ROWS, SARow, SABody, saRequest, saEndpoint } from "@/lib/google";
 import { brandFromSite } from "@/lib/url";
 import { Recorder, gscPerformanceUrl, GSC_EXPLORER } from "@/lib/provenance";
-import { parseDays, parseCompare, periodName, compareName } from "@/lib/dates";
+import { GSC_TZ, addDays, parseDays, parseCompare, periodName, compareName, todayIn } from "@/lib/dates";
 import { buildGrowthReport, growthCalcSources, QueryPair, Totals } from "@/lib/queryGrowth";
 import { fail } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// Long periods (up to 16 months) pull two lists of up to 50,000 queries each, so allow more than 60 seconds.
+export const maxDuration = 120;
+
+/** Search Console keeps about 16 months; a comparison period starting before this is only partly available. */
+const GOOGLE_KEEPS_DAYS = 486;
 
 const int = (v: string | null, d: number, min: number, max: number) => {
   const n = v ? Number(v) : NaN;
@@ -35,6 +39,7 @@ export async function GET(req: NextRequest) {
     const brand = p.get("brand") ?? brandFromSite(siteUrl);
     // Windows end on the latest day with final data for this property (looked up, not guessed)
     const { current, previous, dataThrough } = await gscWindow(token, siteUrl, days, compare);
+    const previousIncomplete = previous.startDate < addDays(todayIn(GSC_TZ), -GOOGLE_KEEPS_DAYS);
 
     const rec = new Recorder();
     const system = "Google Search Console API (Search Analytics)";
@@ -102,6 +107,9 @@ export async function GET(req: NextRequest) {
       minImpr,
       pairs: Array.from(merged.values()),
       coverage:
+        (previousIncomplete
+          ? `Warning: the comparison period (${previous.startDate} to ${previous.endDate}) starts before Search Console's 16-month limit, so it's only partly available and growth against it is overstated. Use Compare months mode to compare older periods from the saved history. `
+          : "") +
         `Live from the Search Console API (data complete through ${dataThrough}): ${qCur.length.toLocaleString()} queries this period and ${qPrev.length.toLocaleString()} in the comparison period. ` +
         (capped ? "The API returns at most 50,000 queries per period, so the least-searched queries are left out. " : "") +
         "Totals are Search Console's site totals, which also count rare queries Google hides for privacy.",
@@ -113,7 +121,7 @@ export async function GET(req: NextRequest) {
       report.brand
     ).forEach((s) => rec.add(s));
 
-    return NextResponse.json({ sources: rec.sources, report });
+    return NextResponse.json({ sources: rec.sources, report, previousIncomplete });
   } catch (e) {
     return fail(e);
   }
