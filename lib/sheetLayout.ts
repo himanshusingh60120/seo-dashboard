@@ -1,9 +1,12 @@
 // lib/sheetLayout.ts
 // Layout of a property's Google Sheet: one tab holding every kind of data in its own colour-coded section, side by
 // side from left to right. Row 1 is each section's coloured title bar, row 2 its column headers (both frozen), and
-// data starts on row 3. The long URL list is the last section, so the tab opens on the overview and the reports.
+// data starts on row 3. The long URL list comes after the reports; the saved daily history ("Search daily" and
+// "Traffic daily") was added later as two more sections to the right of it. Tabs created before that get the new
+// sections added automatically (ensureSections) without moving any existing data.
 // Each property has its own Sheet (lib/sheetBooks.ts); the control Sheet (INDEX_SHEET_ID) keeps the shared, hidden
-// tabs (_Jobs, _Sheets, _Updates, _Log, _Meta). Server-only.
+// tabs (_Jobs, _Sheets, _Updates, _Log, _Meta, _Archive, _Parts). Big monthly lists live in tabs of their own
+// (lib/sheetParts.ts). Server-only.
 import { HttpError } from "./token";
 import {
   batchRead, batchUpdate, clearRange, colLetter, controlBook, ensureSize, ensureTab, readRange, safeTitle, tabs, writeRange,
@@ -18,7 +21,9 @@ export const MOVED_SUFFIX = " (moved)";
 /** First data row of every section (row 1 = title bar, row 2 = headers). */
 export const FIRST_ROW = 3;
 
-export type SectionKey = "overview" | "pages" | "reasons" | "crawl" | "crawlUrls" | "ai" | "aiSplit" | "sitemaps" | "changes" | "urls";
+export type SectionKey =
+  | "overview" | "pages" | "reasons" | "crawl" | "crawlUrls" | "ai" | "aiSplit" | "sitemaps" | "changes" | "urls"
+  | "searchDaily" | "gaDaily";
 
 export const URL_HEADERS = [
   "URL", "Sitemap", "Source", "Sitemap lastmod", "Status", "Verified by", "Google's reason", "Page fetch",
@@ -31,6 +36,7 @@ type SectionDef = {
   numeric?: number[]; widths?: Record<number, number>;
 };
 
+// New sections must always be added at the END of this list: the columns of the sections before them never move.
 const DEFS: SectionDef[] = [
   { key: "overview", title: "Overview", color: "#1A3A6B", light: "#DCE6F5", headers: ["Metric", "Value", "Notes"], numeric: [1], widths: { 0: 260, 1: 150, 2: 320 } },
   { key: "pages", title: "Page indexing · Google's report", color: "#5E35B1", light: "#EDE7F6", headers: ["View", "Date", "Indexed", "Not indexed", "Impressions"], numeric: [2, 3, 4], widths: { 0: 180 } },
@@ -38,10 +44,12 @@ const DEFS: SectionDef[] = [
   { key: "crawl", title: "Crawl stats", color: "#E8710A", light: "#FDEBD9", headers: ["Series key", "Series", "Date", "Requests", "Bytes", "Avg response (ms)"], numeric: [3, 4, 5], widths: { 1: 160 } },
   { key: "crawlUrls", title: "Crawled URLs (from exports)", color: "#F29B4C", light: "#FEF3E8", headers: ["Series key", "URL", "Crawled"], widths: { 1: 320 } },
   { key: "ai", title: "AI impressions", color: "#00897B", light: "#DFF3F1", headers: ["Date", "AI impressions"], numeric: [1] },
-  { key: "aiSplit", title: "AI pages, countries, devices", color: "#4DB6AC", light: "#EAF7F6", headers: ["From", "To", "Saved at", "By", "Source", "Type", "Name", "AI impressions"], numeric: [7], widths: { 3: 200, 4: 220, 6: 320 } },
+  { key: "aiSplit", title: "AI countries and devices", color: "#4DB6AC", light: "#EAF7F6", headers: ["From", "To", "Saved at", "By", "Source", "Type", "Name", "AI impressions"], numeric: [7], widths: { 3: 200, 4: 220, 6: 320 } },
   { key: "sitemaps", title: "By sitemap", color: "#5F6B7A", light: "#ECEFF3", headers: ["Sitemap", "URLs", "Verified", "Indexed", "Not indexed", "Errors", "Not checked yet", "% verified", "Updated"], numeric: [1, 2, 3, 4, 5, 6], widths: { 0: 340 } },
   { key: "changes", title: "Status changes", color: "#C5221F", light: "#FBE3E2", headers: ["Time", "URL", "Change", "Before", "After", "Inspection link"], widths: { 0: 170, 1: 340, 2: 220, 3: 240, 4: 240 } },
   { key: "urls", title: "URL checks · Google's URL Inspection", color: "#1E8E3E", light: "#E3F2E7", headers: URL_HEADERS, numeric: [11], widths: { 0: 380, 1: 280, 6: 280, 9: 280, 14: 260 } },
+  { key: "searchDaily", title: "Search daily · Search Console (saved history)", color: "#1A73E8", light: "#E3EDFC", headers: ["Date", "Clicks", "Impressions", "CTR", "Position", "Updated"], numeric: [1, 2], widths: { 0: 110, 5: 170 } },
+  { key: "gaDaily", title: "Traffic daily · GA4 (saved history)", color: "#E37400", light: "#FDEFD9", headers: ["Date", "Active users", "New users", "Sessions", "Views", "Engagement rate", "Avg session (s)", "Organic sessions", "Updated"], numeric: [1, 2, 3, 4, 7], widths: { 0: 110, 8: 170 } },
 ];
 
 export type Section = SectionDef & { start: number; end: number; width: number; L: string; R: string };
@@ -140,19 +148,29 @@ const rgb = (hex: string) => ({
   blue: parseInt(hex.slice(5, 7), 16) / 255,
 });
 
-function formatRequests(sheetId: number): object[] {
+/**
+ * Formatting requests. full = a brand-new tab (all sections, column widths, coloured status values);
+ * otherwise only the given sections, for sections added to an existing tab.
+ */
+function formatRequests(sheetId: number, list: Section[] = SECTIONS, full = true): object[] {
   const req: object[] = [];
   const cols = (a: number, b: number) => ({ sheetId, startColumnIndex: a, endColumnIndex: b });
   const width = (a: number, b: number, px: number) => ({
     updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: a, endIndex: b }, properties: { pixelSize: px }, fields: "pixelSize" },
   });
-  req.push(width(0, TOTAL_COLS, 120));
-  req.push({
-    updateDimensionProperties: { range: { sheetId, dimension: "ROWS", startIndex: 0, endIndex: 1 }, properties: { pixelSize: 32 }, fields: "pixelSize" },
-  });
-  for (const sec of SECTIONS) {
+  if (full) {
+    req.push(width(0, TOTAL_COLS, 120));
+    req.push({
+      updateDimensionProperties: { range: { sheetId, dimension: "ROWS", startIndex: 0, endIndex: 1 }, properties: { pixelSize: 32 }, fields: "pixelSize" },
+    });
+  }
+  for (const sec of list) {
     const a = sec.start - 1;
     const b = sec.end;
+    if (!full) {
+      req.push(width(a, b, 120));
+      if (a > 0) req.push(width(a - 1, a, 24)); // the gap column before this section
+    }
     req.push({ mergeCells: { range: { ...cols(a, b), startRowIndex: 0, endRowIndex: 1 }, mergeType: "MERGE_ALL" } });
     req.push({
       repeatCell: {
@@ -178,8 +196,9 @@ function formatRequests(sheetId: number): object[] {
       });
     }
     for (const [k, px] of Object.entries(sec.widths || {})) req.push(width(a + Number(k), a + Number(k) + 1, px));
-    if (sec.end < TOTAL_COLS) req.push(width(sec.end, sec.end + 1, 24)); // narrow gap column
+    if (full && sec.end < TOTAL_COLS) req.push(width(sec.end, sec.end + 1, 24)); // narrow gap column
   }
+  if (!full) return req;
 
   // Coloured values: URL status, and the kind of status change.
   const rule = (c: number, type: string, value: string, bg: string, fg: string) => ({
@@ -235,6 +254,37 @@ export async function createPropertyTab(book: Book, title: string, rows = 1000) 
     ])
   );
   await batchUpdate(book, formatRequests(t.sheetId));
+}
+
+/** Sections added after the first layout. Tabs created earlier get them on first use. */
+const LATER_SECTIONS: SectionKey[] = ["searchDaily", "gaDaily"];
+const upgraded = new Set<string>();
+
+/**
+ * Makes sure a property tab has every section: widens the grid if needed, and writes the title bar, headers and
+ * formatting of sections added after the tab was created. Existing columns are never moved or rewritten.
+ */
+export async function ensureSections(book: Book, title: string) {
+  const key = `${book}|${title}`;
+  if (upgraded.has(key)) return;
+  const t = (await tabs(book, true)).get(title);
+  if (!t) return;
+  if (t.cols < TOTAL_COLS) await ensureSize(book, title, 1, TOTAL_COLS);
+  const list = LATER_SECTIONS.map((k) => SEC[k]);
+  const heads = await batchRead(book, list.map((sec) => ({ title, range: `${sec.L}1:${sec.L}1` })));
+  const missing = list.filter((sec, i) => s(heads[i]?.[0]?.[0]) !== sec.title);
+  if (missing.length) {
+    await writeRanges(
+      book,
+      title,
+      missing.flatMap((sec) => [
+        { range: `${sec.L}1`, values: [[sec.title]] },
+        { range: `${sec.L}2:${sec.R}2`, values: [sec.headers] },
+      ])
+    );
+    await batchUpdate(book, formatRequests(t.sheetId, missing, false));
+  }
+  upgraded.add(key);
 }
 
 /* ---------------- Reading and writing sections ---------------- */
