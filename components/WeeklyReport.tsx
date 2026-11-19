@@ -2,11 +2,13 @@
 "use client";
 // Weekly report tab (WEEKLY_REPORT_EMAILS only): the Data Demand properties' week, Monday to Sunday, side by side, then a
 // full review of one property at a time. /api/weekly says which week and which properties; /api/weekly/property loads
-// each property in parallel, so each one appears as soon as it's ready.
+// each property in parallel, so each one appears as soon as it's ready. "Download Excel" builds one workbook from what's
+// on screen: a Summary sheet plus one sheet per property (lib/weeklyExcel.ts).
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { Sources } from "@/lib/types";
 import type { Area, Mover, NewQuery, PropertyWeek, SitemapRow, SourceGroup, Split, Status, WeekInfo, WeeklySite } from "@/lib/weekly";
+import { downloadWeeklyExcel } from "@/lib/weeklyExcel";
 import { DataTable, Delta, Kpis, PanelTitle, Section, SourcesProvider, SubTabs, num, pct, pos, type Col, type KpiItem } from "./ui";
 
 type Meta = { week: WeekInfo; sites: WeeklySite[]; missing: string[]; alsoMatched: Record<string, string[]>; rules: string[] };
@@ -347,6 +349,8 @@ export default function WeeklyReport() {
   const [results, setResults] = useState<Record<string, Result>>({});
   const [error, setError] = useState<string | null>(null);
   const [sel, setSel] = useState("");
+  const [xlsBusy, setXlsBusy] = useState(false);
+  const [xlsError, setXlsError] = useState<string | null>(null);
   const req = useRef(0);
 
   const load = useCallback(async (w: string) => {
@@ -386,6 +390,20 @@ export default function WeeklyReport() {
 
   const wk = meta?.week;
   const selected = meta?.sites.find((s) => s.siteUrl === sel);
+  /** Every property has finished loading (or failed), so the Excel file has everything that can be shown. */
+  const ready = !!meta && meta.sites.length > 0 && meta.sites.every((s) => results[s.siteUrl] && !results[s.siteUrl].loading);
+
+  const exportExcel = async () => {
+    if (!meta) return;
+    setXlsBusy(true);
+    setXlsError(null);
+    try {
+      await downloadWeeklyExcel({ week: meta.week, sites: meta.sites, results, rules: meta.rules });
+    } catch (e) {
+      setXlsError(e instanceof Error ? e.message : "Couldn't build the Excel file");
+    }
+    setXlsBusy(false);
+  };
 
   return (
     <SourcesProvider value={sources}>
@@ -417,10 +435,19 @@ export default function WeeklyReport() {
                   </select>
                 </label>
                 <button className="btn" onClick={() => load(week)}>Refresh</button>
+                <button
+                  className="btn primary"
+                  onClick={exportExcel}
+                  disabled={!ready || xlsBusy}
+                  title={ready ? "One Excel file: a Summary sheet plus one sheet per property" : "Waiting for every property to load"}
+                >
+                  {xlsBusy ? "Building Excel…" : ready ? "Download Excel" : "Loading…"}
+                </button>
                 <button className="btn" onClick={() => window.print()}>Print / PDF</button>
               </div>
             </div>
 
+            {xlsError && <div className="notice error">Excel: {xlsError}</div>}
             {meta.missing.length > 0 && (
               <div className="notice">Not found in your Search Console properties: {meta.missing.join(", ")}.</div>
             )}
