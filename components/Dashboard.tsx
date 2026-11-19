@@ -778,7 +778,8 @@ export default function Dashboard() {
                 </>
               )}
 
-              {site && tab === "checks" && <IndexChecks site={site} />}
+              {/* view-only: no Start / Pause buttons */}
+              {site && tab === "checks" && <IndexChecks site={site} readOnly={viewer} />}
               {site && tab === "captures" && canCapture && <WeeklyCaptures site={site} />}
 
               {site && tab === "crawl" && (
@@ -827,8 +828,9 @@ export default function Dashboard() {
         </main>
       </SourcesProvider>
 
+      {/* view-only: the URL report shows saved results only, no new inspections */}
       {!compareMode && lookup && gsc && (
-        <UrlReport site={site} url={lookup} gsc={gsc} ga4={ga4} days={days} compare={compare} onClose={closeLookup} />
+        <UrlReport site={site} url={lookup} gsc={gsc} ga4={ga4} days={days} compare={compare} onClose={closeLookup} readOnly={viewer} />
       )}
     </>
   );
