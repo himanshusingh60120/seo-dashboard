@@ -1,15 +1,19 @@
 // lib/indexSheet.ts
 // Server-only. Reads Google's URL Inspection results that the daily index checks (lib/indexJob.ts) saved in the
-// property's own Sheet ("URL checks" section), a page of rows at a time. Other tabs use these instead of running
-// URL Inspection themselves, so they never spend Google's daily inspection quota.
+// property's own Sheet, a page of rows at a time: the "URL checks" section, plus (with the first page) the
+// "404 link sources" section. Other tabs use these instead of running URL Inspection themselves, so they never spend
+// Google's daily inspection quota.
 import { readRange } from "./sheets";
-import { FIRST_ROW, SEC } from "./sheetLayout";
+import { FIRST_ROW, SEC, sectionRange } from "./sheetLayout";
 import { findSheet } from "./sheetBooks";
 import { readJobs, type PlanStats } from "./indexJob";
 
 /** [URL, status ("Indexed" | "Not indexed" | "" = no result yet), Google's reason, page fetch, last crawled,
  *  Google canonical, last inspected, in a sitemap (1 / 0), sitemap file] */
 export type IndexRow = [string, string, string, string, string, string, string, number, string];
+
+/** Pages and sitemaps Google says point to a URL that returns 404 / soft 404. */
+export type LinkSource = { url: string; refs: string[]; sitemaps: string[] };
 
 export type IndexResults = {
   configured: boolean;
@@ -18,16 +22,19 @@ export type IndexResults = {
   next: number;
   done: boolean;
   job: { enabled: boolean; planDay: string; runAs: string; stats: PlanStats | null } | null;
+  /** Only with the first page (offset 0). */
+  links404: LinkSource[];
 };
 
 /** Sheet rows per request: small enough to stay well under Vercel's 4.5 MB response limit. */
 export const PAGE_ROWS = 4000;
 
 const s = (v: unknown) => (v == null ? "" : String(v).trim());
+const split = (v: unknown) => s(v).split(" | ").map((x) => x.trim()).filter((x) => /^https?:\/\//i.test(x));
 
 export async function readIndexPage(site: string, offset: number): Promise<IndexResults> {
   const ref = await findSheet(site);
-  if (!ref) return { configured: false, rows: [], next: offset, done: true, job: null };
+  if (!ref) return { configured: false, rows: [], next: offset, done: true, job: null, links404: [] };
   const sec = SEC.urls;
   const start = FIRST_ROW + Math.max(0, Math.floor(offset));
   const raw = await readRange(ref.book, ref.title, `${sec.L}${start}:${sec.R}${start + PAGE_ROWS - 1}`);
@@ -51,10 +58,14 @@ export async function readIndexPage(site: string, offset: number): Promise<Index
     ]);
   }
   let job: IndexResults["job"] = null;
+  let links404: LinkSource[] = [];
   if (offset === 0) {
     const j = (await readJobs().catch(() => [])).find((x) => x.site === site);
     if (j) job = { enabled: j.enabled, planDay: j.planDay, runAs: j.runAs, stats: j.stats };
+    // Older tabs may not have this section yet (it's added the first time the daily checks find a 404).
+    const lr = await readRange(ref.book, ref.title, sectionRange("links404")).catch(() => []);
+    links404 = lr.filter((r) => s(r[0])).map((r) => ({ url: s(r[0]), refs: split(r[2]), sitemaps: split(r[3]) }));
   }
   const configured = offset > 0 || rows.length > 0 || !!job;
-  return { configured, rows, next: offset + raw.length, done: raw.length < PAGE_ROWS, job };
+  return { configured, rows, next: offset + raw.length, done: raw.length < PAGE_ROWS, job, links404 };
 }
