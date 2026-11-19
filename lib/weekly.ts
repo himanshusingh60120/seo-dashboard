@@ -21,7 +21,7 @@ import {
 import { batchReports } from "./ga4-report";
 import { GSC_TZ, addDays, todayIn } from "./dates";
 import { pool } from "./api";
-import { SOCIAL_CHANNELS, SOCIAL_SOURCE_PATTERN } from "./socialSources";
+import { SOCIAL_CHANNELS, SOCIAL_SOURCE_PATTERN, networkOf } from "./socialSources";
 import type { Source } from "./types";
 
 /* ---------------- Access ---------------- */
@@ -332,9 +332,35 @@ export async function gscWeek(token: string, site: WeeklySite, wk: WeekInfo): Pr
   };
 }
 
+/* ---------------- AI assistants ---------------- */
+
+/** GA4 regular expression (RE2), matched anywhere in sessionSource, case-insensitive. */
+export const AI_SOURCE_PATTERN =
+  "chatgpt|openai|perplexity|gemini\\.google|bard\\.google|claude\\.ai|anthropic|copilot|edgeservices|deepseek|grok|x\\.ai|meta\\.ai|mistral|you\\.com|phind|poe\\.com|character\\.ai|kagi|felo\\.ai|iask\\.ai|andisearch";
+
+const AI_TOOLS: [RegExp, string][] = [
+  [/chatgpt|openai/i, "ChatGPT"],
+  [/perplexity/i, "Perplexity"],
+  [/gemini\.google|bard\.google/i, "Gemini"],
+  [/claude\.ai|anthropic/i, "Claude"],
+  [/copilot|edgeservices/i, "Copilot"],
+  [/deepseek/i, "DeepSeek"],
+  [/grok|x\.ai/i, "Grok"],
+  [/meta\.ai/i, "Meta AI"],
+  [/mistral/i, "Mistral"],
+  [/you\.com/i, "You.com"],
+  [/phind/i, "Phind"],
+  [/poe\.com/i, "Poe"],
+];
+const aiToolOf = (source: string) => AI_TOOLS.find(([re]) => re.test(source))?.[1] || "Other AI";
+
+export const AI_TOOL_LIST = "ChatGPT, Perplexity, Gemini, Claude, Copilot, DeepSeek, Grok, Meta AI, Mistral, You.com, Phind, Poe and others";
+
 /* ---------------- GA4 ---------------- */
 
 export type GaTotals = { sessions: number; engaged: number; keyEvents: number; views: number; users: number; newUsers: number };
+/** Sessions grouped by AI assistant, social network or referring site. */
+export type SourceGroup = { name: string; sessions: number; prevSessions: number; engaged: number; keyEvents: number };
 export type GaWeek = {
   property: string;
   timeZone: string;
@@ -347,12 +373,33 @@ export type GaWeek = {
   avg4: { sessions: number; keyEvents: number };
   channels: { name: string; sessions: number; prevSessions: number; keyEvents: number }[];
   social: { sessions: number; prevSessions: number };
+  socialNetworks: SourceGroup[];
+  ai: { sessions: number; prevSessions: number; engaged: number; keyEvents: number; tools: SourceGroup[]; landing: { page: string; sessions: number; keyEvents: number }[] };
+  referrals: SourceGroup[];
   landing: { page: string; sessions: number; prevSessions: number | null }[];
   request: object[];
 };
 
 const names = (list: string[]) => list.map((name) => ({ name }));
 const ymd = (s: string) => `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+const bySessions = [{ metric: { metricName: "sessions" }, desc: true }];
+
+/** Rows from a report with two date ranges, grouped by name: date_range_0 = this week, date_range_1 = last week. */
+function group(rows: Record<string, any>[] | undefined, nameOf: (r: Record<string, any>) => string): SourceGroup[] {
+  const m = new Map<string, SourceGroup>();
+  for (const r of rows || []) {
+    const name = nameOf(r);
+    const x = m.get(name) || { name, sessions: 0, prevSessions: 0, engaged: 0, keyEvents: 0 };
+    if (r.dateRange === "date_range_1") x.prevSessions += r.sessions || 0;
+    else {
+      x.sessions += r.sessions || 0;
+      x.engaged += r.engagedSessions || 0;
+      x.keyEvents += r.keyEvents || 0;
+    }
+    m.set(name, x);
+  }
+  return Array.from(m.values()).sort((a, b) => b.sessions - a.sessions || b.prevSessions - a.prevSessions);
+}
 
 export async function gaWeek(token: string, property: string, wk: WeekInfo): Promise<GaWeek> {
   const timeZone = await ga4TimeZone(token, property);
@@ -369,17 +416,26 @@ export async function gaWeek(token: string, property: string, wk: WeekInfo): Pro
       ],
     },
   };
-  const request = [
+  const ai = { filter: { fieldName: "sessionSource", stringFilter: { matchType: "PARTIAL_REGEXP", value: AI_SOURCE_PATTERN, caseSensitive: false } } };
+  const referral = { filter: { fieldName: "sessionDefaultChannelGroup", stringFilter: { value: "Referral" } } };
+
+  const main = [
     { dateRanges: [hist], dimensions: names(["date"]), metrics: names(["sessions", "engagedSessions", "keyEvents", "screenPageViews"]), limit: 100 },
     { dateRanges: [cmp, prev], metrics: names(["totalUsers", "newUsers"]) },
     { dateRanges: [cmp, prev], dimensions: names(["sessionDefaultChannelGroup"]), metrics: names(["sessions", "keyEvents"]), limit: 100 },
     { dateRanges: [cmp, prev], dimensionFilter: social, metrics: names(["sessions"]) },
-    {
-      dateRanges: [cmp, prev], dimensions: names(["landingPage"]), metrics: names(["sessions"]),
-      orderBys: [{ metric: { metricName: "sessions" }, desc: true }], limit: 80,
-    },
+    { dateRanges: [cmp, prev], dimensions: names(["landingPage"]), metrics: names(["sessions"]), orderBys: bySessions, limit: 80 },
   ];
-  const [daily, users, channels, soc, landing] = await batchReports(token, property, request);
+  const sources = [
+    { dateRanges: [cmp, prev], dimensionFilter: ai, dimensions: names(["sessionSource"]), metrics: names(["sessions", "engagedSessions", "keyEvents"]), limit: 500 },
+    { dateRanges: [cmp], dimensionFilter: ai, dimensions: names(["landingPage"]), metrics: names(["sessions", "keyEvents"]), orderBys: bySessions, limit: 15 },
+    { dateRanges: [cmp, prev], dimensionFilter: social, dimensions: names(["sessionSource"]), metrics: names(["sessions", "engagedSessions", "keyEvents"]), limit: 1000 },
+    { dateRanges: [cmp, prev], dimensionFilter: referral, dimensions: names(["sessionSource"]), metrics: names(["sessions", "engagedSessions", "keyEvents"]), orderBys: bySessions, limit: 200 },
+  ];
+  const [[daily, users, channels, soc, landing], [aiRows, aiLanding, socRows, refRows]] = await Promise.all([
+    batchReports(token, property, main),
+    batchReports(token, property, sources),
+  ]);
 
   const byDate = new Map<string, Record<string, any>>((daily || []).map((r) => [ymd(String(r.date)), r]));
   const sumD = (from: string, to: string, metric: string) => {
@@ -431,6 +487,9 @@ export async function gaWeek(token: string, property: string, wk: WeekInfo): Pro
     days.push({ date, sessions: Number(byDate.get(date)?.sessions || 0), state });
   }
 
+  const tools = group(aiRows, (r) => aiToolOf(String(r.sessionSource || "")));
+  const sumG = (list: SourceGroup[], k: keyof Omit<SourceGroup, "name">) => list.reduce((t, x) => t + x[k], 0);
+
   return {
     property,
     timeZone,
@@ -443,11 +502,21 @@ export async function gaWeek(token: string, property: string, wk: WeekInfo): Pro
     avg4: { sessions: n4 ? s4 / n4 : 0, keyEvents: n4 ? k4 / n4 : 0 },
     channels: Array.from(ch.values()).sort((a, b) => b.sessions - a.sessions),
     social: { sessions: Number(pick(soc, "date_range_0").sessions || 0), prevSessions: Number(pick(soc, "date_range_1").sessions || 0) },
+    socialNetworks: group(socRows, (r) => networkOf(String(r.sessionSource || ""))),
+    ai: {
+      sessions: sumG(tools, "sessions"),
+      prevSessions: sumG(tools, "prevSessions"),
+      engaged: sumG(tools, "engaged"),
+      keyEvents: sumG(tools, "keyEvents"),
+      tools,
+      landing: (aiLanding || []).map((r) => ({ page: String(r.landingPage), sessions: r.sessions || 0, keyEvents: r.keyEvents || 0 })),
+    },
+    referrals: group(refRows, (r) => String(r.sessionSource || "(not set)")).slice(0, 15),
     landing: (landing || [])
       .filter((r) => r.dateRange !== "date_range_1")
       .slice(0, 15)
       .map((r) => ({ page: String(r.landingPage), sessions: r.sessions || 0, prevSessions: prevLanding.get(String(r.landingPage)) ?? null })),
-    request,
+    request: [...main, ...sources],
   };
 }
 
@@ -463,10 +532,13 @@ const drop = (now: number, base: number): Status => {
   const c = (now - base) / base;
   return c <= -0.2 ? "problem" : c <= -0.08 ? "watch" : "good";
 };
+/** AI visits are small and jumpy, so they're only judged once last week had at least this many. */
+const AI_MIN_BASE = 20;
 
 export const WEEKLY_RULES = [
   "Search performance and Traffic: Watch when clicks (or sessions) are 8% or more below last week or the 4-week average; Problem at 20% or more.",
   "Search performance: also Watch when the average position is more than 3 places worse than last week.",
+  `AI visits: Watch when visits from AI assistants are 8% or more below last week, Problem at 20% or more; only judged when last week had at least ${AI_MIN_BASE}.`,
   "Sitemaps: Problem when any sitemap has errors; Watch when there are warnings, a sitemap is still pending, Google hasn't read one for 14 days, or none is submitted.",
   "Indexing, 404s, Crawling and Experience come from the extension captures and the daily index checks; they're added in the next update.",
 ];
@@ -539,8 +611,13 @@ export async function propertyWeek(token: string, site: WeeklySite, wk: WeekInfo
       range: { startDate: wk.start, endDate: wk.end },
       fetchedAt: now,
       request: { requests: ga.request },
-      formula: `Dates in the GA4 property's time zone (${ga.timeZone}). Changes compare the first ${ga.compareDays} day(s) of this week with the same days of last week. GA4 can still adjust the last two days.`,
-      verifyHow: `GA4 → Reports → Acquisition → Traffic acquisition, dates ${wk.start} to ${wk.end}, compared with the previous period.`,
+      formula:
+        `Dates in the GA4 property's time zone (${ga.timeZone}). Changes compare the first ${ga.compareDays} day(s) of this week with the same days of last week. ` +
+        `AI visits = sessions whose source matches “${AI_SOURCE_PATTERN}” (${AI_TOOL_LIST}). Social = the Organic and Paid Social channels plus known ` +
+        "social sources. Referrals = the Referral channel, so AI assistants filed there also appear in that list. GA4 can still adjust the last two days.",
+      verifyHow:
+        `GA4 → Reports → Acquisition → Traffic acquisition, dates ${wk.start} to ${wk.end}, compared with the previous period. ` +
+        "Change the table to “Session source” and search for chatgpt, perplexity and so on.",
     } as Source;
   }
 
@@ -589,8 +666,16 @@ export async function propertyWeek(token: string, site: WeeklySite, wk: WeekInfo
       status: worst(drop(ga.cmp.sessions, ga.prev.sessions), drop(ga.cmp.sessions, ga.avg4.sessions)),
       note: `Sessions ${chg(ga.cmp.sessions, ga.prev.sessions)} vs last week, ${chg(ga.cmp.sessions, ga.avg4.sessions)} vs the 4-week average`,
     });
+    const top = ga.ai.tools.find((t) => t.sessions > 0);
+    areas.push({
+      id: "ai",
+      label: "AI visits",
+      status: ga.ai.prevSessions >= AI_MIN_BASE ? drop(ga.ai.sessions, ga.ai.prevSessions) : "good",
+      note: `${n0(ga.ai.sessions)} visits from AI assistants (${chg(ga.ai.sessions, ga.ai.prevSessions)} vs last week)${top ? `, most from ${top.name}` : ""}`,
+    });
   } else {
     areas.push({ id: "traffic", label: "Traffic outcome", status: "pending", note: gaError || "No GA4 data" });
+    areas.push({ id: "ai", label: "AI visits", status: "pending", note: gaError || "No GA4 data" });
   }
 
   const summary: string[] = [];
@@ -616,6 +701,16 @@ export async function propertyWeek(token: string, site: WeeklySite, wk: WeekInfo
     summary.push(
       `GA4 sessions ${n0(ga.week.sessions)}: ${chg(ga.cmp.sessions, ga.prev.sessions)} vs last week; key events ${n0(ga.week.keyEvents)} (${chg(ga.cmp.keyEvents, ga.prev.keyEvents)}).`
     );
+    if (ga.ai.sessions || ga.ai.prevSessions) {
+      const top = ga.ai.tools.filter((t) => t.sessions > 0).slice(0, 2).map((t) => `${t.name} ${n0(t.sessions)}`);
+      summary.push(
+        `AI assistants sent ${n0(ga.ai.sessions)} visits (${chg(ga.ai.sessions, ga.ai.prevSessions)} vs last week)${top.length ? `: ${top.join(", ")}` : ""}${ga.ai.keyEvents ? `, with ${n0(ga.ai.keyEvents)} key events` : ""}.`
+      );
+    }
+    const net = ga.socialNetworks.find((x) => x.sessions > 0);
+    if (ga.social.sessions || ga.social.prevSessions) {
+      summary.push(`Social media sent ${n0(ga.social.sessions)} visits (${chg(ga.social.sessions, ga.social.prevSessions)} vs last week)${net ? `, most from ${net.name}` : ""}.`);
+    }
   }
 
   return {
