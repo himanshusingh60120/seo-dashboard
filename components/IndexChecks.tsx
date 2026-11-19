@@ -4,7 +4,7 @@
 // budget, in a rotation (oldest result first). The tab shows four numbers (Indexed, Not indexed, Not checked yet,
 // and Google's own count from the Page indexing report), the progress of the checks, and the status changes found.
 // Everything else is folded under "More details". Results live in the shared Google Sheet; one job per property,
-// whoever started it, so nothing is checked twice.
+// whoever started it, so nothing is checked twice. View-only accounts (readOnly) see everything but no buttons.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DataTable, Kpis, PanelTitle, Section, num, pct, type Col, type KpiItem } from "./ui";
 
@@ -100,7 +100,7 @@ const CHANGE_COLS: Col<Change>[] = [
   { key: "link", label: "", render: (r) => (r.link ? <a href={r.link} target="_blank" rel="noreferrer">Search Console</a> : "") },
 ];
 
-export default function IndexChecks({ site }: { site: string }) {
+export default function IndexChecks({ site, readOnly = false }: { site: string; readOnly?: boolean }) {
   const [st, setSt] = useState<Status | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -225,7 +225,11 @@ export default function IndexChecks({ site }: { site: string }) {
         </div>
       )}
 
-      {st?.configured && !job && (
+      {st?.configured && !job && readOnly && (
+        <div className="notice">Daily index checks aren&apos;t turned on for this property.</div>
+      )}
+
+      {st?.configured && !job && !readOnly && (
         <div className="panel">
           <PanelTitle>Start daily index checks for this property</PanelTitle>
           <p style={{ marginTop: 0 }}>
@@ -248,7 +252,7 @@ export default function IndexChecks({ site }: { site: string }) {
         <>
           {!job.enabled && (
             <div className="notice" style={{ marginBottom: 12 }}>
-              Checks are paused for this property. Click <b>Resume</b> to continue where they stopped.
+              {readOnly ? "Checks are paused for this property." : <>Checks are paused for this property. Click <b>Resume</b> to continue where they stopped.</>}
             </div>
           )}
 
@@ -264,11 +268,13 @@ export default function IndexChecks({ site }: { site: string }) {
                   {job.lastRun ? ` · last run ${agoText(job.lastRun)}` : ""}
                 </span>
               </div>
-              <div className="row" style={{ gap: 8 }}>
-                <button className={`btn${job.enabled ? "" : " primary"}`} onClick={() => post({ enabled: !job.enabled })} disabled={busy}>
-                  {job.enabled ? "Pause" : "Resume"}
-                </button>
-              </div>
+              {!readOnly && (
+                <div className="row" style={{ gap: 8 }}>
+                  <button className={`btn${job.enabled ? "" : " primary"}`} onClick={() => post({ enabled: !job.enabled })} disabled={busy}>
+                    {job.enabled ? "Pause" : "Resume"}
+                  </button>
+                </div>
+              )}
             </div>
 
             <div style={{ marginTop: 14 }}>
@@ -285,7 +291,7 @@ export default function IndexChecks({ site }: { site: string }) {
                 <li>Today&apos;s plan: {job.message || "waiting for the first daily plan (it runs every hour)."}</li>
                 <li>
                   Runs as: {runsAsPerson ? `${job.runAs}'s Google sign-in` : `the service account (${st.serviceAccount})`}.
-                  {runsAsPerson && " If that sign-in stops working, anyone who can open the property can take over with “Use my Google sign-in”."}
+                  {runsAsPerson && !readOnly && " If that sign-in stops working, anyone who can open the property can take over with “Use my Google sign-in”."}
                 </li>
                 {stats && (
                   <li>
@@ -305,12 +311,12 @@ export default function IndexChecks({ site }: { site: string }) {
                   checked, pages changed in the sitemap, failed checks, then everything else (oldest result first).
                 </li>
                 <li>
-                  The plan runs once a day after Google&apos;s quota resets (13:30 India time); checks then run every 10 minutes until
-                  the day&apos;s list is done. The browser&apos;s Live index monitor is off for this property.
+                  The plan runs once a day after Google&apos;s quota resets (13:30 India time); checks then run every 30 minutes until
+                  the day&apos;s list is done.
                 </li>
               </ul>
               <div className="row" style={{ marginTop: 10, gap: 8 }}>
-                {!st.saCanRead && (
+                {!st.saCanRead && !readOnly && (
                   <button className="btn" onClick={() => post({ enabled: true, useMine: true })} disabled={busy}>
                     Use my Google sign-in
                   </button>
