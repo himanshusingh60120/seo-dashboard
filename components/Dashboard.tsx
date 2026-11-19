@@ -21,7 +21,7 @@ import CtaSection from "./CtaSection";
 import ChannelDrilldown from "./ChannelDrilldown";
 import SocialTraffic from "./SocialTraffic"; // social media
 import WeeklyReport from "./WeeklyReport"; // weekly report
-import Audit from "./Audit";
+import Audit from "./Audit"; // Site investigation (replaces the GSC audit)
 import IndexChecks from "./IndexChecks";
 import WeeklyCaptures from "./WeeklyCaptures";
 import CompareMode, { COMPARE_TABS, type CompareTab } from "./CompareMode";
@@ -251,7 +251,7 @@ export default function Dashboard() {
       .catch(() => {});
   }, []);
 
-  // The audit tab is shown only to the audit account; every audit API route checks the account again.
+  // The Site investigation tab is shown only to the audit account; every audit API route checks the account again.
   useEffect(() => {
     fetch("/api/audit/access", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
@@ -499,11 +499,11 @@ export default function Dashboard() {
   };
 
   // Tabs this person can see: Weekly captures only for capture accounts, the weekly report only for its account,
-  // the audit only for the audit account.
+  // the Site investigation only for the audit account.
   const tabs: { id: Tab; label: string }[] = [
     ...BASE_TABS.filter((t) => t.id !== "captures" || canCapture),
     ...(canWeekly ? [{ id: "weekly" as Tab, label: "Weekly report" }] : []), // weekly report
-    ...(canAudit ? [{ id: "audit" as Tab, label: "GSC audit (AI)" }] : []),
+    ...(canAudit ? [{ id: "audit" as Tab, label: "Site investigation" }] : []),
   ];
   // Nobody stays on a tab they can't see.
   useEffect(() => {
@@ -843,7 +843,8 @@ export default function Dashboard() {
               {/* weekly report: its own properties and dates, independent of the top bar */}
               {tab === "weekly" && canWeekly && <WeeklyReport />}
 
-              {site && tab === "audit" && canAudit && <Audit site={site} />}
+              {/* Site investigation: the top bar's GA4 choice is a hint; the investigation checks it has data and finds the right one if not */}
+              {site && tab === "audit" && canAudit && <Audit site={site} ga4={ga4} />}
             </>
           )}
         </main>
