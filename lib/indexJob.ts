@@ -1,7 +1,7 @@
 // lib/indexJob.ts
 // Daily index checks for enrolled properties. Each property's results live in its own Google Sheet
-// (lib/sheetBooks.ts), in the "URL checks", "By sitemap" and "Status changes" sections (lib/sheetLayout.ts). The shared
-// bookkeeping (_Jobs: one row per property; _Log) is in the control Sheet (INDEX_SHEET_ID).
+// (lib/sheetBooks.ts), in the "URL checks", "By sitemap", "Status changes" and "404 link sources" sections
+// (lib/sheetLayout.ts). The shared bookkeeping (_Jobs: one row per property; _Log) is in the control Sheet (INDEX_SHEET_ID).
 //
 // Only Google's URL Inspection decides whether a URL is Indexed or Not indexed. Search impressions are used only to
 // decide what to check first. Every tracked URL goes through a rotation within the daily budget (oldest result first),
@@ -22,6 +22,8 @@
 //     so a slow server never makes pages disappear from the counts or the rotation.
 //   run (every 10 minutes): inspects queued URLs in batches of 40, writes each result to its row, and updates the
 //     "By sitemap" counts after every batch (only the sitemaps that changed), so the dashboard moves every 10 minutes.
+//     For URLs that return 404 / soft 404 it also saves the pages and sitemaps Google says link to them ("404 link
+//     sources"), from the same inspection, so the Site investigation can show where each 404 is linked from.
 // Search Console is read as the service account when it has been added to the property; otherwise as the person who
 // started the checks (their saved Google sign-in, see lib/userCredential.ts). The Sheets are always the service account.
 import { serviceAccountToken } from "./serviceAccount";
@@ -30,7 +32,7 @@ import {
   appendRows, batchRead, bookUrl, colLetter, controlBook, ensureTab, readRange, readRanges, sheetUrl, tabs, writeRange, writeRanges,
   type Book, type Row,
 } from "./sheets";
-import { FIRST_ROW, SEC, URL_HEADERS, appendSection, assertLayout, sectionRange, tabFor, writeSection } from "./sheetLayout";
+import { FIRST_ROW, SEC, URL_HEADERS, appendSection, assertLayout, ensureSections, sectionRange, tabFor, writeSection } from "./sheetLayout";
 import { findSheet, propertySheet } from "./sheetBooks";
 import { writeOverview } from "./overview";
 import { collect } from "./sitemapReader";
@@ -226,6 +228,47 @@ async function recordChanges(book: Book, title: string, rows: Row[]) {
   if (!rows.length) return;
   try {
     await appendSection(book, title, "changes", rows);
+  } catch {
+    /* a convenience, like the log */
+  }
+}
+
+/* ---------------- 404 link sources (pages and sitemaps Google says point to a 404 URL) ---------------- */
+
+const is404Result = (r: InspectionResult) =>
+  r.pageFetchState === "NOT_FOUND" || r.pageFetchState === "SOFT_404" || /not found \(404\)|soft 404/i.test(r.coverageState || "");
+const joinCell = (list: unknown) => (Array.isArray(list) ? list.map(String).filter(Boolean).join(" | ").slice(0, 45_000) : "");
+
+/**
+ * Keeps the "404 link sources" section in step with the latest inspections: a URL that returns 404 / soft 404 gets
+ * (or updates) its row; a URL that no longer does loses it. Failed checks change nothing. Never fails a job.
+ */
+async function saveLinkSources(book: Book, title: string, updates: Map<string, Row | null>) {
+  if (!updates.size) return;
+  try {
+    await ensureSections(book, title);
+    const rows = (await readRange(book, title, sectionRange("links404"))).filter((r) => s(r[0]));
+    const out: Row[] = [];
+    const seen = new Set<string>();
+    let changed = false;
+    for (const r of rows) {
+      const u = s(r[0]);
+      if (!updates.has(u)) {
+        out.push(r);
+        continue;
+      }
+      seen.add(u);
+      const next = updates.get(u);
+      if (next) out.push(next);
+      changed = true;
+    }
+    for (const [u, next] of updates) {
+      if (next && !seen.has(u)) {
+        out.push(next);
+        changed = true;
+      }
+    }
+    if (changed) await writeSection(book, title, "links404", out);
   } catch {
     /* a convenience, like the log */
   }
@@ -615,6 +658,8 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
   const data: { range: string; values: Row[] }[] = [];
   const changes: Row[] = [];
   const delta = new Map<string, Tally>();
+  /** URL → its "404 link sources" row (404 / soft 404), or null to remove it (the URL no longer returns 404). */
+  const links = new Map<string, Row | null>();
   /** Moves one URL from one count to another in its sitemap's row of the summary. */
   const move = (cells: Row, from: Bucket, to: Bucket) => {
     const key = groupOf(cells);
@@ -651,6 +696,10 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
     }
 
     const status = isIndexedVerdict(res.verdict) ? "Indexed" : "Not indexed";
+    links.set(
+      url,
+      is404Result(res) ? [url, res.coverageState, joinCell(res.referringUrls), joinCell(res.sitemaps), res.checkedAt] : null
+    );
     if (status === "Indexed") c.indexed++;
     else c.notIndexed++;
     move(it.cells, was, status === "Indexed" ? "indexed" : "notIndexed");
@@ -674,6 +723,7 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
   }
   if (data.length) await writeRanges(job.book, job.tab, data);
   await recordChanges(job.book, job.tab, changes);
+  await saveLinkSources(job.book, job.tab, links);
 
   const who = job.runAs === SA_LABEL ? "the service account" : job.runAs;
   const stop = quota
