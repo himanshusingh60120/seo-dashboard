@@ -19,6 +19,7 @@ import QueryGrowth from "./QueryGrowth";
 import Audience from "./Audience";
 import CtaSection from "./CtaSection";
 import ChannelDrilldown from "./ChannelDrilldown";
+import SocialTraffic from "./SocialTraffic"; // social media
 import Audit from "./Audit";
 import IndexChecks from "./IndexChecks";
 import WeeklyCaptures from "./WeeklyCaptures";
@@ -799,6 +800,8 @@ export default function Dashboard() {
               {tab === "audience" && (
                 <>
                   <Audience ga={ga} gaError={gaError} hasGa4={!!ga4} loading={loading} />
+                  {/* social media: every network, the pages it sent visitors to, tagged links */}
+                  <SocialTraffic key={`social-${ga4}-${days}-${compare}`} site={site} ga4={ga4} days={days} compare={compare} />
                   <section className="section">
                     <h2>Channel drill-down</h2>
                     <p className="lede">
