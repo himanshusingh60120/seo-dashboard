@@ -20,12 +20,15 @@ import Audience from "./Audience";
 import CtaSection from "./CtaSection";
 import ChannelDrilldown from "./ChannelDrilldown";
 import SocialTraffic from "./SocialTraffic"; // social media
+import WeeklyReport from "./WeeklyReport"; // weekly report
 import Audit from "./Audit";
 import IndexChecks from "./IndexChecks";
 import WeeklyCaptures from "./WeeklyCaptures";
 import CompareMode, { COMPARE_TABS, type CompareTab } from "./CompareMode";
 
-type Tab = "overview" | "rankings" | "indexing" | "checks" | "captures" | "crawl" | "queries" | "growth" | "audience" | "cta" | "audit";
+type Tab =
+  | "overview" | "rankings" | "indexing" | "checks" | "captures" | "crawl" | "queries" | "growth" | "audience" | "cta" | "audit"
+  | "weekly"; // weekly report
 
 const BASE_TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -200,6 +203,8 @@ export default function Dashboard() {
   const [ctab, setCtab] = useState<CompareTab>("summary");
   const [canAudit, setCanAudit] = useState(false);
   const [canCapture, setCanCapture] = useState(false);
+  /** Weekly report account (WEEKLY_REPORT_EMAILS). */
+  const [canWeekly, setCanWeekly] = useState(false); // weekly report
   /** View-only account (VIEWER_EMAILS): sees everything, but can't run URL Inspection or change settings. */
   const [viewer, setViewer] = useState(false);
   const [gsc, setGsc] = useState<GscData | null>(null);
@@ -260,6 +265,14 @@ export default function Dashboard() {
     fetch("/api/capture/access", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => setCanCapture(!!d?.allowed))
+      .catch(() => {});
+  }, []);
+
+  // weekly report: the Weekly report tab is shown only to WEEKLY_REPORT_EMAILS; its API routes check the account again.
+  useEffect(() => {
+    fetch("/api/weekly/access", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setCanWeekly(!!d?.allowed))
       .catch(() => {});
   }, []);
 
@@ -485,16 +498,18 @@ export default function Dashboard() {
     setDays(daysForMonths(m));
   };
 
-  // Tabs this person can see: Weekly captures only for capture accounts, the audit only for the audit account.
+  // Tabs this person can see: Weekly captures only for capture accounts, the weekly report only for its account,
+  // the audit only for the audit account.
   const tabs: { id: Tab; label: string }[] = [
     ...BASE_TABS.filter((t) => t.id !== "captures" || canCapture),
+    ...(canWeekly ? [{ id: "weekly" as Tab, label: "Weekly report" }] : []), // weekly report
     ...(canAudit ? [{ id: "audit" as Tab, label: "GSC audit (AI)" }] : []),
   ];
   // Nobody stays on a tab they can't see.
   useEffect(() => {
     if (!tabs.some((t) => t.id === tab)) setTab("overview");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canCapture, canAudit, tab]);
+  }, [canCapture, canAudit, canWeekly, tab]);
 
   const noGa4Notice = <div className="notice">Pick a GA4 property in the top bar to see this data.</div>;
   const needsGsc = ["overview", "rankings", "queries"].includes(tab);
@@ -824,6 +839,9 @@ export default function Dashboard() {
                   {ga4 ? <CtaSection key={`cta-${ga4}-${days}`} propertyId={ga4} days={days} /> : noGa4Notice}
                 </section>
               )}
+
+              {/* weekly report: its own properties and dates, independent of the top bar */}
+              {tab === "weekly" && canWeekly && <WeeklyReport />}
 
               {site && tab === "audit" && canAudit && <Audit site={site} />}
             </>
