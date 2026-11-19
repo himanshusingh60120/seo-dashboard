@@ -3,6 +3,7 @@
 // Everything about one page, opened from the "Look up a URL" box in the top bar:
 // Google index status (URL Inspection), Google Search performance and queries (Search Console), AI impressions,
 // and site traffic for the page (GA4), including visits from AI assistants.
+// View-only accounts (readOnly) only see a saved inspection result; they can't run new inspections.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { GscData, Inspection } from "@/lib/types";
@@ -102,8 +103,12 @@ const SOURCE_COLS: Col<SourceRow>[] = [
 ];
 
 export default function UrlReport({
-  site, url, gsc, ga4, days, compare, onClose,
-}: { site: string; url: string; gsc: GscData; ga4: string; days: number; compare: Compare; onClose: () => void }) {
+  site, url, gsc, ga4, days, compare, onClose, readOnly = false,
+}: {
+  site: string; url: string; gsc: GscData; ga4: string; days: number; compare: Compare; onClose: () => void;
+  /** View-only account: show a saved inspection result only, never run a new one. */
+  readOnly?: boolean;
+}) {
   const outer = useSources();
   const closeRef = useRef<HTMLButtonElement>(null);
   const [pq, setPq] = useState<PageQueriesResponse | null>(null);
@@ -153,6 +158,12 @@ export default function UrlReport({
         if (Date.now() - Date.parse(good.checkedAt) < FRESH_MS) return; // recent enough: no inspection used
       }
 
+      // View-only accounts never run URL Inspection (the server refuses it too).
+      if (readOnly) {
+        if (!good) setInspErr("View-only accounts can't run URL Inspection, and this URL has no saved result in this browser.");
+        return;
+      }
+
       if (quotaLeft(site) <= 0) {
         if (good) setInspNote("Today's URL Inspection limit for this property is used up, so this is the last saved result.");
         else setInspErr("Google's daily URL Inspection limit for this property is used up. Try again tomorrow.");
@@ -186,7 +197,7 @@ export default function UrlReport({
         if (live()) setChecking(false);
       }
     },
-    [site, url]
+    [site, url, readOnly]
   );
 
   useEffect(() => {
@@ -341,10 +352,12 @@ export default function UrlReport({
               <>
                 <p className="muted" style={{ marginTop: 0 }}>
                   {fromSaved ? `Last checked ${ago(insp.checkedAt)} (saved result, no inspection used)` : "Checked just now"}
-                  {` · ${num(left)} of ${num(DAILY_INSPECTION_LIMIT)} inspections left today `}
-                  <button className="btn small" onClick={() => runCheck(true)} disabled={checking || left <= 0}>
-                    {checking ? "Checking…" : "Check again"}
-                  </button>
+                  {!readOnly && ` · ${num(left)} of ${num(DAILY_INSPECTION_LIMIT)} inspections left today `}
+                  {!readOnly && (
+                    <button className="btn small" onClick={() => runCheck(true)} disabled={checking || left <= 0}>
+                      {checking ? "Checking…" : "Check again"}
+                    </button>
+                  )}
                 </p>
                 <Kpis items={inspKpis} />
                 <div className="table-wrap" style={{ marginTop: 12 }}>
