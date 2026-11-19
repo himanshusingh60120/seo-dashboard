@@ -1,7 +1,9 @@
 // lib/audit/catalog.ts
 // Shared (browser + server). Every issue type the audit can report, with a standard fix based on Google's
 // documentation. Severity is fixed here, never chosen by the AI.
+// The Site investigation's quick-check types live in ./investigateCatalog and are merged into CATALOG at the end.
 import { INVESTIGATE_CATALOG, type InvestigateType } from "./investigateCatalog";
+
 export type Severity = "critical" | "high" | "medium" | "low";
 export type Category = "Indexing" | "Crawling" | "Sitemaps" | "Canonicals" | "Performance" | "Structured data" | "Traffic" | "Site setup";
 
@@ -13,7 +15,7 @@ export type IssueType =
   | "no_sitemaps" | "sitemap_errors" | "sitemap_warnings" | "sitemap_stale"
   | "traffic_drop" | "lost_visibility" | "position_drop" | "low_ctr" | "cannibalization"
   | "broken_links" | "links_to_redirects" | "http_404_sources"
-   | InvestigateType;;
+  | InvestigateType;
 
 export type CatalogEntry = {
   title: string; severity: Severity; category: Category; what: string;
@@ -467,4 +469,7 @@ export const CATALOG: Record<IssueType, CatalogEntry> = {
     verify: ["Re-run the audit: the link is no longer found", "Then 'Validate fix' on 'Not found (404)' in the Page indexing report"],
     doc: DOC.http,
   },
+
+  /* ---------- From the Site investigation's quick checks (./investigateCatalog) ---------- */
+  ...INVESTIGATE_CATALOG,
 };
