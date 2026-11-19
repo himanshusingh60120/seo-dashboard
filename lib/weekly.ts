@@ -9,13 +9,14 @@
 //
 // Who can open it: WEEKLY_REPORT_EMAILS (default hsingh@kingsresearch.com).
 // Which properties: WEEKLY_SITES (exact Search Console properties, comma-separated) or, when that isn't set, the
-// properties whose address contains aitech, martech, readmagzine or itdigest. Each is paired with the GA4 property whose
-// web stream has the same host, the same way the top bar pairs them.
+// properties whose address contains aitech, martech, readmagazine or itdigest. When a site has several properties
+// (http and https, www and no www), the one with the most impressions in the last 28 days is used. Each is paired with
+// the GA4 property whose web stream has the same host, the same way the top bar pairs them.
 import type { NextRequest } from "next/server";
 import { HttpError, requireUser } from "./token";
 import {
   ga4TimeZone, latestFinalDate, listGa4Properties, listSitemaps, listSites, listWebStreamHosts, normalizeHost,
-  saEndpoint, saRequest, searchAnalyticsAll, type SABody, type SARow,
+  saEndpoint, saRequest, searchAnalytics, searchAnalyticsAll, type SABody, type SARow,
 } from "./google";
 import { batchReports } from "./ga4-report";
 import { GSC_TZ, addDays, todayIn } from "./dates";
@@ -45,12 +46,30 @@ export async function requireWeeklyUser(req: NextRequest) {
 
 /* ---------------- Which properties ---------------- */
 
-const DEFAULT_NAMES = ["aitech", "martech", "readmagzine", "itdigest"];
+/** Part of each site's address used to find it. "readmagzine" is kept too, for the spelling used when this was set up. */
+const DEFAULT_NAMES: { name: string; match: string[] }[] = [
+  { name: "aitech", match: ["aitech"] },
+  { name: "martech", match: ["martech"] },
+  { name: "readmagazine", match: ["readmagazine", "readmagzine"] },
+  { name: "itdigest", match: ["itdigest"] },
+];
 
 export type WeeklySite = { siteUrl: string; host: string; name: string; ga4: string | null; ga4Name: string | null };
 export type WeeklySites = { sites: WeeklySite[]; missing: string[]; alsoMatched: Record<string, string[]> };
 
 const siteCache = new Map<string, { at: number; v: WeeklySites }>();
+
+/** Impressions over the last 28 days, to tell the property with the real data from near-empty duplicates
+ *  (http:// vs https://, www vs no www). */
+async function recentImpressions(token: string, siteUrl: string) {
+  const end = todayIn(GSC_TZ);
+  try {
+    const rows = await searchAnalytics(token, siteUrl, { startDate: addDays(end, -28), endDate: end, dataState: "all", rowLimit: 1 });
+    return rows[0]?.impressions ?? 0;
+  } catch {
+    return -1;
+  }
+}
 
 export async function weeklySites(token: string): Promise<WeeklySites> {
   const k = token.slice(-32);
@@ -70,14 +89,21 @@ export async function weeklySites(token: string): Promise<WeeklySites> {
     }
   } else {
     for (const n of DEFAULT_NAMES) {
-      const hits = all.filter((x) => normalizeHost(x.siteUrl).includes(n));
+      const hits = all.filter((x) => n.match.some((m) => normalizeHost(x.siteUrl).includes(m)));
       if (!hits.length) {
-        missing.push(n);
+        missing.push(n.name);
         continue;
       }
-      // Prefer the domain property; otherwise the shortest URL-prefix property.
-      const best = hits.find((x) => x.siteUrl.startsWith("sc-domain:")) || [...hits].sort((a, b) => a.siteUrl.length - b.siteUrl.length)[0];
-      picked.push({ siteUrl: best.siteUrl, name: n });
+      // Several properties for the same site: use the one with the most impressions in the last 28 days
+      // (a domain property wins a tie, since it covers every version of the address).
+      let best = hits[0];
+      if (hits.length > 1) {
+        const scored = await Promise.all(hits.map(async (h) => ({ h, imp: await recentImpressions(token, h.siteUrl) })));
+        const dom = (u: string) => (u.startsWith("sc-domain:") ? 1 : 0);
+        scored.sort((a, b) => b.imp - a.imp || dom(b.h.siteUrl) - dom(a.h.siteUrl));
+        best = scored[0].h;
+      }
+      picked.push({ siteUrl: best.siteUrl, name: n.name });
       const others = hits.filter((x) => normalizeHost(x.siteUrl) !== normalizeHost(best.siteUrl)).map((x) => x.siteUrl);
       if (others.length) alsoMatched[best.siteUrl] = others;
     }
