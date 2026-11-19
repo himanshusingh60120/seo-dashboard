@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { Sources } from "@/lib/types";
-import type { Area, Mover, NewQuery, PropertyWeek, SitemapRow, Split, Status, WeekInfo, WeeklySite } from "@/lib/weekly";
+import type { Area, Mover, NewQuery, PropertyWeek, SitemapRow, SourceGroup, Split, Status, WeekInfo, WeeklySite } from "@/lib/weekly";
 import { DataTable, Delta, Kpis, PanelTitle, Section, SourcesProvider, SubTabs, num, pct, pos, type Col, type KpiItem } from "./ui";
 
 type Meta = { week: WeekInfo; sites: WeeklySite[]; missing: string[]; alsoMatched: Record<string, string[]>; rules: string[] };
@@ -29,10 +29,14 @@ async function getJson<T>(url: string): Promise<T> {
   return data as T;
 }
 
+function addDaysLocal(d: string, n: number) {
+  const t = new Date(`${d}T00:00:00Z`);
+  t.setUTCDate(t.getUTCDate() + n);
+  return t.toISOString().slice(0, 10);
+}
 const fmtDate = (d: string, o: Intl.DateTimeFormatOptions) => new Date(`${d}T00:00:00Z`).toLocaleDateString("en-GB", { ...o, timeZone: "UTC" });
 const weekLabel = (start: string, end: string) =>
   `${fmtDate(start, { weekday: "short", day: "numeric", month: "short" })} – ${fmtDate(end, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}`;
-const pathOf = (u: string) => u.replace(/^https?:\/\/[^/]+/, "") || "/";
 
 function Pill({ s, children }: { s: Status; children?: ReactNode }) {
   const c = STATUS[s];
@@ -117,6 +121,19 @@ const LANDING_COLS: Col<LandingRow>[] = [
   { key: "sessions", label: "Sessions", num: true, render: (r) => num(r.sessions) },
   { key: "prevSessions", label: "Last week", num: true, render: (r) => (r.prevSessions == null ? "–" : num(r.prevSessions)) },
 ];
+const groupCols = (label: string): Col<SourceGroup>[] => [
+  { key: "name", label },
+  { key: "sessions", label: "Sessions", num: true, render: (r) => num(r.sessions) },
+  { key: "prevSessions", label: "Last week", num: true, render: (r) => num(r.prevSessions) },
+  { key: "engaged", label: "Engagement rate", num: true, render: (r) => (r.sessions ? pct(r.engaged / r.sessions) : "–") },
+  { key: "keyEvents", label: "Key events", num: true, render: (r) => num(r.keyEvents) },
+];
+type AiLandingRow = { page: string; sessions: number; keyEvents: number };
+const AI_LANDING_COLS: Col<AiLandingRow>[] = [
+  { key: "page", label: "Landing page" },
+  { key: "sessions", label: "Sessions", num: true, render: (r) => num(r.sessions) },
+  { key: "keyEvents", label: "Key events", num: true, render: (r) => num(r.keyEvents) },
+];
 
 /* ---------------- One property ---------------- */
 
@@ -128,7 +145,9 @@ function PropertyDetail({ site, r }: { site: WeeklySite; r?: Result }) {
   const a = d.ga;
   const wk = d.week;
   const S = d.sourceIds;
-  const compared = wk.partial ? `change compares Mon–${fmtDate(addDaysLocal(wk.start, wk.compareDays - 1), { weekday: "short" })}` : "change compares the full week";
+  const compared = wk.partial
+    ? `change compares Mon–${fmtDate(addDaysLocal(wk.start, wk.compareDays - 1), { weekday: "short" })}`
+    : "change compares the full week";
 
   const gscKpis: KpiItem[] = g
     ? [
@@ -151,7 +170,21 @@ function PropertyDetail({ site, r }: { site: WeeklySite; r?: Result }) {
           delta: a.cmp.sessions && a.prev.sessions ? <Delta cur={(a.cmp.engaged / a.cmp.sessions) * 100} prev={(a.prev.engaged / a.prev.sessions) * 100} asPoints /> : undefined,
         },
         { label: "Key events", source: [S.ga], value: num(a.week.keyEvents), delta: <Delta cur={a.cmp.keyEvents} prev={a.prev.keyEvents} /> },
-        { label: "Social sessions", source: [S.ga], value: num(a.social.sessions), delta: <Delta cur={a.social.sessions} prev={a.social.prevSessions} />, sub: "compared days" },
+        { label: "Page views", source: [S.ga], value: num(a.week.views), delta: <Delta cur={a.cmp.views} prev={a.prev.views} /> },
+      ]
+    : [];
+  const sourceKpis: KpiItem[] = a
+    ? [
+        { label: "AI-assistant visits", source: [S.ga], value: num(a.ai.sessions), delta: <Delta cur={a.ai.sessions} prev={a.ai.prevSessions} />, sub: "compared days" },
+        { label: "AI engagement rate", source: [S.ga], value: a.ai.sessions ? pct(a.ai.engaged / a.ai.sessions) : "–" },
+        { label: "AI key events", source: [S.ga], value: num(a.ai.keyEvents) },
+        {
+          label: "AI share of sessions",
+          source: [S.ga],
+          value: a.cmp.sessions ? pct(a.ai.sessions / a.cmp.sessions, 2) : "–",
+          delta: a.cmp.sessions && a.prev.sessions ? <Delta cur={(a.ai.sessions / a.cmp.sessions) * 100} prev={(a.ai.prevSessions / a.prev.sessions) * 100} asPoints /> : undefined,
+        },
+        { label: "Social visits", source: [S.ga], value: num(a.social.sessions), delta: <Delta cur={a.social.sessions} prev={a.social.prevSessions} />, sub: "compared days" },
       ]
     : [];
   const chart = g ? g.days.map((x) => ({ day: fmtDate(x.date, { weekday: "short", day: "numeric" }), clicks: x.clicks, state: x.state })) : [];
@@ -275,16 +308,35 @@ function PropertyDetail({ site, r }: { site: WeeklySite; r?: Result }) {
               <DataTable rows={a.landing} cols={LANDING_COLS} initialSort="sessions" pageSize={15} csvName={`${d.name}-landing-${wk.start}.csv`} source={[S.ga]} />
             </div>
           </div>
+
+          <h3 style={{ margin: "24px 0 8px" }}>AI assistants, social media and referrals (GA4)</h3>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Visits whose source is an AI assistant (ChatGPT, Perplexity, Gemini, Claude, Copilot and others), a social network, or another website. Figures cover
+            the compared days.
+          </p>
+          <Kpis items={sourceKpis} />
+          <div className="grid-2" style={{ marginTop: 16 }}>
+            <div className="panel">
+              <PanelTitle source={[S.ga]}>Visits by AI assistant</PanelTitle>
+              <DataTable rows={a.ai.tools} cols={groupCols("AI assistant")} initialSort="sessions" pageSize={10} csvName={`${d.name}-ai-assistants-${wk.start}.csv`} source={[S.ga]} empty="No visits from AI assistants this week." />
+            </div>
+            <div className="panel">
+              <PanelTitle source={[S.ga]}>Pages AI assistants sent visitors to</PanelTitle>
+              <DataTable rows={a.ai.landing} cols={AI_LANDING_COLS} initialSort="sessions" pageSize={10} csvName={`${d.name}-ai-landing-${wk.start}.csv`} source={[S.ga]} empty="No visits from AI assistants this week." />
+            </div>
+            <div className="panel">
+              <PanelTitle source={[S.ga]}>Visits by social network</PanelTitle>
+              <DataTable rows={a.socialNetworks} cols={groupCols("Network")} initialSort="sessions" pageSize={10} csvName={`${d.name}-social-${wk.start}.csv`} source={[S.ga]} empty="No visits from social media this week." />
+            </div>
+            <div className="panel">
+              <PanelTitle source={[S.ga]}>Top referring sites</PanelTitle>
+              <DataTable rows={a.referrals} cols={groupCols("Site")} initialSort="sessions" pageSize={10} csvName={`${d.name}-referrals-${wk.start}.csv`} source={[S.ga]} empty="No referral visits this week." />
+            </div>
+          </div>
         </>
       )}
     </>
   );
-}
-
-function addDaysLocal(d: string, n: number) {
-  const t = new Date(`${d}T00:00:00Z`);
-  t.setUTCDate(t.getUTCDate() + n);
-  return t.toISOString().slice(0, 10);
 }
 
 /* ---------------- The tab ---------------- */
@@ -389,6 +441,7 @@ export default function WeeklyReport() {
                       <th className="num">Impressions</th>
                       <th className="num">Position</th>
                       <th className="num">Sessions</th>
+                      <th className="num">AI visits</th>
                       <th className="num">Key events</th>
                       <th>Status</th>
                     </tr>
@@ -407,13 +460,14 @@ export default function WeeklyReport() {
                             <div className="muted" style={{ fontSize: 12 }}>{s.host}</div>
                           </td>
                           {!d ? (
-                            <td colSpan={6} className="muted">{r?.error ? `Couldn't load: ${r.error}` : "Loading…"}</td>
+                            <td colSpan={7} className="muted">{r?.error ? `Couldn't load: ${r.error}` : "Loading…"}</td>
                           ) : (
                             <>
                               <td className="num">{g ? <>{num(g.week.clicks)} <Chg now={g.cmp.clicks} base={g.prev.clicks} /></> : "–"}</td>
                               <td className="num">{g ? <>{num(g.week.impressions)} <Chg now={g.cmp.impressions} base={g.prev.impressions} /></> : "–"}</td>
                               <td className="num">{g ? <>{pos(g.week.position)} <PosChg now={g.cmp.position} base={g.prev.position} /></> : "–"}</td>
                               <td className="num">{a ? <>{num(a.week.sessions)} <Chg now={a.cmp.sessions} base={a.prev.sessions} /></> : "–"}</td>
+                              <td className="num">{a ? <>{num(a.ai.sessions)} <Chg now={a.ai.sessions} base={a.ai.prevSessions} /></> : "–"}</td>
                               <td className="num">{a ? <>{num(a.week.keyEvents)} <Chg now={a.cmp.keyEvents} base={a.prev.keyEvents} /></> : "–"}</td>
                               <td>
                                 {c && (
@@ -433,7 +487,7 @@ export default function WeeklyReport() {
                 </table>
               </div>
               <p className="muted" style={{ margin: "8px 0 0", fontSize: 12 }}>
-                Changes compare the same days of last week. Status counts: <Pill s="good">Good</Pill>
+                Changes compare the same days of last week. AI visits cover the compared days. Status counts: <Pill s="good">Good</Pill>
                 <Pill s="watch">Watch</Pill>
                 <Pill s="problem">Problem</Pill> across the areas checked so far.
               </p>
