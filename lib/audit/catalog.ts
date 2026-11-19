@@ -1,9 +1,9 @@
 // lib/audit/catalog.ts
 // Shared (browser + server). Every issue type the audit can report, with a standard fix based on Google's
 // documentation. Severity is fixed here, never chosen by the AI.
-
+import { INVESTIGATE_CATALOG, type InvestigateType } from "./investigateCatalog";
 export type Severity = "critical" | "high" | "medium" | "low";
-export type Category = "Indexing" | "Crawling" | "Sitemaps" | "Canonicals" | "Performance" | "Structured data";
+export type Category = "Indexing" | "Crawling" | "Sitemaps" | "Canonicals" | "Performance" | "Structured data" | "Traffic" | "Site setup";
 
 export type IssueType =
   | "http_404" | "soft_404" | "server_error" | "redirect_error" | "access_denied" | "blocked_robots" | "noindex"
@@ -12,7 +12,8 @@ export type IssueType =
   | "url_4xx" | "url_5xx" | "url_redirect" | "redirect_chain" | "url_noindex" | "url_robots_blocked" | "url_canonical_elsewhere" | "http_inconclusive"
   | "no_sitemaps" | "sitemap_errors" | "sitemap_warnings" | "sitemap_stale"
   | "traffic_drop" | "lost_visibility" | "position_drop" | "low_ctr" | "cannibalization"
-  | "broken_links" | "links_to_redirects" | "http_404_sources";
+  | "broken_links" | "links_to_redirects" | "http_404_sources"
+   | InvestigateType;;
 
 export type CatalogEntry = {
   title: string; severity: Severity; category: Category; what: string;
