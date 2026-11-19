@@ -5,8 +5,8 @@
 //  0. Quick investigation (/api/audit/investigate): GA4 pairing and traffic quality, Search Console trend, Google search vs
 //     GA4, Page indexing and Crawl stats captures, sitemap setup, address variants, and a timeline of when things changed.
 //  1. Search Console performance issues and the Sitemaps report.
-//  2. Google's index status for every tracked URL, read from the daily index checks' Sheet. This tab never runs URL
-//     Inspection itself, so it never spends Google's daily inspection quota.
+//  2. Google's index status for every tracked URL, plus the pages and sitemaps Google says link to each 404, read from
+//     the daily index checks' Sheet. This tab never runs URL Inspection itself, so it never spends Google's daily quota.
 //  3–4, 6. Full mode only: URL list (only when the daily checks have none), live page checks, deep crawl.
 //  5. Googlebot crawl activity (last-crawl dates saved by the daily index checks).
 //  7. Fixes: GPT writes, code + Jev double-check. Issues and counts never come from the AI.
@@ -52,11 +52,11 @@ const UNIT: Partial<Record<IssueType, string>> = {
 const STEPS = [
   "Quick investigation (GA4 traffic quality, Search Console trend, indexing and crawl captures, sitemaps, address variants)",
   "Search Console performance & Sitemaps report",
-  "Google's index status (saved by the daily index checks)",
+  "Google's index status and 404 link sources (saved by the daily index checks)",
   "URL list (only when the daily index checks have none)",
   "Live page checks (status, redirects, noindex, canonical, robots.txt)",
   "Googlebot crawl activity (last-crawl dates saved by the daily index checks)",
-  "Deep crawl (internal links, links to redirects)",
+  "Deep crawl (internal links, 404 sources, links to redirects)",
   "Fixes: GPT writes, code + Jev double-check",
 ];
 const AI_CACHE_DAYS = 7;
@@ -197,7 +197,7 @@ export default function Audit({ site, ga4 = "" }: { site: string; ga4?: string }
       });
       const clicks = new Map(Object.entries(col.clicksByUrl));
 
-      // 2) Google's index status, from the daily index checks' Sheet (no URL Inspection here)
+      // 2) Google's index status and 404 link sources, from the daily index checks' Sheet (no URL Inspection here)
       upd(2, { state: "run" });
       const sitemapSet = new Set<string>();
       let listed = 0;
@@ -206,6 +206,7 @@ export default function Audit({ site, ga4 = "" }: { site: string; ga4?: string }
       let to = "";
       let configured = true;
       let job: IndexResults["job"] = null;
+      const linkSources = new Map<string, { refs: string[]; sitemaps: string[] }>();
       for (let offset = 0, page = 0; page < MAX_INDEX_PAGES && !stop.current; page++) {
         const r = await get<IndexResults>(`/api/audit/index-results?site=${encodeURIComponent(site)}&offset=${offset}`);
         if (!r.configured) {
@@ -213,6 +214,7 @@ export default function Audit({ site, ga4 = "" }: { site: string; ga4?: string }
           break;
         }
         if (r.job) job = r.job;
+        for (const l of r.links404 || []) linkSources.set(l.url, { refs: l.refs, sitemaps: l.sitemaps });
         for (const [url, status, coverage, fetchState, lastCrawl, canonical, inspected, inSm] of r.rows) {
           listed++;
           if (inSm) sitemapSet.add(url);
@@ -224,7 +226,8 @@ export default function Audit({ site, ga4 = "" }: { site: string; ga4?: string }
           inspMap[url] = {
             url, verdict: status === "Indexed" ? "PASS" : "NEUTRAL", coverageState: coverage, indexingState: "",
             pageFetchState: fetchState, robotsTxtState: "", lastCrawlTime: lastCrawl, googleCanonical: canonical, userCanonical: "",
-            crawledAs: "", sitemaps: [], referringUrls: [], richIssues: [], link: inspectLink(site, url),
+            crawledAs: "", sitemaps: linkSources.get(url)?.sitemaps || [], referringUrls: linkSources.get(url)?.refs || [],
+            richIssues: [], link: inspectLink(site, url),
             checkedAt: inspected || new Date(0).toISOString(),
           } as Inspection;
         }
@@ -243,6 +246,7 @@ export default function Audit({ site, ga4 = "" }: { site: string; ga4?: string }
           note:
             `${num(withResult)} of ${num(listed)} tracked URLs have Google's result` +
             (from ? ` (checked ${from === to ? from : `${from} to ${to}`})` : "") +
+            (linkSources.size ? ` · link sources saved for ${num(linkSources.size)} 404 URL(s)` : "") +
             (job && !job.enabled ? " · daily checks are paused" : "") +
             (job?.stats?.cycleDays ? ` · each URL is re-checked about every ${job.stats.cycleDays} days` : ""),
         });
@@ -296,13 +300,14 @@ export default function Audit({ site, ga4 = "" }: { site: string; ga4?: string }
         });
       }
 
-      // 6) Deep crawl (full mode). Starts from the homepage, top pages and sitemap pages and follows internal links.
+      // 6) Deep crawl (full mode). Pages Google says link to 404s go first (to confirm whether the link is still there),
+      //    then every newly discovered link target, then homepage, top pages and sitemap pages.
       if (quick || !crawlN || stop.current) {
         upd(6, { state: "skip", note: quick ? "quick mode: choose Full to run it" : crawlN ? "stopped" : "turned off" });
       } else {
         upd(6, { state: "run" });
         try {
-          const plan = planCrawl(site, [], col.topPages, Array.from(sitemapSet));
+          const plan = planCrawl(site, inspAll, col.topPages, Array.from(sitemapSet));
           const pages = new Map<string, CrawlPage>();
           const inlinks = new Map<string, Inlink>();
           const found = new Set<string>();
@@ -350,6 +355,13 @@ export default function Audit({ site, ga4 = "" }: { site: string; ga4?: string }
                   loop: row.loop, robotsBlocked: row.robotsBlocked, inconclusive: row.inconclusive, error: row.error,
                 };
                 pages.set(row.url, page);
+                const wanted = plan.wantByRef.get(row.url);
+                if (wanted) {
+                  refChecked.add(row.url);
+                  row.links.forEach((l) => {
+                    if (wanted.has(l)) found.add(`${row.url}\n${l}`);
+                  });
+                }
                 const src = normalizeUrl(row.finalUrl || row.url);
                 if (row.redirects > 0 && src !== row.url && row.status === 200 && !pages.has(src)) {
                   pages.set(src, { ...page, url: src, chain: "200", finalUrl: src, redirects: 0 });
@@ -361,7 +373,7 @@ export default function Audit({ site, ga4 = "" }: { site: string; ga4?: string }
             upd(6, { note: `${num(pages.size)} pages fetched, ${num(left())} queued (limit ${num(crawlN)})` });
           }
           const out = crawlResults({
-            siteUrl: site, pages, inlinks, inspections: [], found, refChecked,
+            siteUrl: site, pages, inlinks, inspections: inspAll, found, refChecked,
             sitemap: sitemapSet, limit: crawlN, queuedLeft: left(),
           });
           setCrawl(out.report);
@@ -369,7 +381,7 @@ export default function Audit({ site, ga4 = "" }: { site: string; ga4?: string }
           show();
           upd(6, {
             state: "done",
-            note: `${num(out.report.fetched)} pages: ${num(out.report.brokenRows.length)} broken-link sources, ${num(out.report.redirectRows.length)} links to redirects`,
+            note: `${num(out.report.fetched)} pages: ${num(out.report.brokenRows.length)} broken-link sources, ${num(out.report.redirectRows.length)} links to redirects, ${num(out.report.sourceRows.length)} Google 404 source rows`,
           });
         } catch (e) {
           upd(6, { state: "error", note: e instanceof Error ? e.message : "Crawl failed" });
@@ -427,7 +439,7 @@ export default function Audit({ site, ga4 = "" }: { site: string; ga4?: string }
   return (
     <Section
       title="Site investigation"
-      lede="Investigates one property end to end: whether GA4 traffic is real readers, how Google Search is trending, which pages Google has indexed or dropped (from the daily index checks), whether Googlebot is crawling less, how the sitemaps and addresses are set up, and (in Full mode) live page checks and a deep crawl. A timeline links changes by date. Findings and counts come only from Google's data, the extension's Search Console captures and this dashboard's own checks; GPT writes the fixes, and code plus Jev (or a second GPT pass) check them."
+      lede="Investigates one property end to end: whether GA4 traffic is real readers, how Google Search is trending, which pages Google has indexed or dropped and where its 404s are linked from (from the daily index checks), whether Googlebot is crawling less, how the sitemaps and addresses are set up, and (in Full mode) live page checks and a deep crawl. A timeline links changes by date. Findings and counts come only from Google's data, the extension's Search Console captures and this dashboard's own checks; GPT writes the fixes, and code plus Jev (or a second GPT pass) check them."
     >
       <div className="panel">
         <div className="row">
