@@ -1,5 +1,6 @@
 // app/api/role/route.ts
-// GET → { viewer }: whether the signed-in person is a view-only account (VIEWER_EMAILS).
+// GET → { viewer }: whether the signed-in person is a view-only account (lib/viewers.ts).
+// The dashboard uses it to show the "View-only" badge and hide buttons; the routes that change things check again.
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/token";
 import { isViewer } from "@/lib/viewers";
