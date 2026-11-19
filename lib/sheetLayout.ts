@@ -2,8 +2,8 @@
 // Layout of a property's Google Sheet: one tab holding every kind of data in its own colour-coded section, side by
 // side from left to right. Row 1 is each section's coloured title bar, row 2 its column headers (both frozen), and
 // data starts on row 3. The long URL list comes after the reports; the saved daily history ("Search daily" and
-// "Traffic daily") was added later as two more sections to the right of it. Tabs created before that get the new
-// sections added automatically (ensureSections) without moving any existing data.
+// "Traffic daily") and the 404 link sources were added later as more sections to the right of it. Tabs created before
+// that get the new sections added automatically (ensureSections) without moving any existing data.
 // Each property has its own Sheet (lib/sheetBooks.ts); the control Sheet (INDEX_SHEET_ID) keeps the shared, hidden
 // tabs (_Jobs, _Sheets, _Updates, _Log, _Meta, _Archive, _Parts). Big monthly lists live in tabs of their own
 // (lib/sheetParts.ts). Server-only.
@@ -23,7 +23,7 @@ export const FIRST_ROW = 3;
 
 export type SectionKey =
   | "overview" | "pages" | "reasons" | "crawl" | "crawlUrls" | "ai" | "aiSplit" | "sitemaps" | "changes" | "urls"
-  | "searchDaily" | "gaDaily";
+  | "searchDaily" | "gaDaily" | "links404";
 
 export const URL_HEADERS = [
   "URL", "Sitemap", "Source", "Sitemap lastmod", "Status", "Verified by", "Google's reason", "Page fetch",
@@ -50,6 +50,7 @@ const DEFS: SectionDef[] = [
   { key: "urls", title: "URL checks · Google's URL Inspection", color: "#1E8E3E", light: "#E3F2E7", headers: URL_HEADERS, numeric: [11], widths: { 0: 380, 1: 280, 6: 280, 9: 280, 14: 260 } },
   { key: "searchDaily", title: "Search daily · Search Console (saved history)", color: "#1A73E8", light: "#E3EDFC", headers: ["Date", "Clicks", "Impressions", "CTR", "Position", "Updated"], numeric: [1, 2], widths: { 0: 110, 5: 170 } },
   { key: "gaDaily", title: "Traffic daily · GA4 (saved history)", color: "#E37400", light: "#FDEFD9", headers: ["Date", "Active users", "New users", "Sessions", "Views", "Engagement rate", "Avg session (s)", "Organic sessions", "Updated"], numeric: [1, 2, 3, 4, 7], widths: { 0: 110, 8: 170 } },
+  { key: "links404", title: "404 link sources · Google's URL Inspection", color: "#B3261E", light: "#FBE3E2", headers: ["URL", "Google's status", "Linked from (Google)", "In sitemaps (Google)", "Inspected"], widths: { 0: 380, 1: 200, 2: 460, 3: 320, 4: 170 } },
 ];
 
 export type Section = SectionDef & { start: number; end: number; width: number; L: string; R: string };
@@ -257,7 +258,7 @@ export async function createPropertyTab(book: Book, title: string, rows = 1000) 
 }
 
 /** Sections added after the first layout. Tabs created earlier get them on first use. */
-const LATER_SECTIONS: SectionKey[] = ["searchDaily", "gaDaily"];
+const LATER_SECTIONS: SectionKey[] = ["searchDaily", "gaDaily", "links404"];
 const upgraded = new Set<string>();
 
 /**
