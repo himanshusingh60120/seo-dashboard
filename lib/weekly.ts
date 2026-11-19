@@ -9,13 +9,15 @@
 //
 // Who can open it: WEEKLY_REPORT_EMAILS (default hsingh@kingsresearch.com).
 // Which properties: WEEKLY_SITES (exact Search Console properties, comma-separated) or, when that isn't set, the
-// properties whose address contains aitech, martech, readmagazine or itdigest. When a site has several properties
-// (http and https, www and no www), the one with the most impressions in the last 28 days is used. Each is paired with
-// the GA4 property whose web stream has the same host, the same way the top bar pairs them.
+// properties whose address contains aitech, martech, readmagazine or itdigest. When a site has several Search Console
+// properties (http and https, www and no www), the one with the most impressions in the last 28 days is used.
+// Which GA4 property goes with each: WEEKLY_GA4 ("readmagazine=123456789,aitech=987654321", keyed by name, host or
+// Search Console property) or, when that isn't set, the GA4 property whose web stream has the same host. When several
+// GA4 properties have that host (an old, empty one and the live one), the one with the most sessions in the last 28 days is used.
 import type { NextRequest } from "next/server";
 import { HttpError, requireUser } from "./token";
 import {
-  ga4TimeZone, latestFinalDate, listGa4Properties, listSitemaps, listSites, listWebStreamHosts, normalizeHost,
+  ga4TimeZone, latestFinalDate, listGa4Properties, listSitemaps, listSites, listWebStreamHosts, normalizeHost, runReport,
   saEndpoint, saRequest, searchAnalytics, searchAnalyticsAll, type SABody, type SARow,
 } from "./google";
 import { batchReports } from "./ga4-report";
@@ -71,6 +73,29 @@ async function recentImpressions(token: string, siteUrl: string) {
   }
 }
 
+/** GA4 sessions over the last 28 days, to tell the live GA4 property from an old or empty one with the same host. */
+async function recentSessions(token: string, property: string) {
+  try {
+    const r = await runReport(token, property, { dateRanges: [{ startDate: "28daysAgo", endDate: "yesterday" }], metrics: [{ name: "sessions" }] });
+    return r.rows[0]?.mets[0] ?? 0;
+  } catch {
+    return -1;
+  }
+}
+
+/** WEEKLY_GA4: "readmagazine=123456789,aitech.com=987654321" → { readmagazine: "123456789", … } */
+function ga4Overrides(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const part of (process.env.WEEKLY_GA4 || "").split(/[,\s]+/)) {
+    const i = part.lastIndexOf("=");
+    if (i <= 0) continue;
+    const key = part.slice(0, i).trim().toLowerCase();
+    const id = part.slice(i + 1).trim().replace(/^properties\//, "");
+    if (key && /^\d+$/.test(id)) out[key] = id;
+  }
+  return out;
+}
+
 export async function weeklySites(token: string): Promise<WeeklySites> {
   const k = token.slice(-32);
   const hit = siteCache.get(k);
@@ -111,11 +136,32 @@ export async function weeklySites(token: string): Promise<WeeklySites> {
 
   const props = await listGa4Properties(token).catch(() => []);
   const ga4 = await pool(props, 8, async (p) => ({ ...p, hosts: await listWebStreamHosts(token, p.id) }));
-  const sites = picked.map((p) => {
-    const host = normalizeHost(p.siteUrl);
-    const m = ga4.find((g) => g.hosts.some((h) => h === host || h.endsWith(`.${host}`)));
-    return { siteUrl: p.siteUrl, host, name: p.name, ga4: m?.id || null, ga4Name: m ? `${m.name} (${m.account})` : null };
-  });
+  const overrides = ga4Overrides();
+
+  const sites = await Promise.all(
+    picked.map(async (p): Promise<WeeklySite> => {
+      const host = normalizeHost(p.siteUrl);
+      const label = (g: { name: string; account: string }) => `${g.name} (${g.account})`;
+
+      // 1. Pinned in WEEKLY_GA4.
+      const pinned = overrides[p.name.toLowerCase()] || overrides[host] || overrides[p.siteUrl.toLowerCase()];
+      if (pinned) {
+        const g = ga4.find((x) => x.id === pinned);
+        return { siteUrl: p.siteUrl, host, name: p.name, ga4: pinned, ga4Name: g ? label(g) : `GA4 property ${pinned}` };
+      }
+
+      // 2. Every GA4 property with a web stream on this host; the one with the most sessions wins.
+      const matches = ga4.filter((g) => g.hosts.some((h) => h === host || h.endsWith(`.${host}`)));
+      if (!matches.length) return { siteUrl: p.siteUrl, host, name: p.name, ga4: null, ga4Name: null };
+      let best = matches[0];
+      if (matches.length > 1) {
+        const scored = await Promise.all(matches.map(async (g) => ({ g, s: await recentSessions(token, g.id) })));
+        scored.sort((a, b) => b.s - a.s);
+        best = scored[0].g;
+      }
+      return { siteUrl: p.siteUrl, host, name: p.name, ga4: best.id, ga4Name: label(best) };
+    })
+  );
 
   const v = { sites, missing, alsoMatched };
   if (siteCache.size > 50) siteCache.clear();
@@ -571,7 +617,7 @@ export async function propertyWeek(token: string, site: WeeklySite, wk: WeekInfo
   const gsc = g.status === "fulfilled" ? g.value : null;
   const ga = a.status === "fulfilled" ? a.value : null;
   const gscError = errText(g);
-  const gaError = site.ga4 ? errText(a) : "No GA4 property with this site's address was found in your GA4 accounts.";
+  const gaError = site.ga4 ? errText(a) : "No GA4 property with this site's address was found in your GA4 accounts. Set WEEKLY_GA4 in Vercel to pair it by hand.";
 
   const ids = { gsc: `wk.gsc.${site.siteUrl}`, ga: `wk.ga.${site.siteUrl}`, maps: `wk.maps.${site.siteUrl}` };
   const now = new Date().toISOString();
