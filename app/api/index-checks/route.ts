@@ -5,6 +5,7 @@
 //                                          Console can start them. If the service account hasn't been added to the
 //                                          property, the checks run with the starter's own Google sign-in (saved
 //                                          encrypted in Upstash Redis). useMine: switch an existing job to your sign-in.
+//                                          View-only accounts (lib/viewers.ts) can't start or pause checks.
 // One row in _Jobs and one tab per property, whoever starts it, so nothing is checked twice.
 // The weekly Search Console captures are served by /api/captures.
 import { NextRequest, NextResponse } from "next/server";
@@ -15,6 +16,7 @@ import { SA_LABEL, propertyStatus, serviceAccountCanRead, setEnabled } from "@/l
 import { saveUserCredential } from "@/lib/userCredential";
 import { loadIdx } from "@/lib/reportStore";
 import { latestIdxDay } from "@/lib/indexStats";
+import { assertNotViewer } from "@/lib/viewers";
 import { fail } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
@@ -58,6 +60,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const email = await requireUser(req);
+    assertNotViewer(email);
     const token = await getGoogleAccessToken(req);
     const body = await req.json().catch(() => ({}));
     const site = typeof body.site === "string" ? body.site : "";
