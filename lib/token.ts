@@ -2,7 +2,7 @@
 import { createHash } from "crypto";
 import { getToken } from "next-auth/jwt";
 import type { NextRequest } from "next/server";
-import { isAllowedEmail, isAuditEmail, refreshGoogleToken } from "./auth";
+import { hasAccess, isAuditEmail, refreshGoogleToken } from "./auth";
 
 export class HttpError extends Error {
   constructor(public status: number, message: string) {
@@ -17,7 +17,9 @@ const keyOf = (s: string) => createHash("sha256").update(s).digest("hex");
 async function readSession(req: NextRequest): Promise<Record<string, any>> {
   const jwt = await getToken({ req, secret: process.env.NEXTAUTH_SECRET });
   if (!jwt) throw new HttpError(401, "Not signed in.");
-  if (!isAllowedEmail(jwt.email)) throw new HttpError(403, "This Google account isn't allowed to use this dashboard.");
+  // Company domains, ALLOWED_EMAILS, access admins, or someone an admin added in "Manage access".
+  // Checked on every request, so a removed person loses access within 30 seconds (lib/accessList.ts cache).
+  if (!(await hasAccess(jwt.email))) throw new HttpError(403, "This Google account isn't allowed to use this dashboard.");
   return jwt as Record<string, any>;
 }
 
