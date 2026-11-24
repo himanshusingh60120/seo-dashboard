@@ -25,10 +25,11 @@ import Audit from "./Audit"; // Site investigation (replaces the GSC audit)
 import IndexChecks from "./IndexChecks";
 import WeeklyCaptures from "./WeeklyCaptures";
 import CompareMode, { COMPARE_TABS, type CompareTab } from "./CompareMode";
+import AccessManager from "./AccessManager"; // manage access (access admins only)
 
 type Tab =
   | "overview" | "rankings" | "indexing" | "checks" | "captures" | "crawl" | "queries" | "growth" | "audience" | "cta" | "audit"
-  | "weekly"; // weekly report
+  | "weekly" | "access"; // weekly report, manage access
 
 const BASE_TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -207,6 +208,8 @@ export default function Dashboard() {
   const [canWeekly, setCanWeekly] = useState(false); // weekly report
   /** View-only account (VIEWER_EMAILS): sees everything, but can't run URL Inspection or change settings. */
   const [viewer, setViewer] = useState(false);
+  /** Access admin (ACCESS_ADMIN_EMAILS, lib/accessList.ts): sees the Manage access tab. */
+  const [admin, setAdmin] = useState(false);
   const [gsc, setGsc] = useState<GscData | null>(null);
   const [ga, setGa] = useState<Ga4Data | null>(null);
   const [loading, setLoading] = useState(false);
@@ -243,11 +246,15 @@ export default function Dashboard() {
     setLookupErr(null);
   }, [site, bumpIndex]);
 
-  // Is this a view-only account? The routes that change things check again on the server (lib/viewers.ts).
+  // Is this a view-only account, and is it an access admin? The routes check again on the server
+  // (lib/viewers.ts, lib/accessList.ts).
   useEffect(() => {
     fetch("/api/role", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setViewer(!!d?.viewer))
+      .then((d) => {
+        setViewer(!!d?.viewer);
+        setAdmin(!!d?.admin);
+      })
       .catch(() => {});
   }, []);
 
@@ -499,17 +506,18 @@ export default function Dashboard() {
   };
 
   // Tabs this person can see: Weekly captures only for capture accounts, the weekly report only for its account,
-  // the Site investigation only for the audit account.
+  // the Site investigation only for the audit account, Manage access only for access admins.
   const tabs: { id: Tab; label: string }[] = [
     ...BASE_TABS.filter((t) => t.id !== "captures" || canCapture),
     ...(canWeekly ? [{ id: "weekly" as Tab, label: "Weekly report" }] : []), // weekly report
     ...(canAudit ? [{ id: "audit" as Tab, label: "Site investigation" }] : []),
+    ...(admin ? [{ id: "access" as Tab, label: "Manage access" }] : []),
   ];
   // Nobody stays on a tab they can't see.
   useEffect(() => {
     if (!tabs.some((t) => t.id === tab)) setTab("overview");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canCapture, canAudit, canWeekly, tab]);
+  }, [canCapture, canAudit, canWeekly, admin, tab]);
 
   const noGa4Notice = <div className="notice">Pick a GA4 property in the top bar to see this data.</div>;
   const needsGsc = ["overview", "rankings", "queries"].includes(tab);
@@ -845,6 +853,9 @@ export default function Dashboard() {
 
               {/* Site investigation: the top bar's GA4 choice is a hint; the investigation checks it has data and finds the right one if not */}
               {site && tab === "audit" && canAudit && <Audit site={site} ga4={ga4} />}
+
+              {/* Manage access: access admins add or remove who can sign in (the API checks the account again) */}
+              {tab === "access" && admin && <AccessManager />}
             </>
           )}
         </main>
