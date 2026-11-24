@@ -1,8 +1,8 @@
 // lib/auth.ts
-import { isAccessAdmin, isGranted } from "./accessList";
 import type { NextAuthOptions } from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
 import { DEFAULT_ALLOWED_DOMAINS } from "./access";
+import { isAccessAdmin, isGranted } from "./accessList";
 
 export const GOOGLE_SCOPES = [
   "openid", "email", "profile",
@@ -28,11 +28,12 @@ export function isAllowedEmail(email?: string | null) {
   const at = e.lastIndexOf("@");
   if (at < 1 || at === e.length - 1) return false;
   return allowedDomains().includes(e.slice(at + 1)) || list(process.env.ALLOWED_EMAILS).includes(e);
-  /** Domains + ALLOWED_EMAILS, the access admins, or an address an admin added in "Manage access". */
+}
+
+/** Domains + ALLOWED_EMAILS, the access admins, or an address an admin added in "Manage access". */
 export async function hasAccess(email?: string | null) {
   if (!email) return false;
   return isAllowedEmail(email) || isAccessAdmin(email) || (await isGranted(email));
-}
 }
 
 /** The AI audit is limited to these accounts (default hsingh@kingsresearch.com). */
@@ -75,9 +76,10 @@ export const authOptions: NextAuthOptions = {
   ],
   callbacks: {
     async signIn({ user, profile }) {
-      // Access is granted by domain, so only accept addresses Google has verified.
+      // Only accept addresses Google has verified.
       if ((profile as { email_verified?: boolean } | undefined)?.email_verified === false) return false;
-      return isAllowedEmail(user.email);
+      // Company domains, ALLOWED_EMAILS, access admins, or someone an admin added in "Manage access".
+      return hasAccess(user.email);
     },
     // Tokens live only in the encrypted session cookie. Refreshed here so the cookie stays current.
     async jwt({ token, account }) {
