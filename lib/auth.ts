@@ -1,4 +1,5 @@
 // lib/auth.ts
+import { isAccessAdmin, isGranted } from "./accessList";
 import type { NextAuthOptions } from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
 import { DEFAULT_ALLOWED_DOMAINS } from "./access";
@@ -27,6 +28,11 @@ export function isAllowedEmail(email?: string | null) {
   const at = e.lastIndexOf("@");
   if (at < 1 || at === e.length - 1) return false;
   return allowedDomains().includes(e.slice(at + 1)) || list(process.env.ALLOWED_EMAILS).includes(e);
+  /** Domains + ALLOWED_EMAILS, the access admins, or an address an admin added in "Manage access". */
+export async function hasAccess(email?: string | null) {
+  if (!email) return false;
+  return isAllowedEmail(email) || isAccessAdmin(email) || (await isGranted(email));
+}
 }
 
 /** The AI audit is limited to these accounts (default hsingh@kingsresearch.com). */
