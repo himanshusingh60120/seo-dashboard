@@ -177,26 +177,29 @@ const MOBILE_CSS = `
   .cmp-line { display: none !important; }
 }`;
 
-/** The top bar: rows, the fold animation, the one-line summary, tool buttons and the grouped tab strip. */
-const BAR_CSS = `
-.bar-row1 { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.bar-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.bar-row { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; border-top: 1px solid #e8eaed; margin-top: 12px; padding-top: 12px; }
-.bar-fold { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .2s ease; }
-.bar-fold.folded { grid-template-rows: 0fr; }
-.bar-fold-inner { min-height: 0; overflow: hidden; }
-.bar-fold.folded .bar-fold-inner { visibility: hidden; transition: visibility 0s .2s; }
-.bar-summary { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; max-width: 620px; padding: 8px 12px; border: 1px solid #dadce0; border-radius: 8px; background: #f8f9fa; color: #202124; font-size: 14px; text-align: left; cursor: pointer; }
-.bar-summary:hover { background: #f1f3f4; }
-.bar-summary .txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bar-summary .chg { flex: 0 0 auto; color: #1a73e8; font-weight: 600; }
-.bar-tool[aria-pressed="true"] { background: #e8f0fe; border-color: #1a73e8; color: #174ea6; }
-.bar-link { border: none; background: none; color: #1a73e8; font-weight: 600; font-size: 14px; cursor: pointer; padding: 6px 4px; white-space: nowrap; }
-.bar-link:hover { text-decoration: underline; }
-.topbar .bar-tabs { display: flex; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
-.topbar .bar-tabs::-webkit-scrollbar { display: none; }
-.bar-tabs .tab { flex: 0 0 auto; }
-.tab-sep { flex: 0 0 auto; width: 1px; height: 18px; align-self: center; margin: 0 6px; background: #dadce0; }
+/**
+ * The top bar's own styles. Every class starts with "tb-" and every rule is limited to the top bar,
+ * so nothing here can change the charts or tables (e.g. the bar charts' own .bar-row).
+ */
+const TOPBAR_CSS = `
+.topbar .tb-row1 { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.topbar .tb-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.topbar .tb-row { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; border-top: 1px solid #e8eaed; margin-top: 12px; padding-top: 12px; }
+.topbar .tb-fold { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .2s ease; }
+.topbar .tb-fold.tb-folded { grid-template-rows: 0fr; }
+.topbar .tb-fold-inner { min-height: 0; overflow: hidden; }
+.topbar .tb-fold.tb-folded .tb-fold-inner { visibility: hidden; transition: visibility 0s .2s; }
+.topbar .tb-summary { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; max-width: 620px; padding: 8px 12px; border: 1px solid #dadce0; border-radius: 8px; background: #f8f9fa; color: #202124; font-size: 14px; text-align: left; cursor: pointer; }
+.topbar .tb-summary:hover { background: #f1f3f4; }
+.topbar .tb-summary-txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar .tb-summary-chg { flex: 0 0 auto; color: #1a73e8; font-weight: 600; }
+.topbar .tb-tool[aria-pressed="true"] { background: #e8f0fe; border-color: #1a73e8; color: #174ea6; }
+.topbar .tb-link { border: none; background: none; color: #1a73e8; font-weight: 600; font-size: 14px; cursor: pointer; padding: 6px 4px; white-space: nowrap; }
+.topbar .tb-link:hover { text-decoration: underline; }
+.topbar .tb-tabs { display: flex; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.topbar .tb-tabs::-webkit-scrollbar { display: none; }
+.tb-tabs .tab { flex: 0 0 auto; }
+.tb-tabs .tb-sep { flex: 0 0 auto; width: 1px; height: 18px; align-self: center; margin: 0 6px; background: #dadce0; }
 `;
 
 /* ---------------- Top bar pieces ---------------- */
@@ -638,16 +641,16 @@ export default function Dashboard() {
   const summaryButton = (
     <button
       type="button"
-      className="bar-summary"
+      className="tb-summary"
       onClick={() => setOpen(true)}
       aria-expanded={false}
       title="Change the website, dates or comparison"
       style={narrow ? { marginTop: 10, width: "100%", maxWidth: "none" } : undefined}
     >
-      <span className="txt">
+      <span className="tb-summary-txt">
         <b>{siteShort || "Choose a website"}</b> · {summaryText}
       </span>
-      <span className="chg">Change ▾</span>
+      <span className="tb-summary-chg">Change ▾</span>
     </button>
   );
 
@@ -666,7 +669,7 @@ export default function Dashboard() {
   );
 
   const toolButtons = tools.map((t) => (
-    <button key={t.id} type="button" className="btn bar-tool" aria-pressed={!compareMode && tab === t.id} onClick={() => openTool(t.id)}>
+    <button key={t.id} type="button" className="btn tb-tool" aria-pressed={!compareMode && tab === t.id} onClick={() => openTool(t.id)}>
       {t.label}
     </button>
   ));
@@ -679,7 +682,7 @@ export default function Dashboard() {
 
   const nav = (
     <nav
-      className="tabs bar-tabs"
+      className="tabs tb-tabs"
       role="tablist"
       style={narrow ? { position: "sticky", top: 0, zIndex: 20, background: "#fff", borderBottom: "1px solid #d5dbe1" } : undefined}
     >
@@ -691,7 +694,7 @@ export default function Dashboard() {
           ))
         : dataGroups.map((group, i) => (
             <Fragment key={i}>
-              {i > 0 && <span className="tab-sep" aria-hidden="true" />}
+              {i > 0 && <span className="tb-sep" aria-hidden="true" />}
               {group.map((t) => (
                 <button key={t.id} role="tab" className="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
                   {t.label}
@@ -704,16 +707,16 @@ export default function Dashboard() {
 
   return (
     <>
-      <style>{BAR_CSS + MOBILE_CSS}</style>
+      <style>{TOPBAR_CSS + MOBILE_CSS}</style>
       <header
         className="topbar"
         style={{ position: "sticky", top: 0, zIndex: 30, boxShadow: compact && !narrow ? "0 1px 6px rgba(60,64,67,.18)" : undefined }}
       >
         <div className="topbar-inner" style={{ display: "block" }}>
           {/* Row 1: who you are (folded: what you're looking at), tools, view switch, sign out */}
-          <div className="bar-row1">
+          <div className="tb-row1">
             {compact && !narrow ? summaryButton : brand}
-            <div className="bar-right" style={narrow ? { width: "100%" } : undefined}>
+            <div className="tb-right" style={narrow ? { width: "100%" } : undefined}>
               {!narrow && toolButtons}
               {!narrow && tools.length > 0 && <Divider />}
               <ViewSwitch compare={compareMode} onChange={setCompareMode} full={narrow} />
@@ -725,10 +728,10 @@ export default function Dashboard() {
           {narrow && compact && summaryButton}
 
           {/* Website, dates, look-up and actions: fold away once you scroll */}
-          <div className={`bar-fold${compact ? " folded" : ""}`} aria-hidden={compact}>
-            <div className="bar-fold-inner">
+          <div className={`tb-fold${compact ? " tb-folded" : ""}`} aria-hidden={compact}>
+            <div className="tb-fold-inner">
               {/* Row 2: which website, which dates */}
-              <div className="bar-row" style={{ alignItems: "stretch" }}>
+              <div className="tb-row" style={{ alignItems: "stretch" }}>
                 <Group title="Website">
                   <label className="control">
                     <span style={SR_ONLY}>Search Console property</span>
@@ -818,7 +821,7 @@ export default function Dashboard() {
                 {!narrow && (
                   <button
                     type="button"
-                    className="bar-link"
+                    className="tb-link"
                     onClick={() => setOpen(false)}
                     title="Fold these settings into one line"
                     style={{ alignSelf: "flex-start" }}
@@ -830,7 +833,7 @@ export default function Dashboard() {
 
               {/* Row 3 (normal view only): look up a page, actions */}
               {!compareMode && (
-                <div className="bar-row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                <div className="tb-row" style={{ justifyContent: "space-between", alignItems: "center" }}>
                   <form
                     onSubmit={openLookup}
                     style={{ display: "flex", gap: 6, flex: "1 1 auto", maxWidth: 560, width: narrow ? "100%" : undefined }}
@@ -862,7 +865,7 @@ export default function Dashboard() {
 
               {/* Phones: tools, sign out and close, at the bottom of the open panel */}
               {narrow && (
-                <div className="bar-row" style={{ justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                <div className="tb-row" style={{ justifyContent: "space-between", alignItems: "center", gap: 10 }}>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     {toolButtons}
                     {signOutButton}
