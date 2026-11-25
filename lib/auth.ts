@@ -12,10 +12,17 @@ export const GOOGLE_SCOPES = [
 
 const list = (v?: string) => (v || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
 
-/** Domains whose Google accounts may sign in. ALLOWED_DOMAINS (comma-separated) replaces the built-in list when set. */
+/** Domains that are always allowed, on top of DEFAULT_ALLOWED_DOMAINS or ALLOWED_DOMAINS. */
+const EXTRA_ALLOWED_DOMAINS = ["underratedclub.com"];
+
+/**
+ * Domains whose Google accounts may sign in. ALLOWED_DOMAINS (comma-separated) replaces the built-in list
+ * when set; EXTRA_ALLOWED_DOMAINS are always added either way.
+ */
 export function allowedDomains(): string[] {
   const fromEnv = list(process.env.ALLOWED_DOMAINS).map((d) => d.replace(/^@/, ""));
-  return fromEnv.length ? fromEnv : [...DEFAULT_ALLOWED_DOMAINS];
+  const base = fromEnv.length ? fromEnv : [...DEFAULT_ALLOWED_DOMAINS];
+  return Array.from(new Set([...base, ...EXTRA_ALLOWED_DOMAINS]));
 }
 
 /**
