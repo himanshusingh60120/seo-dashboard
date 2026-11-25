@@ -353,7 +353,7 @@ export default function Dashboard() {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         setViewer(!!d?.viewer);
-        setAdmin(!!d?.admin);
+        setAdmin(!!d?.admin); setCanChecks(!!d?.indexChecks);
       })
       .catch(() => {});
   }, []);
