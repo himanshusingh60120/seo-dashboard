@@ -6,7 +6,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from "crypt
 import type { NextRequest } from "next/server";
 import { getToken } from "next-auth/jwt";
 import { HttpError } from "./token";
-import { isAllowedEmail, refreshGoogleToken } from "./auth";
+import { hasAccess, refreshGoogleToken } from "./auth";
 import { delKey, getJson, setJson, sharedStorageReady } from "./kvStore";
 
 type Sealed = { iv: string; tag: string; data: string; savedAt: string };
@@ -38,7 +38,7 @@ export async function saveUserCredential(req: NextRequest): Promise<string> {
   }
   const jwt = await getToken({ req, secret: process.env.NEXTAUTH_SECRET });
   const email = String(jwt?.email || "");
-  if (!jwt || !email || !isAllowedEmail(email)) throw new HttpError(401, "Not signed in.");
+  if (!jwt || !email || !(await hasAccess(email))) throw new HttpError(401, "Not signed in.");
   const refresh = String((jwt as Record<string, unknown>).refreshToken || "");
   if (!refresh) {
     throw new HttpError(400, "Your Google sign-in can't be used for daily checks yet. Sign out of the dashboard, sign in again, and click once more.");
