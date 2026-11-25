@@ -1,6 +1,6 @@
 // components/Dashboard.tsx
 "use client";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { signOut, useSession } from "next-auth/react";
 import type { GscData, Ga4Data, Properties, Sources } from "@/lib/types";
 import { indexScanSource, loadIndexCache, peekIndexCache } from "@/lib/indexCache";
@@ -31,17 +31,33 @@ type Tab =
   | "overview" | "rankings" | "indexing" | "checks" | "captures" | "crawl" | "queries" | "growth" | "audience" | "cta" | "audit"
   | "weekly" | "access"; // weekly report, manage access
 
-const BASE_TABS: { id: Tab; label: string }[] = [
-  { id: "overview", label: "Overview" },
-  { id: "rankings", label: "Rankings" },
-  { id: "indexing", label: "Indexing" },
-  { id: "checks", label: "Index checks" },
-  { id: "captures", label: "Weekly captures" }, // capture accounts only (CAPTURE_EMAILS)
-  { id: "crawl", label: "Crawl activity" },
-  { id: "queries", label: "Queries" },
-  { id: "growth", label: "Query growth" },
-  { id: "audience", label: "Traffic & geography" },
-  { id: "cta", label: "CTAs" },
+type TabDef = { id: Tab; label: string };
+
+/** Data tabs, in groups of related tabs. A thin line separates the groups. */
+const TAB_GROUPS: TabDef[][] = [
+  [
+    { id: "overview", label: "Overview" },
+    { id: "rankings", label: "Rankings" },
+    { id: "queries", label: "Queries" },
+    { id: "growth", label: "Query growth" },
+  ],
+  [
+    { id: "indexing", label: "Indexing" },
+    { id: "checks", label: "Index checks" },
+    { id: "crawl", label: "Crawl activity" },
+    { id: "captures", label: "Weekly captures" }, // capture accounts only (CAPTURE_EMAILS)
+  ],
+  [
+    { id: "audience", label: "Traffic & geography" },
+    { id: "cta", label: "CTAs" },
+  ],
+];
+
+/** Tools only some accounts have. They sit as buttons in the top row instead of the tab strip. */
+const TOOL_TABS: TabDef[] = [
+  { id: "weekly", label: "Weekly report" }, // WEEKLY_REPORT_EMAILS
+  { id: "audit", label: "Site investigation" }, // AUDIT_EMAILS
+  { id: "access", label: "Manage access" }, // access admins (lib/accessList.ts)
 ];
 
 const SEARCH_TYPES: [string, string][] = [["web", "Web"], ["image", "Image"], ["video", "Video"], ["news", "News"]];
@@ -112,10 +128,37 @@ function useNarrow() {
   return narrow;
 }
 
+/* ---------------- Folding the top bar on scroll ---------------- */
+
+/** The top bar folds into one line after this much scrolling, and opens again near the top. */
+const FOLD_AT = 160;
+const UNFOLD_AT = 24;
+
+/** True once the page is scrolled down. Two thresholds, so the bar doesn't flicker at the edge. */
+function useScrolled() {
+  const [scrolled, setScrolled] = useState(false);
+  useEffect(() => {
+    const on = () => {
+      const y = window.scrollY;
+      // Only fold when the page is long enough that folding can't bounce it straight back to the top.
+      const room = document.documentElement.scrollHeight - window.innerHeight;
+      setScrolled((was) => (was ? y > UNFOLD_AT : y > FOLD_AT && room > FOLD_AT + 320));
+    };
+    on();
+    window.addEventListener("scroll", on, { passive: true });
+    window.addEventListener("resize", on);
+    return () => {
+      window.removeEventListener("scroll", on);
+      window.removeEventListener("resize", on);
+    };
+  }, []);
+  return scrolled;
+}
+
 /** Layout fixes for phone-sized screens (the whole dashboard, including Compare months). */
 const MOBILE_CSS = `
 @media (max-width: ${NARROW_PX}px) {
-  .topbar { position: static !important; }
+  .topbar { position: static !important; box-shadow: none !important; }
   .topbar-inner { padding: 10px 12px !important; }
   .topbar .control, .topbar .control select, .topbar .control input { width: 100%; min-width: 0 !important; max-width: none !important; }
   .topbar form { max-width: none !important; }
@@ -134,12 +177,47 @@ const MOBILE_CSS = `
   .cmp-line { display: none !important; }
 }`;
 
+/** The top bar: rows, the fold animation, the one-line summary, tool buttons and the grouped tab strip. */
+const BAR_CSS = `
+.bar-row1 { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.bar-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bar-row { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; border-top: 1px solid #e8eaed; margin-top: 12px; padding-top: 12px; }
+.bar-fold { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .2s ease; }
+.bar-fold.folded { grid-template-rows: 0fr; }
+.bar-fold-inner { min-height: 0; overflow: hidden; }
+.bar-fold.folded .bar-fold-inner { visibility: hidden; transition: visibility 0s .2s; }
+.bar-summary { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; max-width: 620px; padding: 8px 12px; border: 1px solid #dadce0; border-radius: 8px; background: #f8f9fa; color: #202124; font-size: 14px; text-align: left; cursor: pointer; }
+.bar-summary:hover { background: #f1f3f4; }
+.bar-summary .txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-summary .chg { flex: 0 0 auto; color: #1a73e8; font-weight: 600; }
+.bar-tool[aria-pressed="true"] { background: #e8f0fe; border-color: #1a73e8; color: #174ea6; }
+.bar-link { border: none; background: none; color: #1a73e8; font-weight: 600; font-size: 14px; cursor: pointer; padding: 6px 4px; white-space: nowrap; }
+.bar-link:hover { text-decoration: underline; }
+.topbar .bar-tabs { display: flex; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.topbar .bar-tabs::-webkit-scrollbar { display: none; }
+.bar-tabs .tab { flex: 0 0 auto; }
+.tab-sep { flex: 0 0 auto; width: 1px; height: 18px; align-self: center; margin: 0 6px; background: #dadce0; }
+`;
+
 /* ---------------- Top bar pieces ---------------- */
 
 const BLUE = "#1a73e8";
 const LABEL_STYLE = { fontSize: 11, fontWeight: 700, letterSpacing: 0.5, color: "#5f6368", textTransform: "uppercase" as const };
 
-/** A labelled group of controls in the top bar ("Website", "Dates", …). */
+/** Visually hidden, still read out by screen readers (the dropdowns label themselves on screen). */
+const SR_ONLY: CSSProperties = {
+  position: "absolute",
+  width: 1,
+  height: 1,
+  padding: 0,
+  margin: -1,
+  overflow: "hidden",
+  clip: "rect(0 0 0 0)",
+  whiteSpace: "nowrap",
+  border: 0,
+};
+
+/** A captioned group of controls in the top bar ("Website", "Dates"). */
 function Group({ title, children, grow = false }: { title: string; children: ReactNode; grow?: boolean }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0, flex: grow ? "1 1 auto" : "0 1 auto" }}>
@@ -191,7 +269,9 @@ function ViewSwitch({ compare, onChange, full = false }: { compare: boolean; onC
 export default function Dashboard() {
   const { data: session } = useSession();
   const narrow = useNarrow();
-  const [showControls, setShowControls] = useState(false);
+  const scrolled = useScrolled();
+  /** null: the bar follows the scroll (on phones it stays folded). true / false: the person opened or folded it. */
+  const [open, setOpen] = useState<boolean | null>(null);
   const [props, setProps] = useState<Properties | null>(null);
   const [site, setSite] = useState("");
   const [ga4, setGa4] = useState("");
@@ -208,7 +288,7 @@ export default function Dashboard() {
   const [canWeekly, setCanWeekly] = useState(false); // weekly report
   /** View-only account (VIEWER_EMAILS): sees everything, but can't run URL Inspection or change settings. */
   const [viewer, setViewer] = useState(false);
-  /** Access admin (ACCESS_ADMIN_EMAILS, lib/accessList.ts): sees the Manage access tab. */
+  /** Access admin (ACCESS_ADMIN_EMAILS, lib/accessList.ts): sees the Manage access button. */
   const [admin, setAdmin] = useState(false);
   const [gsc, setGsc] = useState<GscData | null>(null);
   const [ga, setGa] = useState<Ga4Data | null>(null);
@@ -232,6 +312,25 @@ export default function Dashboard() {
   const [lookup, setLookup] = useState<string | null>(null);
   const [lookupErr, setLookupErr] = useState<string | null>(null);
   const closeLookup = useCallback(() => setLookup(null), []);
+
+  /** Folded: the bar shows one line (site, dates) plus the tabs. */
+  const compact = open === null ? narrow || scrolled : !open;
+
+  // Scrolling past the fold point (either way) hands the bar back to the scroll.
+  useEffect(() => {
+    setOpen(null);
+  }, [scrolled]);
+
+  // Opened while scrolled down? Fold again once they've scrolled on a fair way.
+  useEffect(() => {
+    if (open !== true) return;
+    const from = window.scrollY;
+    const on = () => {
+      if (Math.abs(window.scrollY - from) > 300) setOpen(null);
+    };
+    window.addEventListener("scroll", on, { passive: true });
+    return () => window.removeEventListener("scroll", on);
+  }, [open]);
 
   // Every source behind the numbers on screen, so any "Source" button can explain itself
   const sources = useMemo<Sources>(() => {
@@ -258,7 +357,7 @@ export default function Dashboard() {
       .catch(() => {});
   }, []);
 
-  // The Site investigation tab is shown only to the audit account; every audit API route checks the account again.
+  // The Site investigation button is shown only to the audit account; every audit API route checks the account again.
   useEffect(() => {
     fetch("/api/audit/access", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
@@ -275,7 +374,7 @@ export default function Dashboard() {
       .catch(() => {});
   }, []);
 
-  // weekly report: the Weekly report tab is shown only to WEEKLY_REPORT_EMAILS; its API routes check the account again.
+  // weekly report: the Weekly report button is shown only to WEEKLY_REPORT_EMAILS; its API routes check the account again.
   useEffect(() => {
     fetch("/api/weekly/access", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
@@ -367,7 +466,7 @@ export default function Dashboard() {
     }
     setLookupErr(null);
     setLookup(u);
-    if (narrow) setShowControls(false);
+    if (narrow) setOpen(null);
   };
 
   const downloadEvidence = () => {
@@ -505,33 +604,82 @@ export default function Dashboard() {
     setDays(daysForMonths(m));
   };
 
-  // Tabs this person can see: Weekly captures only for capture accounts, the weekly report only for its account,
-  // the Site investigation only for the audit account, Manage access only for access admins.
-  const tabs: { id: Tab; label: string }[] = [
-    ...BASE_TABS.filter((t) => t.id !== "captures" || canCapture),
-    ...(canWeekly ? [{ id: "weekly" as Tab, label: "Weekly report" }] : []), // weekly report
-    ...(canAudit ? [{ id: "audit" as Tab, label: "Site investigation" }] : []),
-    ...(admin ? [{ id: "access" as Tab, label: "Manage access" }] : []),
-  ];
+  // What this person can open: Weekly captures only for capture accounts (a tab), and the tools only for their accounts
+  // (buttons in the top row): Weekly report, Site investigation, Manage access.
+  const dataGroups = TAB_GROUPS.map((g) => g.filter((t) => t.id !== "captures" || canCapture)).filter((g) => g.length > 0);
+  const tools = TOOL_TABS.filter((t) => (t.id === "weekly" ? canWeekly : t.id === "audit" ? canAudit : admin));
+  const visibleIds = [...dataGroups.flat(), ...tools].map((t) => t.id);
+
   // Nobody stays on a tab they can't see.
   useEffect(() => {
-    if (!tabs.some((t) => t.id === tab)) setTab("overview");
+    if (!visibleIds.includes(tab)) setTab("overview");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canCapture, canAudit, canWeekly, admin, tab]);
+
+  /** Open a tool from the top row (always in the normal view). */
+  const openTool = (id: Tab) => {
+    setCompareMode(false);
+    setTab(id);
+    if (narrow) setOpen(null);
+  };
 
   const noGa4Notice = <div className="notice">Pick a GA4 property in the top bar to see this data.</div>;
   const needsGsc = ["overview", "rankings", "queries"].includes(tab);
   const previousIncomplete = !compareMode && compare === "previous" && days * 2 > MAX_DAYS;
-  const rowLine = { borderTop: "1px solid #e8eaed", marginTop: 12, paddingTop: 12 };
 
-  // The one-line summary shown on phones instead of every control.
+  // The one-line summary shown when the bar is folded (and on phones).
   const siteShort = site.replace(/^sc-domain:/, "").replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "");
   const periodLabel = customMonths ? `Last ${customMonths} months` : PERIODS.find(([d]) => d === days)?.[1] || `Last ${days} days`;
-  const controlsOpen = !narrow || showControls;
+  const typeLabel = SEARCH_TYPES.find(([id]) => id === searchType)?.[1] || "Web";
+  const summaryText = compareMode
+    ? "Compare months"
+    : `${periodLabel} vs ${compare === "yoy" ? "same days last year" : "previous period"} · ${typeLabel} search`;
+
+  const summaryButton = (
+    <button
+      type="button"
+      className="bar-summary"
+      onClick={() => setOpen(true)}
+      aria-expanded={false}
+      title="Change the website, dates or comparison"
+      style={narrow ? { marginTop: 10, width: "100%", maxWidth: "none" } : undefined}
+    >
+      <span className="txt">
+        <b>{siteShort || "Choose a website"}</b> · {summaryText}
+      </span>
+      <span className="chg">Change ▾</span>
+    </button>
+  );
+
+  const brand = (
+    <div className="brand">
+      Search &amp; traffic dashboard
+      <small>
+        {session?.user?.email}
+        {viewer && (
+          <span style={{ marginLeft: 8, padding: "1px 8px", borderRadius: 999, background: "#f1f3f4", color: "#5f6368", fontSize: 11, fontWeight: 600 }}>
+            View-only
+          </span>
+        )}
+      </small>
+    </div>
+  );
+
+  const toolButtons = tools.map((t) => (
+    <button key={t.id} type="button" className="btn bar-tool" aria-pressed={!compareMode && tab === t.id} onClick={() => openTool(t.id)}>
+      {t.label}
+    </button>
+  ));
+
+  const signOutButton = (
+    <button className="btn" onClick={() => signOut({ callbackUrl: "/login" })}>
+      Sign out
+    </button>
+  );
 
   const nav = (
     <nav
-      className="tabs"
+      className="tabs bar-tabs"
       role="tablist"
       style={narrow ? { position: "sticky", top: 0, zIndex: 20, background: "#fff", borderBottom: "1px solid #d5dbe1" } : undefined}
     >
@@ -541,73 +689,49 @@ export default function Dashboard() {
               {t.label}
             </button>
           ))
-        : tabs.map((t) => (
-            <button key={t.id} role="tab" className="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
-              {t.label}
-            </button>
+        : dataGroups.map((group, i) => (
+            <Fragment key={i}>
+              {i > 0 && <span className="tab-sep" aria-hidden="true" />}
+              {group.map((t) => (
+                <button key={t.id} role="tab" className="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
+                  {t.label}
+                </button>
+              ))}
+            </Fragment>
           ))}
     </nav>
   );
 
   return (
     <>
-      <style>{MOBILE_CSS}</style>
-      <header className="topbar">
+      <style>{BAR_CSS + MOBILE_CSS}</style>
+      <header
+        className="topbar"
+        style={{ position: "sticky", top: 0, zIndex: 30, boxShadow: compact && !narrow ? "0 1px 6px rgba(60,64,67,.18)" : undefined }}
+      >
         <div className="topbar-inner" style={{ display: "block" }}>
-          {/* Row 1: who you are, which view, sign out */}
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-            <div className="brand">
-              Search &amp; traffic dashboard
-              <small>
-                {session?.user?.email}
-                {viewer && (
-                  <span style={{ marginLeft: 8, padding: "1px 8px", borderRadius: 999, background: "#f1f3f4", color: "#5f6368", fontSize: 11, fontWeight: 600 }}>
-                    View-only
-                  </span>
-                )}
-              </small>
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", width: narrow ? "100%" : undefined }}>
+          {/* Row 1: who you are (folded: what you're looking at), tools, view switch, sign out */}
+          <div className="bar-row1">
+            {compact && !narrow ? summaryButton : brand}
+            <div className="bar-right" style={narrow ? { width: "100%" } : undefined}>
+              {!narrow && toolButtons}
+              {!narrow && tools.length > 0 && <Divider />}
               <ViewSwitch compare={compareMode} onChange={setCompareMode} full={narrow} />
-              {!narrow && <button className="btn" onClick={() => signOut({ callbackUrl: "/login" })}>Sign out</button>}
+              {!narrow && signOutButton}
             </div>
           </div>
 
           {/* Phones: one line instead of every control; tap to change */}
-          {narrow && (
-            <button
-              type="button"
-              onClick={() => setShowControls((v) => !v)}
-              aria-expanded={showControls}
-              style={{
-                marginTop: 10,
-                width: "100%",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                padding: "10px 12px",
-                border: "1px solid #dadce0",
-                borderRadius: 8,
-                background: "#f8f9fa",
-                fontSize: 14,
-                cursor: "pointer",
-                textAlign: "left",
-              }}
-            >
-              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                <b>{siteShort || "Choose a website"}</b> · {compareMode ? "Compare months" : periodLabel}
-              </span>
-              <span style={{ color: BLUE, fontWeight: 600, marginLeft: 8, flex: "0 0 auto" }}>{showControls ? "Done ▴" : "Change ▾"}</span>
-            </button>
-          )}
+          {narrow && compact && summaryButton}
 
-          {controlsOpen && (
-            <>
-              {/* Row 2: which website, and which dates */}
-              <div style={{ ...rowLine, display: "flex", alignItems: "stretch", gap: 16, flexWrap: "wrap" }}>
+          {/* Website, dates, look-up and actions: fold away once you scroll */}
+          <div className={`bar-fold${compact ? " folded" : ""}`} aria-hidden={compact}>
+            <div className="bar-fold-inner">
+              {/* Row 2: which website, which dates */}
+              <div className="bar-row" style={{ alignItems: "stretch" }}>
                 <Group title="Website">
                   <label className="control">
-                    Search Console property
+                    <span style={SR_ONLY}>Search Console property</span>
                     <select value={site} onChange={(e) => changeSite(e.target.value)} disabled={!props} style={{ minWidth: 220 }}>
                       {!props && <option>Loading…</option>}
                       {props?.gsc.map((s) => (
@@ -616,9 +740,9 @@ export default function Dashboard() {
                     </select>
                   </label>
                   <label className="control">
-                    GA4 property
+                    <span style={SR_ONLY}>GA4 property</span>
                     <select value={ga4} onChange={(e) => setGa4(e.target.value)} disabled={!props} style={{ minWidth: 220, maxWidth: 340 }}>
-                      <option value="">None</option>
+                      <option value="">No GA4 property</option>
                       {props?.ga4.map((p) => (
                         <option key={p.id} value={p.id}>{p.name} ({p.account})</option>
                       ))}
@@ -646,7 +770,7 @@ export default function Dashboard() {
                 ) : (
                   <Group title="Dates" grow>
                     <label className="control">
-                      Period
+                      <span style={SR_ONLY}>Period</span>
                       <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                         <select value={customMonths ? "custom" : String(days)} onChange={(e) => changePeriod(e.target.value)} style={{ minWidth: 170 }}>
                           {!customMonths && !PERIODS.some(([d]) => d === days) && <option value={String(days)}>Last {days} days</option>}
@@ -673,45 +797,58 @@ export default function Dashboard() {
                     </label>
 
                     <label className="control">
-                      Compare with
-                      <select value={compare} onChange={(e) => setCompare(e.target.value as Compare)} style={{ minWidth: 160 }}>
-                        <option value="previous">Previous period</option>
-                        <option value="yoy" disabled={!yoyAllowed(days)}>Same days last year</option>
+                      <span style={SR_ONLY}>Compare with</span>
+                      <select value={compare} onChange={(e) => setCompare(e.target.value as Compare)} style={{ minWidth: 180 }}>
+                        <option value="previous">vs previous period</option>
+                        <option value="yoy" disabled={!yoyAllowed(days)}>vs same days last year</option>
                       </select>
                     </label>
 
                     <label className="control">
-                      Search type
+                      <span style={SR_ONLY}>Search type</span>
                       <select value={searchType} onChange={(e) => setSearchType(e.target.value)}>
                         {SEARCH_TYPES.map(([id, label]) => (
-                          <option key={id} value={id}>{label}</option>
+                          <option key={id} value={id}>{label} search</option>
                         ))}
                       </select>
                     </label>
                   </Group>
                 )}
+
+                {!narrow && (
+                  <button
+                    type="button"
+                    className="bar-link"
+                    onClick={() => setOpen(false)}
+                    title="Fold these settings into one line"
+                    style={{ alignSelf: "flex-start" }}
+                  >
+                    Hide ▴
+                  </button>
+                )}
               </div>
 
-              {/* Row 3 (normal view only): look up a page, and actions */}
+              {/* Row 3 (normal view only): look up a page, actions */}
               {!compareMode && (
-                <div style={{ ...rowLine, display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
-                  <Group title="Look up a page" grow>
-                    <form onSubmit={openLookup} style={{ display: "flex", gap: 6, flex: "1 1 auto", maxWidth: 560, width: narrow ? "100%" : undefined }}>
-                      <input
-                        type="search"
-                        value={lookupText}
-                        onChange={(e) => setLookupText(e.target.value)}
-                        placeholder="Paste a page URL from this site"
-                        aria-label="Page URL to look up"
-                        style={{ flex: "1 1 auto", minWidth: narrow ? 0 : 240 }}
-                      />
-                      <button className="btn" type="submit" disabled={!site || !lookupText.trim()}>
-                        Look up
-                      </button>
-                    </form>
-                  </Group>
+                <div className="bar-row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                  <form
+                    onSubmit={openLookup}
+                    style={{ display: "flex", gap: 6, flex: "1 1 auto", maxWidth: 560, width: narrow ? "100%" : undefined }}
+                  >
+                    <input
+                      type="search"
+                      value={lookupText}
+                      onChange={(e) => setLookupText(e.target.value)}
+                      placeholder="Look up a page: paste a URL from this site"
+                      aria-label="Page URL to look up"
+                      style={{ flex: "1 1 auto", minWidth: narrow ? 0 : 240 }}
+                    />
+                    <button className="btn" type="submit" disabled={!site || !lookupText.trim()}>
+                      Look up
+                    </button>
+                  </form>
 
-                  <Group title="Actions">
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                     <button className="btn" onClick={load} disabled={loading || !site}>{loading ? "Refreshing…" : "Refresh"}</button>
                     <button className="btn" onClick={downloadEvidence} disabled={!gsc} title="Download every number with the exact Google API request behind it">
                       Download evidence
@@ -719,19 +856,22 @@ export default function Dashboard() {
                     <button className="live btn" onClick={() => setLive(!live)} aria-pressed={live} title="Refresh automatically every 10 minutes while this tab is visible">
                       <span className={`live-dot ${live ? "" : "off"}`} /> {live ? "Auto-refresh on" : "Auto-refresh off"}
                     </button>
-                  </Group>
+                  </div>
                 </div>
               )}
 
-              {/* Phones: sign out and close, at the bottom of the open panel */}
+              {/* Phones: tools, sign out and close, at the bottom of the open panel */}
               {narrow && (
-                <div style={{ ...rowLine, display: "flex", justifyContent: "space-between", gap: 10 }}>
-                  <button className="btn" onClick={() => signOut({ callbackUrl: "/login" })}>Sign out</button>
-                  <button className="btn primary" onClick={() => setShowControls(false)}>Done</button>
+                <div className="bar-row" style={{ justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {toolButtons}
+                    {signOutButton}
+                  </div>
+                  <button className="btn primary" onClick={() => setOpen(false)}>Done</button>
                 </div>
               )}
-            </>
-          )}
+            </div>
+          </div>
         </div>
 
         {!narrow && nav}
