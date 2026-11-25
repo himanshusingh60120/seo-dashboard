@@ -290,7 +290,7 @@ export default function Dashboard() {
   /** View-only account (VIEWER_EMAILS): sees everything, but can't run URL Inspection or change settings. */
   const [viewer, setViewer] = useState(false);
   /** Access admin (ACCESS_ADMIN_EMAILS, lib/accessList.ts): sees the Manage access button. */
-  const [admin, setAdmin] = useState(false);
+  const [admin, setAdmin] = useState(false); const [canChecks, setCanChecks] = useState(false);
   const [gsc, setGsc] = useState<GscData | null>(null);
   const [ga, setGa] = useState<Ga4Data | null>(null);
   const [loading, setLoading] = useState(false);
