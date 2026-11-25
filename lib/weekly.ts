@@ -7,6 +7,11 @@
 // Search Console figures use fresh data (dataState "all"), so the latest days are included before Google marks them final.
 // GA4 uses the same dates, judged in the GA4 property's own time zone.
 //
+// Indexing, 404s and errors, and Crawling come from what the dashboard already saves in each property's Google Sheet
+// (Page indexing and Crawl stats captures, and the daily index checks): see lib/weeklyHealth.ts. Traffic is judged on
+// engaged sessions, and a separate Traffic quality check flags bot-like surges and spam referrers, because raw session
+// counts on these sites swing with automated visits.
+//
 // Who can open it, and which properties it covers for each person: set in Manage access (lib/accessList.ts).
 // When no properties are picked for a person: WEEKLY_SITES (exact Search Console properties, comma-separated) or, when
 // that isn't set, the properties whose address contains aitech, martech, readmagazine or itdigest. When a site has
@@ -30,7 +35,10 @@ import { readArchive } from "./archive";
 import { GSC_TZ, addDays, todayIn } from "./dates";
 import { pool } from "./api";
 import { SOCIAL_CHANNELS, SOCIAL_SOURCE_PATTERN, networkOf } from "./socialSources";
+import { addImpressions, loadHealth, type WeekHealth } from "./weeklyHealth";
 import type { Source } from "./types";
+
+export type { CrawlDayRow, IndexChange, Link404, ReasonRow, WeekHealth } from "./weeklyHealth";
 
 /* ---------------- Access ---------------- */
 // Who can open the report, and which properties it covers for each person, are set in Manage access
@@ -289,7 +297,8 @@ function split(now: SARow[], prev: SARow[]): Split[] {
     .sort((a, b) => b.clicks - a.clicks);
 }
 
-export async function gscWeek(token: string, site: WeeklySite, wk: WeekInfo): Promise<GscWeek> {
+/** `onPages` receives this week's page rows (compared days), used to spot 404 URLs that still get impressions. */
+export async function gscWeek(token: string, site: WeeklySite, wk: WeekInfo, onPages?: (rows: SARow[]) => void): Promise<GscWeek> {
   const s = site.siteUrl;
   const cmpEnd = addDays(wk.start, wk.compareDays - 1);
   const pStart = addDays(wk.start, -7);
@@ -311,6 +320,7 @@ export async function gscWeek(token: string, site: WeeklySite, wk: WeekInfo): Pr
     q("country", pStart, pEnd, 300),
     listSitemaps(token, s).catch(() => null),
   ]);
+  onPages?.(pNow);
 
   const between = (from: string, to: string) => daily.filter((r) => r.keys[0] >= from && r.keys[0] <= to);
   const byDate = new Map(daily.map((r) => [r.keys[0], r]));
@@ -416,6 +426,10 @@ const aiToolOf = (source: string) => AI_TOOLS.find(([re]) => re.test(source))?.[
 
 export const AI_TOOL_LIST = "ChatGPT, Perplexity, Gemini, Claude, Copilot, DeepSeek, Grok, Meta AI, Mistral, You.com, Phind, Poe and others";
 
+/** Referrer domains that are almost always spam (cheap throwaway domains such as teloogoonickel.xyz). */
+export const SPAM_HOST =
+  /\.(xyz|top|click|icu|buzz|monster|cyou|sbs|cfd|rest|quest|lol|bond|autos|boats|hair|beauty|skin|makeup|homes|yachts|mom)$/i;
+
 /* ---------------- GA4 ---------------- */
 
 export type GaTotals = { sessions: number; engaged: number; keyEvents: number; views: number; users: number; newUsers: number };
@@ -430,12 +444,14 @@ export type GaWeek = {
   week: { sessions: number; keyEvents: number; views: number };
   cmp: GaTotals;
   prev: GaTotals;
-  avg4: { sessions: number; keyEvents: number };
-  channels: { name: string; sessions: number; prevSessions: number; keyEvents: number }[];
+  avg4: { sessions: number; engaged: number; keyEvents: number };
+  channels: { name: string; sessions: number; prevSessions: number; engaged: number; keyEvents: number }[];
   social: { sessions: number; prevSessions: number };
   socialNetworks: SourceGroup[];
   ai: { sessions: number; prevSessions: number; engaged: number; keyEvents: number; tools: SourceGroup[]; landing: { page: string; sessions: number; keyEvents: number }[] };
   referrals: SourceGroup[];
+  /** Referral visits from spam-looking domains (SPAM_HOST). */
+  spamReferrals: { sessions: number; prevSessions: number; sites: SourceGroup[] };
   landing: { page: string; sessions: number; prevSessions: number | null }[];
   request: object[];
 };
@@ -482,7 +498,7 @@ export async function gaWeek(token: string, property: string, wk: WeekInfo): Pro
   const main = [
     { dateRanges: [hist], dimensions: names(["date"]), metrics: names(["sessions", "engagedSessions", "keyEvents", "screenPageViews"]), limit: 100 },
     { dateRanges: [cmp, prev], metrics: names(["totalUsers", "newUsers"]) },
-    { dateRanges: [cmp, prev], dimensions: names(["sessionDefaultChannelGroup"]), metrics: names(["sessions", "keyEvents"]), limit: 100 },
+    { dateRanges: [cmp, prev], dimensions: names(["sessionDefaultChannelGroup"]), metrics: names(["sessions", "engagedSessions", "keyEvents"]), limit: 100 },
     { dateRanges: [cmp, prev], dimensionFilter: social, metrics: names(["sessions"]) },
     { dateRanges: [cmp, prev], dimensions: names(["landingPage"]), metrics: names(["sessions"]), orderBys: bySessions, limit: 80 },
   ];
@@ -513,7 +529,7 @@ export async function gaWeek(token: string, property: string, wk: WeekInfo): Pro
     newUsers: Number(pick(users, k).newUsers || 0),
   });
 
-  let n4 = 0, s4 = 0, k4 = 0;
+  let n4 = 0, s4 = 0, e4 = 0, k4 = 0;
   for (const k of [1, 2, 3, 4]) {
     const from = addDays(wk.start, -7 * k);
     const to = addDays(from, compareDays - 1);
@@ -521,17 +537,19 @@ export async function gaWeek(token: string, property: string, wk: WeekInfo): Pro
     if (s > 0) {
       n4++;
       s4 += s;
+      e4 += sumD(from, to, "engagedSessions");
       k4 += sumD(from, to, "keyEvents");
     }
   }
 
-  const ch = new Map<string, { name: string; sessions: number; prevSessions: number; keyEvents: number }>();
+  const ch = new Map<string, { name: string; sessions: number; prevSessions: number; engaged: number; keyEvents: number }>();
   for (const r of channels || []) {
     const name = String(r.sessionDefaultChannelGroup || "(other)");
-    const x = ch.get(name) || { name, sessions: 0, prevSessions: 0, keyEvents: 0 };
+    const x = ch.get(name) || { name, sessions: 0, prevSessions: 0, engaged: 0, keyEvents: 0 };
     if (r.dateRange === "date_range_1") x.prevSessions += r.sessions || 0;
     else {
       x.sessions += r.sessions || 0;
+      x.engaged += r.engagedSessions || 0;
       x.keyEvents += r.keyEvents || 0;
     }
     ch.set(name, x);
@@ -547,8 +565,10 @@ export async function gaWeek(token: string, property: string, wk: WeekInfo): Pro
     days.push({ date, sessions: Number(byDate.get(date)?.sessions || 0), state });
   }
 
-  const tools = group(aiRows, (r) => aiToolOf(String(r.sessionSource || "")));
   const sumG = (list: SourceGroup[], k: keyof Omit<SourceGroup, "name">) => list.reduce((t, x) => t + x[k], 0);
+  const tools = group(aiRows, (r) => aiToolOf(String(r.sessionSource || "")));
+  const refs = group(refRows, (r) => String(r.sessionSource || "(not set)"));
+  const spam = refs.filter((x) => SPAM_HOST.test(x.name));
 
   return {
     property,
@@ -559,7 +579,7 @@ export async function gaWeek(token: string, property: string, wk: WeekInfo): Pro
     week: { sessions: sumD(wk.start, wk.end, "sessions"), keyEvents: sumD(wk.start, wk.end, "keyEvents"), views: sumD(wk.start, wk.end, "screenPageViews") },
     cmp: totals(cmp, "date_range_0"),
     prev: totals(prev, "date_range_1"),
-    avg4: { sessions: n4 ? s4 / n4 : 0, keyEvents: n4 ? k4 / n4 : 0 },
+    avg4: { sessions: n4 ? s4 / n4 : 0, engaged: n4 ? e4 / n4 : 0, keyEvents: n4 ? k4 / n4 : 0 },
     channels: Array.from(ch.values()).sort((a, b) => b.sessions - a.sessions),
     social: { sessions: Number(pick(soc, "date_range_0").sessions || 0), prevSessions: Number(pick(soc, "date_range_1").sessions || 0) },
     socialNetworks: group(socRows, (r) => networkOf(String(r.sessionSource || ""))),
@@ -571,7 +591,8 @@ export async function gaWeek(token: string, property: string, wk: WeekInfo): Pro
       tools,
       landing: (aiLanding || []).map((r) => ({ page: String(r.landingPage), sessions: r.sessions || 0, keyEvents: r.keyEvents || 0 })),
     },
-    referrals: group(refRows, (r) => String(r.sessionSource || "(not set)")).slice(0, 15),
+    referrals: refs.slice(0, 15),
+    spamReferrals: { sessions: sumG(spam, "sessions"), prevSessions: sumG(spam, "prevSessions"), sites: spam.slice(0, 15) },
     landing: (landing || [])
       .filter((r) => r.dateRange !== "date_range_1")
       .slice(0, 15)
@@ -582,10 +603,11 @@ export async function gaWeek(token: string, property: string, wk: WeekInfo): Pro
 
 /* ---------------- Status and summary ---------------- */
 
-export type Status = "good" | "watch" | "problem" | "pending";
+/** "none" = the data this area needs isn't saved for this property; "pending" = not built yet. */
+export type Status = "good" | "watch" | "problem" | "none" | "pending";
 export type Area = { id: string; label: string; status: Status; note: string };
 
-const RANK: Record<Status, number> = { pending: -1, good: 0, watch: 1, problem: 2 };
+const RANK: Record<Status, number> = { pending: -1, none: -1, good: 0, watch: 1, problem: 2 };
 const worst = (...list: Status[]) => list.reduce<Status>((a, b) => (RANK[b] > RANK[a] ? b : a), "good");
 const drop = (now: number, base: number): Status => {
   if (!base) return "good";
@@ -594,20 +616,230 @@ const drop = (now: number, base: number): Status => {
 };
 /** AI visits are small and jumpy, so they're only judged once last week had at least this many. */
 const AI_MIN_BASE = 20;
+/** A capture whose latest day is this many days or more before the end of the week is out of date. */
+const STALE_DAYS = 14;
 
 export const WEEKLY_RULES = [
-  "Search performance and Traffic: Watch when clicks (or sessions) are 8% or more below last week or the 4-week average; Problem at 20% or more.",
-  "Search performance: also Watch when the average position is more than 3 places worse than last week.",
-  `AI visits: Watch when visits from AI assistants are 8% or more below last week, Problem at 20% or more; only judged when last week had at least ${AI_MIN_BASE}.`,
+  "Search performance: Watch when clicks are 8% or more below last week or the 4-week average; Problem at 20% or more. Also Watch when the average position is more than 3 places worse than last week.",
+  `Indexing: from Google's Page indexing report (the extension captures) and the daily index checks. Watch when Google's indexed count fell 3% or more over the week, the daily checks found 5 or more pages dropped from the index, or the latest capture is more than ${STALE_DAYS} days old; Problem at 10% or 25 pages.`,
+  "404s and errors: Watch when 404 and soft 404 pages in Google's report rose 5% or more (at least 5 pages) since the capture about a week earlier, server errors rose at all, a URL the daily checks found returning 404 is still listed in a sitemap, or a 404 URL still got impressions; Problem when 404s rose 20% or more (at least 20 pages), server errors rose by 10 or more, or 25 or more 404 URLs are still in a sitemap.",
+  "Crawling: from the Crawl stats captures, comparing the captured days of this week with the same days of last week. Watch when crawl requests fell 20% or more, the average response time rose 50% or more (and is over 300 ms), or fewer than 4 days of the week are captured; Problem when requests fell 40% or more or responses average 1,000 ms or more.",
   "Sitemaps: Problem when any sitemap has errors; Watch when there are warnings, a sitemap is still pending, Google hasn't read one for 14 days, or none is submitted.",
-  "Indexing, 404s, Crawling and Experience come from the extension captures and the daily index checks; they're added in the next update.",
+  "Traffic outcome: judged on engaged sessions (GA4 sessions where the visitor actually engaged), so bot traffic can't hide or fake a change. Watch when engaged sessions are 8% or more below last week or the 4-week average; Problem at 20% or more.",
+  "Traffic quality: Problem when sessions rose 50% or more (at least 1,000 more) while engaged sessions rose less than 10%, which usually means automated visits; Watch at a 20% rise (at least 500 more), when the engagement rate fell by a third or more, or when 20 or more referral visits came from spam-looking domains (.xyz, .top and similar).",
+  `AI visits: Watch when visits from AI assistants are 8% or more below last week, Problem at 20% or more; only judged when last week had at least ${AI_MIN_BASE}.`,
+  "No data: the capture or check that area needs isn't saved for this property. Experience and penalties (Core Web Vitals, manual actions, security issues) needs new extension captures and is added later.",
 ];
 
 const n0 = (x: number) => Math.round(x).toLocaleString("en-US");
 const chg = (now: number, base: number) => (base ? `${now >= base ? "+" : ""}${(((now - base) / base) * 100).toFixed(0)}%` : now ? "new" : "no change");
+const pctChange = (now: number, base: number) => (base ? (now - base) / base : now ? 1 : 0);
+const pc1 = (x: number) => `${(x * 100).toFixed(1)}%`;
+const capFirst = (t: string) => (t ? t.charAt(0).toUpperCase() + t.slice(1) : t);
+const joinFails = (...list: (string | undefined)[]) => list.filter(Boolean).join("; ");
 const pathOf = (u: string) => u.replace(/^https?:\/\/[^/]+/, "") || "/";
 const errText = (r: PromiseSettledResult<unknown>) =>
   r.status === "rejected" ? (r.reason instanceof Error ? r.reason.message : "error") : undefined;
+
+type Judged = { area: Area; lines: string[] };
+
+function indexingArea(h: WeekHealth | null, end: string, err?: string): Judged {
+  const who = { id: "indexing", label: "Indexing" };
+  if (!h) return { area: { ...who, status: "none", note: err ? `Couldn't read the saved data: ${err}` : "No data" }, lines: [] };
+  const c = h.index.capture;
+  const k = h.index.checks;
+  if (!c && !k) {
+    const why = joinFails(h.problems.idx, h.problems.checks);
+    return {
+      area: { ...who, status: "none", note: why ? `Couldn't read the saved data: ${why}` : "No Page indexing capture or daily index checks for this week." },
+      lines: [],
+    };
+  }
+  const st: Status[] = [];
+  const parts: string[] = [];
+  const lines: string[] = [];
+  if (c) {
+    if (dayDiff(c.date, end) > STALE_DAYS) {
+      st.push("watch");
+      parts.push(`latest Page indexing capture is from ${c.date}`);
+    } else if (c.baseDate != null && c.baseIndexed != null) {
+      const p = pctChange(c.indexed, c.baseIndexed);
+      st.push(p <= -0.1 ? "problem" : p <= -0.03 ? "watch" : "good");
+      parts.push(`Google: ${n0(c.indexed)} indexed (${chg(c.indexed, c.baseIndexed)} since ${c.baseDate})`);
+    } else {
+      st.push("good");
+      parts.push(`Google: ${n0(c.indexed)} indexed on ${c.date}`);
+    }
+    lines.push(
+      `Google's Page indexing report (${c.view}): ${n0(c.indexed)} pages indexed and ${n0(c.notIndexed)} not indexed on ${c.date}` +
+        (c.baseDate != null && c.baseIndexed != null ? `; indexed pages ${chg(c.indexed, c.baseIndexed)} since ${c.baseDate}.` : ".")
+    );
+  }
+  if (k) {
+    if (k.enabled || k.dropped || k.newlyIndexed) {
+      st.push(k.dropped >= 25 ? "problem" : k.dropped >= 5 ? "watch" : "good");
+      parts.push(`daily checks: ${n0(k.dropped)} dropped, ${n0(k.newlyIndexed)} newly indexed`);
+      lines.push(
+        `Daily index checks this week: ${n0(k.dropped)} page(s) dropped from Google's index and ${n0(k.newlyIndexed)} newly indexed` +
+          (k.impressionsStopped ? `; ${n0(k.impressionsStopped)} page(s) stopped getting impressions and were queued for a check` : "") +
+          (k.enabled ? "." : " (the checks are paused now).")
+      );
+    } else {
+      parts.push("daily index checks are paused");
+    }
+  }
+  return { area: { ...who, status: st.length ? worst(...st) : "none", note: capFirst(parts.join(" · ")) }, lines };
+}
+
+function errorsArea(h: WeekHealth | null, end: string, err?: string): Judged {
+  const who = { id: "errors", label: "404s and errors" };
+  if (!h) return { area: { ...who, status: "none", note: err ? `Couldn't read the saved data: ${err}` : "No data" }, lines: [] };
+  const r = h.errors.reasons;
+  const l = h.errors.links;
+  if (!r && !l) {
+    const why = joinFails(h.problems.idx, h.problems.checks);
+    return {
+      area: {
+        ...who,
+        status: "none",
+        note: why ? `Couldn't read the saved data: ${why}` : "No “Why pages aren't indexed” capture or daily index checks for this week.",
+      },
+      lines: [],
+    };
+  }
+  const st: Status[] = [];
+  const parts: string[] = [];
+  const lines: string[] = [];
+  if (r) {
+    const nf = r.notFound + r.soft404;
+    const server = r.server ? `, ${n0(r.server)} server errors` : "";
+    if (dayDiff(r.asOf, end) > STALE_DAYS) {
+      st.push("watch");
+      parts.push(`latest capture of Google's reasons is from ${r.asOf}`);
+    } else if (r.prevAsOf != null) {
+      const pnf = (r.prevNotFound || 0) + (r.prevSoft404 || 0);
+      const rise = nf - pnf;
+      const rp = pctChange(nf, pnf);
+      const sRise = r.server - (r.prevServer || 0);
+      st.push((rp >= 0.2 && rise >= 20) || sRise >= 10 ? "problem" : (rp >= 0.05 && rise >= 5) || sRise > 0 ? "watch" : "good");
+      parts.push(`Google: ${n0(nf)} 404/soft 404 (${chg(nf, pnf)} since ${r.prevAsOf})${server}`);
+    } else {
+      st.push("good");
+      parts.push(`Google: ${n0(nf)} 404/soft 404 on ${r.asOf}${server}`);
+    }
+    lines.push(
+      `Google's report on ${r.asOf}: ${n0(r.notFound)} page(s) Not found (404), ${n0(r.soft404)} soft 404, ${n0(r.server)} server error(s) (5xx)` +
+        (r.prevAsOf != null
+          ? `; on ${r.prevAsOf}: ${n0((r.prevNotFound || 0) + (r.prevSoft404 || 0))} 404/soft 404 and ${n0(r.prevServer || 0)} server error(s).`
+          : ".")
+    );
+  }
+  if (l) {
+    st.push(l.inSitemap >= 25 ? "problem" : l.inSitemap || l.withImpressions ? "watch" : "good");
+    parts.push(
+      `daily checks: ${n0(l.total)} URLs return 404` +
+        (l.inSitemap ? `, ${n0(l.inSitemap)} still in a sitemap` : "") +
+        (l.withImpressions ? `, ${n0(l.withImpressions)} got impressions` : "")
+    );
+    if (l.total) {
+      lines.push(
+        `The daily index checks found ${n0(l.total)} URL(s) returning 404 or soft 404: ${n0(l.inSitemap)} still listed in a sitemap, ${n0(l.withImpressions)} got search impressions this week.`
+      );
+    }
+  }
+  return { area: { ...who, status: st.length ? worst(...st) : "none", note: capFirst(parts.join(" · ")) }, lines };
+}
+
+function crawlArea(h: WeekHealth | null, err?: string): Judged {
+  const who = { id: "crawl", label: "Crawling" };
+  if (!h) return { area: { ...who, status: "none", note: err ? `Couldn't read the saved data: ${err}` : "No data" }, lines: [] };
+  const c = h.crawl;
+  if (!c) {
+    return {
+      area: {
+        ...who,
+        status: "none",
+        note: h.problems.crawl ? `Couldn't read the Crawl stats captures: ${h.problems.crawl}` : "No Crawl stats capture saved for this property yet.",
+      },
+      lines: [],
+    };
+  }
+  if (!c.covered) {
+    return {
+      area: { ...who, status: "watch", note: `No Crawl stats for this week yet (latest day saved: ${c.latestSaved || "none"}). Capture Crawl stats again.` },
+      lines: [],
+    };
+  }
+  if (!c.pairs) {
+    return {
+      area: { ...who, status: "good", note: `${c.covered} day(s) of this week captured; nothing saved for the same days last week to compare.` },
+      lines: [],
+    };
+  }
+  const rp = pctChange(c.requests, c.prevRequests);
+  const msUp = c.ms != null && c.prevMs ? (c.ms - c.prevMs) / c.prevMs : 0;
+  const status: Status =
+    rp <= -0.4 || (c.ms != null && c.ms >= 1000)
+      ? "problem"
+      : rp <= -0.2 || (msUp >= 0.5 && (c.ms ?? 0) > 300) || c.covered < 4
+        ? "watch"
+        : "good";
+  const ms = c.ms != null ? ` · ${n0(c.ms)} ms average response${c.prevMs ? ` (${chg(c.ms, c.prevMs)})` : ""}` : "";
+  return {
+    area: {
+      ...who,
+      status,
+      note: `${n0(c.requests)} crawl requests on ${c.pairs} day(s) (${chg(c.requests, c.prevRequests)} vs the same days last week)${ms}${c.covered < 7 ? ` · ${c.covered} of 7 days captured` : ""}`,
+    },
+    lines: [
+      `Googlebot made ${n0(c.requests)} crawl requests on the ${c.pairs} compared day(s) (${chg(c.requests, c.prevRequests)} vs the same days last week)` +
+        (c.ms != null ? `; average response time ${n0(c.ms)} ms${c.prevMs ? ` (last week ${n0(c.prevMs)} ms)` : ""}` : "") +
+        ".",
+    ],
+  };
+}
+
+function qualityArea(ga: GaWeek): Judged {
+  const s0 = ga.cmp.sessions, s1 = ga.prev.sessions, e0 = ga.cmp.engaged, e1 = ga.prev.engaged;
+  const dS = s0 - s1;
+  const sP = pctChange(s0, s1);
+  const eP = pctChange(e0, e1);
+  const er0 = s0 ? e0 / s0 : 0;
+  const er1 = s1 ? e1 / s1 : 0;
+  const surge = (minPct: number, minAdd: number) => s1 > 0 && sP >= minPct && dS >= minAdd && eP < 0.1;
+  const rateFell = er1 > 0 && s0 >= 200 && er0 <= er1 * (2 / 3);
+  const spam = ga.spamReferrals;
+  const status: Status = surge(0.5, 1000) ? "problem" : surge(0.2, 500) || rateFell || spam.sessions >= 20 ? "watch" : "good";
+
+  const parts: string[] = [];
+  const lines: string[] = [];
+  if (surge(0.2, 500)) {
+    parts.push(`sessions ${chg(s0, s1)} but engaged sessions ${chg(e0, e1)}`);
+    const where: string[] = [];
+    const direct = ga.channels.find((c) => c.name === "Direct");
+    if (direct && direct.sessions - direct.prevSessions >= dS * 0.5) {
+      where.push(`Direct visits ${n0(direct.sessions)} (${chg(direct.sessions, direct.prevSessions)})`);
+    }
+    const home = ga.landing.find((l) => l.page === "/");
+    if (home && home.prevSessions != null && home.sessions - home.prevSessions >= dS * 0.3) {
+      where.push(`homepage landings ${n0(home.sessions)} (${chg(home.sessions, home.prevSessions)})`);
+    }
+    lines.push(
+      `Sessions rose ${chg(s0, s1)} (${n0(dS)} more) while engaged sessions changed ${chg(e0, e1)}, so the extra visits look automated` +
+        (where.length ? `: ${where.join(", ")}` : "") +
+        ". Real traffic is better judged on engaged sessions this week."
+    );
+  }
+  if (rateFell) parts.push(`engagement rate ${pc1(er0)} (last week ${pc1(er1)})`);
+  if (spam.sessions >= 20) {
+    parts.push(`${n0(spam.sessions)} visits from spam-looking referrers`);
+    lines.push(
+      `${n0(spam.sessions)} referral visits came from spam-looking sites (${spam.sites.slice(0, 3).map((x) => x.name).join(", ")}); they inflate the session count.`
+    );
+  }
+  if (!parts.length) parts.push(`no bot-like surge · engagement rate ${pc1(er0)} (last week ${pc1(er1)})`);
+  return { area: { id: "quality", label: "Traffic quality", status, note: capFirst(parts.join(" · ")) }, lines };
+}
 
 export type PropertyWeek = {
   site: string;
@@ -620,20 +852,33 @@ export type PropertyWeek = {
   gscError?: string;
   ga: GaWeek | null;
   gaError?: string;
+  /** Page indexing, Crawl stats and daily index checks saved for this property (lib/weeklyHealth.ts). */
+  health: WeekHealth | null;
+  healthError?: string;
   areas: Area[];
   summary: string[];
   sources: Record<string, Source>;
-  sourceIds: { gsc: string; ga: string; maps: string };
+  sourceIds: { gsc: string; ga: string; maps: string; health: string };
 };
 
 export async function propertyWeek(token: string, site: WeeklySite, wk: WeekInfo): Promise<PropertyWeek> {
-  const [g, a] = await Promise.allSettled([gscWeek(token, site, wk), site.ga4 ? gaWeek(token, site.ga4, wk) : Promise.resolve(null)]);
+  let pageRows: SARow[] = [];
+  const [g, a, h] = await Promise.allSettled([
+    gscWeek(token, site, wk, (rows) => {
+      pageRows = rows;
+    }),
+    site.ga4 ? gaWeek(token, site.ga4, wk) : Promise.resolve(null),
+    loadHealth(site.siteUrl, wk.start, wk.end),
+  ]);
   const gsc = g.status === "fulfilled" ? g.value : null;
   const ga = a.status === "fulfilled" ? a.value : null;
+  const health = h.status === "fulfilled" ? h.value : null;
   const gscError = errText(g);
   const gaError = site.ga4 ? errText(a) : "No GA4 property is paired with this site. Set WEEKLY_GA4 in Vercel to pair it by hand.";
+  const healthError = errText(h);
+  if (health) addImpressions(health, pageRows);
 
-  const ids = { gsc: `wk.gsc.${site.siteUrl}`, ga: `wk.ga.${site.siteUrl}`, maps: `wk.maps.${site.siteUrl}` };
+  const ids = { gsc: `wk.gsc.${site.siteUrl}`, ga: `wk.ga.${site.siteUrl}`, maps: `wk.maps.${site.siteUrl}`, health: `wk.health.${site.siteUrl}` };
   const now = new Date().toISOString();
   const sources: Record<string, Source> = {};
   if (gsc) {
@@ -674,12 +919,37 @@ export async function propertyWeek(token: string, site: WeeklySite, wk: WeekInfo
       formula:
         `Dates in the GA4 property's time zone (${ga.timeZone}). Changes compare the first ${ga.compareDays} day(s) of this week with the same days of last week. ` +
         `AI visits = sessions whose source matches “${AI_SOURCE_PATTERN}” (${AI_TOOL_LIST}). Social = the Organic and Paid Social channels plus known ` +
-        "social sources. Referrals = the Referral channel, so AI assistants filed there also appear in that list. GA4 can still adjust the last two days.",
+        "social sources. Referrals = the Referral channel, so AI assistants filed there also appear in that list. Spam-looking referrers = referral " +
+        "sources on throwaway domains (.xyz, .top and similar). GA4 can still adjust the last two days.",
       verifyHow:
         `GA4 → Reports → Acquisition → Traffic acquisition, dates ${wk.start} to ${wk.end}, compared with the previous period. ` +
         "Change the table to “Session source” and search for chatgpt, perplexity and so on.",
     } as Source;
   }
+  if (health) {
+    sources[ids.health] = {
+      id: ids.health,
+      label: `Saved captures and daily index checks: ${site.host}`,
+      system:
+        "Search Console's Page indexing and Crawl stats reports (extension captures) and the URL Inspection API (daily index checks), as saved in this property's Google Sheet",
+      endpoint: "Google Sheets: this property's Sheet (Page indexing, Why pages aren't indexed, Crawl stats, Status changes and 404 link sources)",
+      range: { startDate: wk.start, endDate: wk.end },
+      fetchedAt: now,
+      formula:
+        "Indexing: Google's own counts on the latest captured day up to the end of the week, compared with the captured day about a week earlier, " +
+        "plus pages the daily checks found dropped from or newly added to the index this week (by the day they were found, Pacific time). " +
+        "404s: the Not found (404), Soft 404 and Server error (5xx) rows of “Why pages aren't indexed” at the latest capture vs about a week earlier, " +
+        "plus URLs the daily checks found returning 404 (still listed in a sitemap, or with search impressions this week). " +
+        "Crawling: the captured days of this week vs the same weekdays of last week; total = the reported total, or Refresh + Discovery.",
+      verifyHow: "Search Console → Indexing → Pages, and Settings → Crawl stats. The daily index checks are in the Index checks tab.",
+      verifyUrl: `https://search.google.com/search-console/index?resource_id=${encodeURIComponent(site.siteUrl)}`,
+    } as Source;
+  }
+
+  const idxJ = indexingArea(health, wk.end, healthError);
+  const errJ = errorsArea(health, wk.end, healthError);
+  const crawlJ = crawlArea(health, healthError);
+  const qualJ = ga ? qualityArea(ga) : null;
 
   const areas: Area[] = [];
   if (gsc) {
@@ -691,11 +961,9 @@ export async function propertyWeek(token: string, site: WeeklySite, wk: WeekInfo
       note: `Clicks ${chg(gsc.cmp.clicks, gsc.prev.clicks)} vs last week, ${chg(gsc.cmp.clicks, gsc.avg4.clicks)} vs the 4-week average`,
     });
   } else {
-    areas.push({ id: "search", label: "Search performance", status: "pending", note: gscError || "No data" });
+    areas.push({ id: "search", label: "Search performance", status: "none", note: gscError || "No data" });
   }
-  areas.push({ id: "indexing", label: "Indexing", status: "pending", note: "From the Page indexing captures and the daily index checks. Added in the next update." });
-  areas.push({ id: "errors", label: "404s and errors", status: "pending", note: "404, soft 404 and server-error counts, and 404 pages still getting impressions. Added in the next update." });
-  areas.push({ id: "crawl", label: "Crawling", status: "pending", note: "From the Crawl stats captures. Added in the next update." });
+  areas.push(idxJ.area, errJ.area, crawlJ.area);
   if (gsc?.sitemaps) {
     const sm = gsc.sitemaps;
     const errs = sm.reduce((t, m) => t + m.errors, 0);
@@ -711,7 +979,7 @@ export async function propertyWeek(token: string, site: WeeklySite, wk: WeekInfo
         : `${sm.length} sitemap(s) · ${errs} errors · ${warns} warnings${pending ? ` · ${pending} pending` : ""}${stale ? ` · ${stale} not read for 14+ days` : ""}`,
     });
   } else {
-    areas.push({ id: "sitemaps", label: "Sitemaps", status: "pending", note: gscError || "Couldn't read the sitemaps" });
+    areas.push({ id: "sitemaps", label: "Sitemaps", status: "none", note: gscError || "Couldn't read the sitemaps" });
   }
   areas.push({
     id: "experience",
@@ -720,12 +988,14 @@ export async function propertyWeek(token: string, site: WeeklySite, wk: WeekInfo
     note: "Core Web Vitals, structured data, manual actions and security issues come from new extension captures.",
   });
   if (ga) {
+    const e0 = ga.cmp.engaged, e1 = ga.prev.engaged, ea = ga.avg4.engaged;
     areas.push({
       id: "traffic",
       label: "Traffic outcome",
-      status: worst(drop(ga.cmp.sessions, ga.prev.sessions), drop(ga.cmp.sessions, ga.avg4.sessions)),
-      note: `Sessions ${chg(ga.cmp.sessions, ga.prev.sessions)} vs last week, ${chg(ga.cmp.sessions, ga.avg4.sessions)} vs the 4-week average`,
+      status: worst(drop(e0, e1), drop(e0, ea)),
+      note: `Engaged sessions ${chg(e0, e1)} vs last week, ${chg(e0, ea)} vs the 4-week average (all sessions ${chg(ga.cmp.sessions, ga.prev.sessions)})`,
     });
+    if (qualJ) areas.push(qualJ.area);
     const top = ga.ai.tools.find((t) => t.sessions > 0);
     areas.push({
       id: "ai",
@@ -734,8 +1004,9 @@ export async function propertyWeek(token: string, site: WeeklySite, wk: WeekInfo
       note: `${n0(ga.ai.sessions)} visits from AI assistants (${chg(ga.ai.sessions, ga.ai.prevSessions)} vs last week)${top ? `, most from ${top.name}` : ""}`,
     });
   } else {
-    areas.push({ id: "traffic", label: "Traffic outcome", status: "pending", note: gaError || "No GA4 data" });
-    areas.push({ id: "ai", label: "AI visits", status: "pending", note: gaError || "No GA4 data" });
+    areas.push({ id: "traffic", label: "Traffic outcome", status: "none", note: gaError || "No GA4 data" });
+    areas.push({ id: "quality", label: "Traffic quality", status: "none", note: gaError || "No GA4 data" });
+    areas.push({ id: "ai", label: "AI visits", status: "none", note: gaError || "No GA4 data" });
   }
 
   const summary: string[] = [];
@@ -754,13 +1025,17 @@ export async function propertyWeek(token: string, site: WeeklySite, wk: WeekInfo
     if (up) summary.push(`Biggest gain: ${pathOf(up.key)} (+${n0(up.change)} clicks).`);
     if (dn) summary.push(`Biggest loss: ${pathOf(dn.key)} (${n0(dn.change)} clicks).`);
     if (gsc.queries.newCount) summary.push(`${n0(gsc.queries.newCount)} queries got impressions this week that weren't in last week's list.`);
+  }
+  summary.push(...idxJ.lines, ...errJ.lines, ...crawlJ.lines);
+  if (gsc) {
     const errs = (gsc.sitemaps || []).reduce((t, m) => t + m.errors, 0);
     if (errs) summary.push(`Sitemaps report ${n0(errs)} error(s).`);
   }
   if (ga) {
     summary.push(
-      `GA4 sessions ${n0(ga.week.sessions)}: ${chg(ga.cmp.sessions, ga.prev.sessions)} vs last week; key events ${n0(ga.week.keyEvents)} (${chg(ga.cmp.keyEvents, ga.prev.keyEvents)}).`
+      `GA4 sessions ${n0(ga.week.sessions)}: ${chg(ga.cmp.sessions, ga.prev.sessions)} vs last week; engaged sessions ${n0(ga.cmp.engaged)} (${chg(ga.cmp.engaged, ga.prev.engaged)}); key events ${n0(ga.week.keyEvents)} (${chg(ga.cmp.keyEvents, ga.prev.keyEvents)}).`
     );
+    if (qualJ) summary.push(...qualJ.lines);
     if (ga.ai.sessions || ga.ai.prevSessions) {
       const top = ga.ai.tools.filter((t) => t.sessions > 0).slice(0, 2).map((t) => `${t.name} ${n0(t.sessions)}`);
       summary.push(
@@ -775,6 +1050,6 @@ export async function propertyWeek(token: string, site: WeeklySite, wk: WeekInfo
 
   return {
     site: site.siteUrl, host: site.host, name: site.name, ga4: site.ga4, ga4Name: site.ga4Name, week: wk,
-    gsc, gscError, ga, gaError, areas, summary, sources, sourceIds: ids,
+    gsc, gscError, ga, gaError, health, healthError, areas, summary, sources, sourceIds: ids,
   };
 }
