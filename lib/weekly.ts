@@ -7,10 +7,11 @@
 // Search Console figures use fresh data (dataState "all"), so the latest days are included before Google marks them final.
 // GA4 uses the same dates, judged in the GA4 property's own time zone.
 //
-// Who can open it: WEEKLY_REPORT_EMAILS (default hsingh@kingsresearch.com).
-// Which properties: WEEKLY_SITES (exact Search Console properties, comma-separated) or, when that isn't set, the
-// properties whose address contains aitech, martech, readmagazine or itdigest. When a site has several Search Console
-// properties (http and https, www and no www), the one with the most impressions in the last 28 days is used.
+// Who can open it, and which properties it covers for each person: set in Manage access (lib/accessList.ts).
+// When no properties are picked for a person: WEEKLY_SITES (exact Search Console properties, comma-separated) or, when
+// that isn't set, the properties whose address contains aitech, martech, readmagazine or itdigest. When a site has
+// several Search Console properties (http and https, www and no www), the one with the most impressions in the last
+// 28 days is used.
 // Which GA4 property goes with each:
 //   1. WEEKLY_GA4 ("readmagazine=123456789,aitech=987654321", keyed by name, host or Search Console property), if set;
 //   2. otherwise every likely candidate — GA4 properties whose web stream has the site's address, GA4 properties whose
@@ -19,6 +20,7 @@
 //      never beats the live one.
 import type { NextRequest } from "next/server";
 import { HttpError, requireUser } from "./token";
+import { hasPerm, weeklySitesFor } from "./accessList";
 import {
   ga4TimeZone, latestFinalDate, listGa4Properties, listSitemaps, listSites, listWebStreamHosts, normalizeHost, runReport,
   saEndpoint, saRequest, searchAnalytics, searchAnalyticsAll, type SABody, type SARow,
@@ -31,23 +33,16 @@ import { SOCIAL_CHANNELS, SOCIAL_SOURCE_PATTERN, networkOf } from "./socialSourc
 import type { Source } from "./types";
 
 /* ---------------- Access ---------------- */
+// Who can open the report, and which properties it covers for each person, are set in Manage access
+// (lib/accessList.ts). No properties chosen = the default list below (or WEEKLY_SITES).
 
-const DEFAULT_WEEKLY_EMAILS = ["hsingh@kingsresearch.com"];
-
-export function weeklyEmails() {
-  const list = (process.env.WEEKLY_REPORT_EMAILS || "")
-    .split(/[,\s]+/)
-    .map((x) => x.trim().toLowerCase())
-    .filter(Boolean);
-  return list.length ? list : DEFAULT_WEEKLY_EMAILS;
-}
-
-export const isWeeklyEmail = (email?: string | null) => !!email && weeklyEmails().includes(email.toLowerCase());
-
-export async function requireWeeklyUser(req: NextRequest) {
+/** The signed-in person and the properties chosen for them ([] = the default list). */
+export async function requireWeeklyUser(req: NextRequest): Promise<{ email: string; sites: string[] }> {
   const email = await requireUser(req);
-  if (!isWeeklyEmail(email)) throw new HttpError(403, "The weekly report is only available to its own account.");
-  return email;
+  if (!(await hasPerm(email, "weekly"))) {
+    throw new HttpError(403, "The weekly report isn't turned on for your account. Ask an admin to tick it for you in Manage access.");
+  }
+  return { email, sites: await weeklySitesFor(email) };
 }
 
 /* ---------------- Which properties ---------------- */
@@ -103,13 +98,17 @@ function ga4Overrides(): Record<string, string> {
 /** "Read Magazine - GA4" → "readmagazinega4", so names can be compared with addresses. */
 const squash = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 
-export async function weeklySites(token: string): Promise<WeeklySites> {
-  const k = token.slice(-32);
+/**
+ * The properties in this person's weekly report: the ones picked for them in Manage access (`chosen`), or the default
+ * list when nothing is picked. Only properties their own Google account can open are used; the rest are listed as missing.
+ */
+export async function weeklySites(token: string, chosen: string[] = []): Promise<WeeklySites> {
+  const k = `${token.slice(-32)}|${chosen.join(",")}`;
   const hit = siteCache.get(k);
   if (hit && Date.now() - hit.at < 10 * 60_000) return hit.v;
 
   const all = await listSites(token);
-  const exact = (process.env.WEEKLY_SITES || "").split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
+  const exact = chosen.length ? chosen : (process.env.WEEKLY_SITES || "").split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
   const picked: { siteUrl: string; name: string }[] = [];
   const missing: string[] = [];
   const alsoMatched: Record<string, string[]> = {};
