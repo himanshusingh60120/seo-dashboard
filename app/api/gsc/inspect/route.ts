@@ -1,12 +1,12 @@
 // app/api/gsc/inspect/route.ts
 // URL Inspection for up to 20 URLs of one property. Google allows about 2,000 inspections per property per day
 // (and 600 per minute). A 429 is never saved as a result: the URL comes back in "skipped" and is retried later.
-// View-only accounts (lib/viewers.ts) can't run inspections.
+// Read-only accounts (Manage access) can't run inspections.
 import { NextRequest, NextResponse } from "next/server";
 import { getGoogleAccessToken, HttpError, requireUser } from "@/lib/token";
 import { assertSiteAccess, errorInspection, inspectUrl, type InspectionResult } from "@/lib/google";
 import { urlInProperty } from "@/lib/url";
-import { assertNotViewer } from "@/lib/viewers";
+import { requireNotViewOnly } from "@/lib/permissions";
 import { fail, pool } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +14,7 @@ export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   try {
-    assertNotViewer(await requireUser(req));
+    await requireNotViewOnly(await requireUser(req));
     const token = await getGoogleAccessToken(req);
     const body = await req.json().catch(() => ({}));
     const siteUrl = String(body.siteUrl || "");
