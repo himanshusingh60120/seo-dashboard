@@ -1,5 +1,6 @@
 // app/api/weekly/route.ts
-// Which week the report covers and which properties are in it. Each property's numbers come from /api/weekly/property.
+// Which week the report covers and which properties are in it (the ones picked for this person in Manage access, or the
+// default list). Each property's numbers come from /api/weekly/property.
 import { NextRequest, NextResponse } from "next/server";
 import { getGoogleAccessToken } from "@/lib/token";
 import { WEEKLY_RULES, requireWeeklyUser, weekInfo, weeklySites } from "@/lib/weekly";
@@ -10,10 +11,10 @@ export const maxDuration = 60;
 
 export async function GET(req: NextRequest) {
   try {
-    await requireWeeklyUser(req);
+    const { sites: chosen } = await requireWeeklyUser(req);
     const token = await getGoogleAccessToken(req);
     const week = weekInfo(req.nextUrl.searchParams.get("week"));
-    const s = await weeklySites(token);
+    const s = await weeklySites(token, chosen);
     return NextResponse.json({ week, ...s, rules: WEEKLY_RULES });
   } catch (e) {
     return fail(e);
