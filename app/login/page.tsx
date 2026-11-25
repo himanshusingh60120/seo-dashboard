@@ -2,10 +2,6 @@
 import { signIn } from "next-auth/react";
 import { useSearchParams } from "next/navigation";
 import { Suspense } from "react";
-import { DEFAULT_ALLOWED_DOMAINS } from "@/lib/access";
-
-// Shows the built-in list. If ALLOWED_DOMAINS is set on the server, update lib/access.ts too so this text matches.
-const DOMAINS = DEFAULT_ALLOWED_DOMAINS.map((d) => `@${d}`).join(", ");
 
 function LoginInner() {
   const error = useSearchParams().get("error");
@@ -14,14 +10,14 @@ function LoginInner() {
       <div className="login-box">
         <h1>Search & traffic dashboard</h1>
         <p style={{ color: "var(--ink-2)" }}>
-          Sign in with your company Google account ({DOMAINS}). You&apos;ll see the Search Console and GA4
-          properties that account can access. Access is read-only.
+          Sign in with your company Google account. You&apos;ll see the Search Console and GA4 properties that account can open.
+          Access is read-only.
         </p>
         {error && (
           <p className="notice error">
             {error === "AccessDenied"
-              ? `This Google account isn't allowed. Use a verified company account on ${DOMAINS}, or ask an admin to add your address to ALLOWED_EMAILS.`
-              : "Sign-in failed. Check the OAuth client settings and try again."}
+              ? "This Google account isn't allowed. Use your company account, or ask an admin to add you in Manage access."
+              : "Sign-in failed. Try again, or ask an admin if it keeps happening."}
           </p>
         )}
         <button className="btn primary" onClick={() => signIn("google", { callbackUrl: "/" })}>
