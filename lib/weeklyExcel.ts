@@ -14,6 +14,7 @@ const STATUS_STYLE: Record<Status, { label: string; bg: string; fg: string; tab:
   good: { label: "Good", bg: "FFE6F4EA", fg: "FF137333", tab: "FF34A853" },
   watch: { label: "Watch", bg: "FFFEF7E0", fg: "FFB06000", tab: "FFFBBC04" },
   problem: { label: "Problem", bg: "FFFCE8E6", fg: "FFC5221F", tab: "FFEA4335" },
+  none: { label: "No data", bg: "FFF1F3F4", fg: "FF5F6368", tab: "FFBDC1C6" },
   pending: { label: "Coming next", bg: "FFF1F3F4", fg: "FF5F6368", tab: "FFBDC1C6" },
 };
 const F = {
@@ -31,7 +32,7 @@ const LIGHT = "FFE8EEF7";
 const RULE = "FFE1E6EB";
 const MUTED = "FF5F6368";
 const DAY_NOTE = { final: "Final", provisional: "Provisional", partial: "Still running", future: "Not yet" } as const;
-const RANK: Record<Status, number> = { pending: -1, good: 0, watch: 1, problem: 2 };
+const RANK: Record<Status, number> = { pending: -1, none: -1, good: 0, watch: 1, problem: 2 };
 
 const solid = (argb: string) => ({ type: "pattern" as const, pattern: "solid" as const, fgColor: { argb } });
 const N = (n: number | null | undefined, f: string): Num => ({ n: n == null || !Number.isFinite(n) ? null : n, f });
@@ -50,7 +51,7 @@ const addDays = (d: string, n: number) => {
 const dayName = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString("en-GB", { weekday: "long", timeZone: "UTC" });
 const daysBetween = (a: string, b: string) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 864e5);
 const worst = (areas: { status: Status }[]): Status | undefined => {
-  const list = areas.filter((a) => a.status !== "pending");
+  const list = areas.filter((a) => a.status !== "pending" && a.status !== "none");
   return list.length ? list.reduce<Status>((w, a) => (RANK[a.status] > RANK[w] ? a.status : w), "good") : undefined;
 };
 const areaStatus = (d: PropertyWeek | undefined, id: string) => d?.areas.find((a) => a.id === id)?.status;
@@ -157,13 +158,14 @@ const comparedText = (wk: WeekInfo) =>
 function addSummary(wb: Workbook, wk: WeekInfo, sites: WeeklySite[], results: Record<string, Result>, rules: string[]) {
   const ws = wb.addWorksheet("Summary", { properties: { tabColor: { argb: DARK } } });
   const headers = [
-    "Property", "Overall", "Search", "Traffic", "AI visits", "Sitemaps",
+    "Property", "Overall", "Search", "Indexing", "404s", "Crawling", "Sitemaps", "Traffic", "Traffic quality", "AI visits",
     "Clicks", "Clicks vs last week", "Clicks vs 4-week avg", "Impressions", "Impressions vs last week",
-    "Avg position", "Position: places better", "Sessions", "Sessions vs last week", "Sessions vs 4-week avg",
+    "Avg position", "Position: places better", "Sessions", "Sessions vs last week",
+    "Engaged sessions (compared days)", "Engaged vs last week", "Engaged vs 4-week avg",
     "AI visits (compared days)", "AI visits vs last week", "Key events", "Key events vs last week",
     "Search Console property", "GA4 property",
   ];
-  ws.columns = headers.map((_, i) => ({ width: i === 0 ? 24 : i >= 20 ? 40 : 14 }));
+  ws.columns = headers.map((_, i) => ({ width: i === 0 ? 24 : i >= headers.length - 2 ? 40 : 14 }));
   const w = writer(ws, headers.length);
   w.title("Weekly report · Data Demand properties");
   w.kv("Week", `${wk.start} to ${wk.end} (Monday to Sunday, Pacific time)`);
@@ -180,9 +182,13 @@ function addSummary(wb: Workbook, wk: WeekInfo, sites: WeeklySite[], results: Re
       s.host,
       st(worst(d.areas)),
       st(areaStatus(d, "search")),
-      st(areaStatus(d, "traffic")),
-      st(areaStatus(d, "ai")),
+      st(areaStatus(d, "indexing")),
+      st(areaStatus(d, "errors")),
+      st(areaStatus(d, "crawl")),
       st(areaStatus(d, "sitemaps")),
+      st(areaStatus(d, "traffic")),
+      st(areaStatus(d, "quality")),
+      st(areaStatus(d, "ai")),
       g ? g.week.clicks : "",
       g ? change(g.cmp.clicks, g.prev.clicks) : "",
       g ? change(g.cmp.clicks, g.avg4.clicks) : "",
@@ -192,7 +198,9 @@ function addSummary(wb: Workbook, wk: WeekInfo, sites: WeeklySite[], results: Re
       g ? placesBetter(g.cmp.position, g.prev.position) : "",
       a ? a.week.sessions : "",
       a ? change(a.cmp.sessions, a.prev.sessions) : "",
-      a ? change(a.cmp.sessions, a.avg4.sessions) : "",
+      a ? a.cmp.engaged : "",
+      a ? change(a.cmp.engaged, a.prev.engaged) : "",
+      a ? change(a.cmp.engaged, a.avg4.engaged) : "",
       a ? a.ai.sessions : "",
       a ? change(a.ai.sessions, a.ai.prevSessions) : "",
       a ? a.week.keyEvents : "",
@@ -203,7 +211,7 @@ function addSummary(wb: Workbook, wk: WeekInfo, sites: WeeklySite[], results: Re
   });
   const headerRow = w.table(headers, rows);
   ws.views = [{ state: "frozen", xSplit: 1, ySplit: headerRow }];
-  w.note("Clicks, impressions, sessions and key events are whole-week totals. Changes compare the same days of each week.");
+  w.note("Clicks, impressions, sessions and key events are whole-week totals; engaged sessions and AI visits cover the compared days. Changes compare the same days of each week.");
   w.section("How the statuses are decided");
   rules.forEach((x) => w.line(x));
 }
@@ -240,6 +248,7 @@ function addProperty(wb: Workbook, name: string, site: WeeklySite, r: Result | u
   d.summary.forEach((s) => w.line(`• ${s}`));
   if (d.gscError) w.line(`Search Console couldn't be read: ${d.gscError}`);
   if (d.gaError) w.line(`GA4: ${d.gaError}`);
+  if (d.healthError) w.line(`Saved captures couldn't be read: ${d.healthError}`);
 
   /* ---- Search performance ---- */
   if (g) {
@@ -338,6 +347,97 @@ function addProperty(wb: Workbook, name: string, site: WeeklySite, r: Result | u
     }
   }
 
+  /* ---- Indexing, 404s and crawling (saved captures and daily index checks) ---- */
+  const h = d.health;
+  w.section("Indexing (Google's Page indexing report and the daily index checks)");
+  if (!h) {
+    w.note(d.healthError ? `Couldn't read the saved captures: ${d.healthError}` : "No saved captures.");
+  } else {
+    const c = h.index.capture;
+    if (c) {
+      w.kv("Google's Page indexing report", c.view);
+      w.kv(`Indexed on ${c.date}`, c.indexed);
+      w.kv(`Not indexed on ${c.date}`, c.notIndexed);
+      if (c.baseDate && c.baseIndexed != null) {
+        w.kv(`Indexed on ${c.baseDate}`, c.baseIndexed);
+        w.kv("Change in indexed pages", change(c.indexed, c.baseIndexed));
+      }
+    } else {
+      w.note(h.problems.idx ? `Couldn't read the Page indexing captures: ${h.problems.idx}` : "No Page indexing capture for this week.");
+    }
+    const ck = h.index.checks;
+    if (ck) {
+      w.kv("Daily index checks", ck.enabled ? "Running" : "Paused");
+      w.kv("Dropped from Google's index this week", ck.dropped);
+      w.kv("Newly indexed this week", ck.newlyIndexed);
+      w.kv("Stopped getting impressions this week", ck.impressionsStopped);
+      w.kv("Back in search this week", ck.backInSearch);
+      w.section("Index changes found by the daily checks");
+      w.table(
+        ["Page", "Found on", "Change", "Before", "After"],
+        ck.changes.map((x) => [x.url, x.date, x.change, x.before, x.after]),
+        [],
+        "No page was dropped from or newly added to the index this week."
+      );
+    } else {
+      w.note(h.problems.checks ? `Couldn't read the daily index checks: ${h.problems.checks}` : "Daily index checks aren't running for this property.");
+    }
+
+    w.section("404s and errors");
+    const rs = h.errors.reasons;
+    if (rs) {
+      w.kv("Google's report, as of", rs.asOf);
+      w.kv("Not found (404)", rs.notFound);
+      w.kv("Soft 404", rs.soft404);
+      w.kv("Server error (5xx)", rs.server);
+      if (rs.prevAsOf) {
+        w.kv("Previous capture", rs.prevAsOf);
+        w.kv("404 + soft 404: change", change(rs.notFound + rs.soft404, (rs.prevNotFound || 0) + (rs.prevSoft404 || 0)));
+        w.kv("Server errors at the previous capture", rs.prevServer ?? "");
+      }
+      w.section("Why pages aren't indexed (Google's report)");
+      w.table(
+        ["Reason", "Pages", "Previous capture", "Change"],
+        rs.list.map((x) => [x.reason, x.pages, x.prevPages ?? "", x.prevPages == null ? "" : change(x.pages, x.prevPages)])
+      );
+    } else {
+      w.note("No “Why pages aren't indexed” capture for this week.");
+    }
+    const l = h.errors.links;
+    if (l) {
+      w.section(`404 URLs found by the daily checks (${l.total.toLocaleString("en-US")} in total${l.rows.length < l.total ? `, ${l.rows.length} shown` : ""})`);
+      w.kv("Still listed in a sitemap", l.inSitemap);
+      w.kv("Got search impressions this week", l.withImpressions);
+      w.table(
+        ["URL", "Google's state", "Still in a sitemap", "Impressions this week", "Linked from", "Last checked"],
+        l.rows.map((x) => [x.url, x.state, x.inSitemap ? "yes" : "", x.impressions, x.linkedFrom, x.checked]),
+        [],
+        "No URL returns 404."
+      );
+    }
+
+    w.section("Crawling (Crawl stats captures)");
+    const cr = h.crawl;
+    if (cr) {
+      w.kv("Days of this week captured", cr.covered);
+      w.kv("Latest day saved", cr.latestSaved);
+      w.table(
+        ["Date", "Day", "Crawl requests", "Same day last week", "Change", "Response time (ms)", "Last week (ms)"],
+        cr.days.map((x) => [
+          x.date,
+          dayName(x.date),
+          x.requests ?? "not captured",
+          x.prevRequests ?? "",
+          x.requests != null && x.prevRequests != null ? change(x.requests, x.prevRequests) : "",
+          x.ms != null ? N(x.ms, F.int) : "",
+          x.prevMs != null ? N(x.prevMs, F.int) : "",
+        ])
+      );
+    } else {
+      w.note(h.problems.crawl ? `Couldn't read the Crawl stats captures: ${h.problems.crawl}` : "No Crawl stats capture for this property.");
+    }
+  }
+
   /* ---- GA4 ---- */
   if (a) {
     w.section("Traffic outcome (GA4)");
@@ -350,7 +450,7 @@ function addProperty(wb: Workbook, name: string, site: WeeklySite, r: Result | u
         ["Sessions", a.week.sessions, a.cmp.sessions, a.prev.sessions, change(a.cmp.sessions, a.prev.sessions), N(a.avg4.sessions, F.int), change(a.cmp.sessions, a.avg4.sessions)],
         ["Users", "", a.cmp.users, a.prev.users, change(a.cmp.users, a.prev.users), "", ""],
         ["New users", "", a.cmp.newUsers, a.prev.newUsers, change(a.cmp.newUsers, a.prev.newUsers), "", ""],
-        ["Engaged sessions", "", a.cmp.engaged, a.prev.engaged, change(a.cmp.engaged, a.prev.engaged), "", ""],
+        ["Engaged sessions", "", a.cmp.engaged, a.prev.engaged, change(a.cmp.engaged, a.prev.engaged), N(a.avg4.engaged, F.int), change(a.cmp.engaged, a.avg4.engaged)],
         [
           "Engagement rate (change in percentage points)", "", N(erNow, F.pct), N(erPrev, F.pct),
           erNow != null && erPrev != null ? N(erNow - erPrev, F.pts) : "", "", "",
@@ -362,8 +462,8 @@ function addProperty(wb: Workbook, name: string, site: WeeklySite, r: Result | u
 
     w.section("Channels (compared days)");
     w.table(
-      ["Channel", "Sessions", "Sessions last week", "Change", "Key events"],
-      a.channels.map((c) => [c.name, c.sessions, c.prevSessions, change(c.sessions, c.prevSessions), c.keyEvents])
+      ["Channel", "Sessions", "Sessions last week", "Change", "Engaged sessions", "Engagement rate", "Key events"],
+      a.channels.map((c) => [c.name, c.sessions, c.prevSessions, change(c.sessions, c.prevSessions), c.engaged, N(rate(c.engaged, c.sessions), F.pct), c.keyEvents])
     );
 
     w.section("Top landing pages (compared days)");
@@ -396,6 +496,18 @@ function addProperty(wb: Workbook, name: string, site: WeeklySite, r: Result | u
 
     w.section("Top referring sites (compared days)");
     w.table(groupHead("Site"), groupRows(a.referrals), [], "No referral visits this week.");
+
+    w.section("Traffic quality (compared days)");
+    const q = d.areas.find((x) => x.id === "quality");
+    if (q) {
+      w.kv("Status", st(q.status));
+      w.kv("Note", q.note);
+    }
+    w.kv("Sessions vs last week", change(a.cmp.sessions, a.prev.sessions));
+    w.kv("Engaged sessions vs last week", change(a.cmp.engaged, a.prev.engaged));
+    w.kv("Visits from spam-looking referrers", a.spamReferrals.sessions);
+    w.kv("Last week", a.spamReferrals.prevSessions);
+    w.table(groupHead("Spam-looking referrer"), groupRows(a.spamReferrals.sites), [], "No visits from spam-looking referrers this week.");
   }
 }
 
