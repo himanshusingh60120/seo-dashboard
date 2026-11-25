@@ -1,9 +1,10 @@
 // components/WeeklyReport.tsx
 "use client";
-// Weekly report tab (WEEKLY_REPORT_EMAILS only): the Data Demand properties' week, Monday to Sunday, side by side, then a
-// full review of one property at a time. /api/weekly says which week and which properties; /api/weekly/property loads
-// each property in parallel, so each one appears as soon as it's ready. "Download Excel" builds one workbook from what's
-// on screen: a Summary sheet plus one sheet per property (lib/weeklyExcel.ts).
+// Weekly report tab (accounts with "Weekly report" ticked in Manage access): the week for the properties in this
+// person's report (picked in Manage access, or the Data Demand properties by default), Monday to Sunday, side by side,
+// then a full review of one property at a time. /api/weekly says which week and which properties; /api/weekly/property
+// loads each property in parallel, so each one appears as soon as it's ready. "Download Excel" builds one workbook from
+// what's on screen: a Summary sheet plus one sheet per property (lib/weeklyExcel.ts).
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { Sources } from "@/lib/types";
@@ -409,7 +410,7 @@ export default function WeeklyReport() {
     <SourcesProvider value={sources}>
       <Section
         title="Weekly report"
-        lede="The Data Demand properties' week, Monday to Sunday in Search Console's time zone (Pacific), compared with the week before and the 4-week average. Pick a property below for its full review."
+        lede="The week for the properties in your report (the Data Demand properties unless an admin picked others for you in Manage access), Monday to Sunday in Search Console's time zone (Pacific), compared with the week before and the 4-week average. Pick a property below for its full review."
       >
         {error && <div className="notice error">{error}</div>}
         {!meta && !error && <p className="muted">Finding the properties…</p>}
@@ -453,7 +454,7 @@ export default function WeeklyReport() {
             )}
             {Object.entries(meta.alsoMatched).map(([site, others]) => (
               <div key={site} className="notice">
-                Using {site} for this report; also matched {others.join(", ")}. To choose exactly, set WEEKLY_SITES in Vercel.
+                Using {site} for this report; also matched {others.join(", ")}. An admin can pick exact properties for you in Manage access.
               </div>
             ))}
 
