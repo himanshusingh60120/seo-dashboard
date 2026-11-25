@@ -10,4 +10,5 @@ export const DEFAULT_ALLOWED_DOMAINS: readonly string[] = [
   "kgv.ae",
   "kingstechmedia.com",
   "mediaofmedia.com",
+  "underratedclub.com",
 ];
