@@ -49,6 +49,32 @@ export function isAuditEmail(email?: string | null) {
   return isAllowedEmail(email) && audit.includes(String(email).toLowerCase());
 }
 
+/**
+ * Appends one row per sign-in attempt (allowed or blocked) to the login-log Google Sheet,
+ * via the Apps Script web app in LOGIN_LOG_URL. Never throws: a logging failure must never block sign-in.
+ */
+async function logLogin(entry: { email?: string | null; name?: string | null; result: string }) {
+  const url = process.env.LOGIN_LOG_URL;
+  if (!url) return;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        secret: process.env.LOGIN_LOG_SECRET ?? "",
+        time: new Date().toISOString(),
+        email: entry.email ?? "",
+        name: entry.name ?? "",
+        result: entry.result,
+      }),
+      signal: AbortSignal.timeout(4000),
+      cache: "no-store",
+    });
+  } catch {
+    // Ignore: logging is best-effort.
+  }
+}
+
 export async function refreshGoogleToken(refreshToken: string) {
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
@@ -84,9 +110,15 @@ export const authOptions: NextAuthOptions = {
   callbacks: {
     async signIn({ user, profile }) {
       // Only accept addresses Google has verified.
-      if ((profile as { email_verified?: boolean } | undefined)?.email_verified === false) return false;
+      const verified = (profile as { email_verified?: boolean } | undefined)?.email_verified !== false;
       // Company domains, ALLOWED_EMAILS, access admins, or someone an admin added in "Manage access".
-      return hasAccess(user.email);
+      const allowed = verified && (await hasAccess(user.email));
+      await logLogin({
+        email: user.email,
+        name: user.name,
+        result: !verified ? "Blocked – email not verified" : allowed ? "Allowed" : "Blocked – no access",
+      });
+      return allowed;
     },
     // Tokens live only in the encrypted session cookie. Refreshed here so the cookie stays current.
     async jwt({ token, account }) {
