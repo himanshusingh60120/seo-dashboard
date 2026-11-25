@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { Sources } from "@/lib/types";
 import type { Area, Mover, NewQuery, PropertyWeek, SitemapRow, SourceGroup, Split, Status, WeekInfo, WeeklySite } from "@/lib/weekly";
+import type { CrawlDayRow, IndexChange, Link404, ReasonRow } from "@/lib/weeklyHealth";
 import { downloadWeeklyExcel } from "@/lib/weeklyExcel";
 import { DataTable, Delta, Kpis, PanelTitle, Section, SourcesProvider, SubTabs, num, pct, pos, type Col, type KpiItem } from "./ui";
 
@@ -20,6 +21,7 @@ const STATUS: Record<Status, { label: string; bg: string; fg: string }> = {
   good: { label: "Good", bg: "#e6f4ea", fg: "#137333" },
   watch: { label: "Watch", bg: "#fef7e0", fg: "#b06000" },
   problem: { label: "Problem", bg: "#fce8e6", fg: "#c5221f" },
+  none: { label: "No data", bg: "#f1f3f4", fg: "#5f6368" },
   pending: { label: "Coming next", bg: "#f1f3f4", fg: "#5f6368" },
 };
 const DAY_COLOR = { final: "#1a73e8", provisional: "#8ab4f8", partial: "#c6cad1", future: "#eceff1" } as const;
@@ -40,6 +42,8 @@ function addDaysLocal(d: string, n: number) {
 const fmtDate = (d: string, o: Intl.DateTimeFormatOptions) => new Date(`${d}T00:00:00Z`).toLocaleDateString("en-GB", { ...o, timeZone: "UTC" });
 const weekLabel = (start: string, end: string) =>
   `${fmtDate(start, { weekday: "short", day: "numeric", month: "short" })} – ${fmtDate(end, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}`;
+/** Plain change text, for figures where a rise isn't good news (404s, not indexed). */
+const chgText = (now: number, base: number) => (base ? `${now >= base ? "+" : ""}${(((now - base) / base) * 100).toFixed(0)}%` : now ? "new" : "no change");
 
 function Pill({ s, children }: { s: Status; children?: ReactNode }) {
   const c = STATUS[s];
@@ -71,7 +75,7 @@ function PosChg({ now, base }: { now: number; base: number }) {
 
 const counts = (areas: Area[]) => {
   const c = { good: 0, watch: 0, problem: 0 };
-  for (const a of areas) if (a.status !== "pending") c[a.status]++;
+  for (const a of areas) if (a.status === "good" || a.status === "watch" || a.status === "problem") c[a.status]++;
   return c;
 };
 
@@ -111,11 +115,12 @@ const MAP_COLS: Col<SitemapRow>[] = [
   { key: "lastDownloaded", label: "Last read by Google", render: (r) => (r.lastDownloaded ? r.lastDownloaded.slice(0, 10) : "never") },
   { key: "isPending", label: "Pending", render: (r) => (r.isPending ? "yes" : "") },
 ];
-type ChannelRow = { name: string; sessions: number; prevSessions: number; keyEvents: number };
+type ChannelRow = { name: string; sessions: number; prevSessions: number; engaged: number; keyEvents: number };
 const CHANNEL_COLS: Col<ChannelRow>[] = [
   { key: "name", label: "Channel" },
   { key: "sessions", label: "Sessions", num: true, render: (r) => num(r.sessions) },
   { key: "prevSessions", label: "Last week", num: true, render: (r) => num(r.prevSessions) },
+  { key: "engaged", label: "Engagement rate", num: true, render: (r) => (r.sessions ? pct(r.engaged / r.sessions) : "–") },
   { key: "keyEvents", label: "Key events", num: true, render: (r) => num(r.keyEvents) },
 ];
 type LandingRow = { page: string; sessions: number; prevSessions: number | null };
@@ -137,6 +142,167 @@ const AI_LANDING_COLS: Col<AiLandingRow>[] = [
   { key: "sessions", label: "Sessions", num: true, render: (r) => num(r.sessions) },
   { key: "keyEvents", label: "Key events", num: true, render: (r) => num(r.keyEvents) },
 ];
+const CHANGE_COLS: Col<IndexChange>[] = [
+  { key: "url", label: "Page", url: true },
+  { key: "date", label: "Found on" },
+  { key: "change", label: "Change", render: (r) => <span className={`delta ${/^Dropped/i.test(r.change) ? "bad" : "good"}`}>{r.change}</span> },
+  { key: "after", label: "Google now says" },
+];
+const REASON_COLS: Col<ReasonRow>[] = [
+  { key: "reason", label: "Reason" },
+  { key: "pages", label: "Pages", num: true, render: (r) => num(r.pages) },
+  { key: "prevPages", label: "Previous capture", num: true, render: (r) => (r.prevPages == null ? "–" : num(r.prevPages)) },
+];
+const LINK_COLS: Col<Link404>[] = [
+  { key: "url", label: "URL", url: true },
+  { key: "inSitemap", label: "In a sitemap", render: (r) => (r.inSitemap ? <span className="delta bad">yes</span> : "") },
+  { key: "impressions", label: "Impressions", num: true, render: (r) => num(r.impressions) },
+  { key: "linkedFrom", label: "Linked from", render: (r) => r.linkedFrom || "–" },
+  { key: "checked", label: "Last checked" },
+];
+const CRAWL_COLS: Col<CrawlDayRow>[] = [
+  { key: "date", label: "Date", render: (r) => fmtDate(r.date, { weekday: "short", day: "numeric", month: "short" }) },
+  { key: "requests", label: "Requests", num: true, render: (r) => (r.requests == null ? "not captured" : num(r.requests)) },
+  { key: "prevRequests", label: "Same day last week", num: true, render: (r) => (r.prevRequests == null ? "–" : num(r.prevRequests)) },
+  { key: "ms", label: "Response (ms)", num: true, render: (r) => (r.ms == null ? "–" : num(Math.round(r.ms))) },
+];
+
+/* ---------------- Indexing, 404s and crawling ---------------- */
+
+function HealthDetail({ d }: { d: PropertyWeek }) {
+  const h = d.health;
+  const S = d.sourceIds;
+  const wk = d.week;
+  if (!h) {
+    return <div className="notice">{d.healthError ? `Couldn't read the saved captures: ${d.healthError}` : "No saved captures for this property."}</div>;
+  }
+  const c = h.index.capture;
+  const k = h.index.checks;
+  const r = h.errors.reasons;
+  const l = h.errors.links;
+  const cr = h.crawl;
+  const p = h.problems;
+  const nf = r ? r.notFound + r.soft404 : 0;
+  const pnf = r && r.prevAsOf != null ? (r.prevNotFound || 0) + (r.prevSoft404 || 0) : null;
+  const fails = [p.idx && `Page indexing (${p.idx})`, p.crawl && `Crawl stats (${p.crawl})`, p.checks && `daily index checks (${p.checks})`].filter(Boolean);
+
+  const items: KpiItem[] = [];
+  if (c) {
+    items.push({
+      label: "Indexed (Google)",
+      source: [S.health],
+      value: num(c.indexed),
+      delta: c.baseIndexed != null ? <Delta cur={c.indexed} prev={c.baseIndexed} /> : undefined,
+      sub: c.baseDate ? `${c.date} vs ${c.baseDate}` : c.date,
+    });
+    items.push({
+      label: "Not indexed (Google)",
+      source: [S.health],
+      value: num(c.notIndexed),
+      sub: c.baseNotIndexed != null && c.baseDate ? `${chgText(c.notIndexed, c.baseNotIndexed)} vs ${c.baseDate}` : c.date,
+    });
+  }
+  if (k) {
+    items.push({
+      label: "Dropped from the index",
+      source: [S.health],
+      value: num(k.dropped),
+      sub: `daily checks · ${num(k.newlyIndexed)} newly indexed${k.enabled ? "" : " · paused"}`,
+    });
+  }
+  if (r) {
+    items.push({
+      label: "404 + soft 404 (Google)",
+      source: [S.health],
+      value: num(nf),
+      sub: `${r.asOf}${pnf != null ? ` · ${chgText(nf, pnf)} vs ${r.prevAsOf}` : ""}${r.server ? ` · ${num(r.server)} server errors` : ""}`,
+    });
+  }
+  if (l) {
+    items.push({
+      label: "404 URLs still in a sitemap",
+      source: [S.health],
+      value: num(l.inSitemap),
+      sub: `${num(l.total)} known 404 URLs · ${num(l.withImpressions)} got impressions`,
+    });
+  }
+  if (cr && cr.pairs) {
+    items.push({
+      label: "Crawl requests",
+      source: [S.health],
+      value: num(cr.requests),
+      delta: <Delta cur={cr.requests} prev={cr.prevRequests} />,
+      sub: `${cr.pairs} day(s) vs the same days last week`,
+    });
+  }
+  if (cr && cr.ms != null) {
+    items.push({
+      label: "Avg response time",
+      source: [S.health],
+      value: `${num(Math.round(cr.ms))} ms`,
+      sub: cr.prevMs != null ? `last week ${num(Math.round(cr.prevMs))} ms` : undefined,
+    });
+  }
+
+  return (
+    <>
+      {fails.length > 0 && <div className="notice error">Couldn&apos;t read: {fails.join(" · ")}</div>}
+      {items.length ? (
+        <Kpis items={items} />
+      ) : (
+        <p className="muted">
+          No Page indexing or Crawl stats capture and no daily index checks for this week. Capture the reports with the extension, or start daily checks in
+          the Index checks tab.
+        </p>
+      )}
+      <div className="grid-2" style={{ marginTop: 16 }}>
+        {k && (
+          <div className="panel">
+            <PanelTitle source={[S.health]}>Index changes this week (daily checks)</PanelTitle>
+            <DataTable
+              rows={k.changes}
+              cols={CHANGE_COLS}
+              initialSort="date"
+              pageSize={10}
+              csvName={`${d.name}-index-changes-${wk.start}.csv`}
+              source={[S.health]}
+              empty="No page was dropped from or newly added to the index this week."
+            />
+          </div>
+        )}
+        {r && (
+          <div className="panel">
+            <PanelTitle source={[S.health]}>{`Why pages aren't indexed (Google, ${r.asOf})`}</PanelTitle>
+            <DataTable rows={r.list} cols={REASON_COLS} initialSort="pages" pageSize={10} csvName={`${d.name}-not-indexed-reasons-${wk.start}.csv`} source={[S.health]} />
+          </div>
+        )}
+        {l && (
+          <div className="panel">
+            <PanelTitle source={[S.health]}>{`404 URLs found by the daily checks (${num(l.total)})`}</PanelTitle>
+            <DataTable
+              rows={l.rows}
+              cols={LINK_COLS}
+              initialSort="impressions"
+              pageSize={10}
+              csvName={`${d.name}-404-urls-${wk.start}.csv`}
+              source={[S.health]}
+              empty="No URL returns 404."
+            />
+          </div>
+        )}
+        {cr && (
+          <div className="panel">
+            <PanelTitle source={[S.health]}>Crawl requests by day</PanelTitle>
+            <DataTable rows={cr.days} cols={CRAWL_COLS} initialSort="date" initialDesc={false} pageSize={7} source={[S.health]} />
+            <p className="muted" style={{ margin: "4px 0 0", fontSize: 12 }}>
+              {cr.covered} of 7 days captured · latest day saved {cr.latestSaved || "none"}.
+            </p>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
 
 /* ---------------- One property ---------------- */
 
@@ -148,6 +314,7 @@ function PropertyDetail({ site, r }: { site: WeeklySite; r?: Result }) {
   const a = d.ga;
   const wk = d.week;
   const S = d.sourceIds;
+  const quality = d.areas.find((x) => x.id === "quality");
   const compared = wk.partial
     ? `change compares Mon–${fmtDate(addDaysLocal(wk.start, wk.compareDays - 1), { weekday: "short" })}`
     : "change compares the full week";
@@ -165,6 +332,13 @@ function PropertyDetail({ site, r }: { site: WeeklySite; r?: Result }) {
   const gaKpis: KpiItem[] = a
     ? [
         { label: "Sessions", source: [S.ga], value: num(a.week.sessions), delta: <Delta cur={a.cmp.sessions} prev={a.prev.sessions} />, sub: `4-wk avg ${num(a.avg4.sessions)}` },
+        {
+          label: "Engaged sessions",
+          source: [S.ga],
+          value: num(a.cmp.engaged),
+          delta: <Delta cur={a.cmp.engaged} prev={a.prev.engaged} />,
+          sub: `compared days · 4-wk avg ${num(a.avg4.engaged)}`,
+        },
         { label: "Users", source: [S.ga], value: num(a.cmp.users), delta: <Delta cur={a.cmp.users} prev={a.prev.users} />, sub: "compared days" },
         {
           label: "Engagement rate",
@@ -292,6 +466,13 @@ function PropertyDetail({ site, r }: { site: WeeklySite; r?: Result }) {
         </>
       )}
 
+      <h3 style={{ margin: "24px 0 8px" }}>Indexing, 404s and crawling</h3>
+      <p className="muted" style={{ marginTop: 0 }}>
+        From Google&apos;s Page indexing and Crawl stats reports (the extension captures) and the daily index checks, as saved in this property&apos;s Google
+        Sheet.
+      </p>
+      <HealthDetail d={d} />
+
       <h3 style={{ margin: "24px 0 8px" }}>Traffic outcome (GA4)</h3>
       {d.gaError && <div className="notice">{d.gaError}</div>}
       {a && (
@@ -300,6 +481,11 @@ function PropertyDetail({ site, r }: { site: WeeklySite; r?: Result }) {
             {d.ga4Name} · dates in {a.timeZone}
             {a.partial ? ` · Sunday is still running there, so changes compare ${a.compareDays} day(s)` : ""}.
           </p>
+          {quality && (quality.status === "watch" || quality.status === "problem") && (
+            <div className="notice">
+              <Pill s={quality.status} /> Traffic quality: {quality.note}
+            </div>
+          )}
           <Kpis items={gaKpis} />
           <div className="grid-2" style={{ marginTop: 16 }}>
             <div className="panel">
@@ -335,6 +521,12 @@ function PropertyDetail({ site, r }: { site: WeeklySite; r?: Result }) {
               <PanelTitle source={[S.ga]}>Top referring sites</PanelTitle>
               <DataTable rows={a.referrals} cols={groupCols("Site")} initialSort="sessions" pageSize={10} csvName={`${d.name}-referrals-${wk.start}.csv`} source={[S.ga]} empty="No referral visits this week." />
             </div>
+            {a.spamReferrals.sites.length > 0 && (
+              <div className="panel">
+                <PanelTitle source={[S.ga]}>{`Spam-looking referrers (${num(a.spamReferrals.sessions)} visits)`}</PanelTitle>
+                <DataTable rows={a.spamReferrals.sites} cols={groupCols("Site")} initialSort="sessions" pageSize={10} csvName={`${d.name}-spam-referrers-${wk.start}.csv`} source={[S.ga]} />
+              </div>
+            )}
           </div>
         </>
       )}
@@ -517,7 +709,7 @@ export default function WeeklyReport() {
               <p className="muted" style={{ margin: "8px 0 0", fontSize: 12 }}>
                 Changes compare the same days of last week. AI visits cover the compared days. Status counts: <Pill s="good">Good</Pill>
                 <Pill s="watch">Watch</Pill>
-                <Pill s="problem">Problem</Pill> across the areas checked so far.
+                <Pill s="problem">Problem</Pill> across the areas that have data.
               </p>
               <details style={{ marginTop: 8 }}>
                 <summary className="muted" style={{ fontSize: 12, cursor: "pointer" }}>How the statuses are decided</summary>
