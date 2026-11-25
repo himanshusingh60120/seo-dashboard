@@ -1,13 +1,13 @@
 // app/api/archive/route.ts
 // GET ?site=…           → how far this property's saved history goes (lib/archive.ts)
 // POST { site, ga4 }    → link a different GA4 property to this Search Console property for the saved history
-//                         (not for view-only accounts, lib/viewers.ts)
+//                         (not for read-only accounts, see Manage access)
 import { NextRequest, NextResponse } from "next/server";
 import { getGoogleAccessToken, HttpError, requireUser } from "@/lib/token";
 import { assertSiteAccess, runReport } from "@/lib/google";
 import { serviceAccountReady } from "@/lib/serviceAccount";
 import { archiveStatus, linkArchive } from "@/lib/archive";
-import { assertNotViewer } from "@/lib/viewers";
+import { requireNotViewOnly } from "@/lib/permissions";
 import { fail } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
@@ -31,7 +31,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const email = await requireUser(req);
-    assertNotViewer(email);
+    await requireNotViewOnly(email);
     const token = await getGoogleAccessToken(req);
     const body = await req.json().catch(() => ({}));
     const site = typeof body.site === "string" ? body.site : "";
