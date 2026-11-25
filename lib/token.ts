@@ -2,7 +2,8 @@
 import { createHash } from "crypto";
 import { getToken } from "next-auth/jwt";
 import type { NextRequest } from "next/server";
-import { hasAccess, isAuditEmail, refreshGoogleToken } from "./auth";
+import { hasAccess, refreshGoogleToken } from "./auth";
+import { hasPerm } from "./accessList";
 
 export class HttpError extends Error {
   constructor(public status: number, message: string) {
@@ -17,7 +18,6 @@ const keyOf = (s: string) => createHash("sha256").update(s).digest("hex");
 async function readSession(req: NextRequest): Promise<Record<string, any>> {
   const jwt = await getToken({ req, secret: process.env.NEXTAUTH_SECRET });
   if (!jwt) throw new HttpError(401, "Not signed in.");
-  // Company domains, ALLOWED_EMAILS, access admins, or someone an admin added in "Manage access".
   // Checked on every request, so a removed person loses access within 30 seconds (lib/accessList.ts cache).
   if (!(await hasAccess(jwt.email))) throw new HttpError(403, "This Google account isn't allowed to use this dashboard.");
   return jwt as Record<string, any>;
@@ -44,8 +44,11 @@ export async function requireUser(req: NextRequest): Promise<string> {
   return String((await readSession(req)).email);
 }
 
+/** Site investigation: needs the "Site investigation" tick in Manage access (admins always have it). */
 export async function requireAuditUser(req: NextRequest): Promise<string> {
   const email = await requireUser(req);
-  if (!isAuditEmail(email)) throw new HttpError(403, "The GSC audit is only available to the audit account.");
+  if (!(await hasPerm(email, "audit"))) {
+    throw new HttpError(403, "Site investigation isn't turned on for your account. Ask an admin to tick it for you in Manage access.");
+  }
   return email;
 }
