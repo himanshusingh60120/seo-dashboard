@@ -25,7 +25,7 @@ import Audit from "./Audit"; // Site investigation (replaces the GSC audit)
 import IndexChecks from "./IndexChecks";
 import WeeklyCaptures from "./WeeklyCaptures";
 import CompareMode, { COMPARE_TABS, type CompareTab } from "./CompareMode";
-import AccessManager from "./AccessManager"; // manage access (access admins only)
+import AccessManager from "./AccessManager"; // manage access (the two access admins only)
 
 type Tab =
   | "overview" | "rankings" | "indexing" | "checks" | "captures" | "crawl" | "queries" | "growth" | "audience" | "cta" | "audit"
@@ -45,7 +45,7 @@ const TAB_GROUPS: TabDef[][] = [
     { id: "indexing", label: "Indexing" },
     { id: "checks", label: "Index checks" },
     { id: "crawl", label: "Crawl activity" },
-    { id: "captures", label: "Weekly captures" }, // capture accounts only (CAPTURE_EMAILS)
+    { id: "captures", label: "Weekly captures" }, // "Weekly captures" ticked in Manage access
   ],
   [
     { id: "audience", label: "Traffic & geography" },
@@ -55,9 +55,9 @@ const TAB_GROUPS: TabDef[][] = [
 
 /** Tools only some accounts have. They sit as buttons in the top row instead of the tab strip. */
 const TOOL_TABS: TabDef[] = [
-  { id: "weekly", label: "Weekly report" }, // WEEKLY_REPORT_EMAILS
-  { id: "audit", label: "Site investigation" }, // AUDIT_EMAILS
-  { id: "access", label: "Manage access" }, // access admins (lib/accessList.ts)
+  { id: "weekly", label: "Weekly report" }, // "Weekly report" ticked in Manage access
+  { id: "audit", label: "Site investigation" }, // "Site investigation" ticked in Manage access
+  { id: "access", label: "Manage access" }, // the two access admins (lib/accessList.ts)
 ];
 
 const SEARCH_TYPES: [string, string][] = [["web", "Web"], ["image", "Image"], ["video", "Video"], ["news", "News"]];
@@ -285,12 +285,14 @@ export default function Dashboard() {
   const [ctab, setCtab] = useState<CompareTab>("summary");
   const [canAudit, setCanAudit] = useState(false);
   const [canCapture, setCanCapture] = useState(false);
-  /** Weekly report account (WEEKLY_REPORT_EMAILS). */
+  /** "Weekly report" ticked in Manage access. */
   const [canWeekly, setCanWeekly] = useState(false); // weekly report
-  /** View-only account (VIEWER_EMAILS): sees everything, but can't run URL Inspection or change settings. */
+  /** Read-only account (Manage access): sees everything, but can't run URL Inspection or change settings. */
   const [viewer, setViewer] = useState(false);
-  /** Access admin (ACCESS_ADMIN_EMAILS, lib/accessList.ts): sees the Manage access button. */
-  const [admin, setAdmin] = useState(false); const [canChecks, setCanChecks] = useState(false);
+  /** One of the two access admins (lib/accessList.ts): sees the Manage access button. */
+  const [admin, setAdmin] = useState(false);
+  /** "Index checks" ticked in Manage access: can start and pause daily index checks. */
+  const [canChecks, setCanChecks] = useState(false);
   const [gsc, setGsc] = useState<GscData | null>(null);
   const [ga, setGa] = useState<Ga4Data | null>(null);
   const [loading, setLoading] = useState(false);
@@ -346,19 +348,19 @@ export default function Dashboard() {
     setLookupErr(null);
   }, [site, bumpIndex]);
 
-  // Is this a view-only account, and is it an access admin? The routes check again on the server
-  // (lib/viewers.ts, lib/accessList.ts).
+  // What this person can do (set in Manage access, lib/accessList.ts). Every route checks again on the server.
   useEffect(() => {
     fetch("/api/role", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         setViewer(!!d?.viewer);
-        setAdmin(!!d?.admin); setCanChecks(!!d?.indexChecks);
+        setAdmin(!!d?.admin);
+        setCanChecks(!!d?.indexChecks);
       })
       .catch(() => {});
   }, []);
 
-  // The Site investigation button is shown only to the audit account; every audit API route checks the account again.
+  // The Site investigation button is shown only to accounts with "Site investigation" ticked; every audit route checks again.
   useEffect(() => {
     fetch("/api/audit/access", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
@@ -366,7 +368,7 @@ export default function Dashboard() {
       .catch(() => {});
   }, []);
 
-  // The Weekly captures tab is shown only to the people who run the captures (CAPTURE_EMAILS);
+  // The Weekly captures tab is shown only to the people who run the captures ("Weekly captures" ticked);
   // its API routes check the account again. Everyone sees who updated each report on the charts themselves.
   useEffect(() => {
     fetch("/api/capture/access", { cache: "no-store" })
@@ -375,7 +377,7 @@ export default function Dashboard() {
       .catch(() => {});
   }, []);
 
-  // weekly report: the Weekly report button is shown only to WEEKLY_REPORT_EMAILS; its API routes check the account again.
+  // Weekly report: the button is shown only to accounts with "Weekly report" ticked; its API routes check the account again.
   useEffect(() => {
     fetch("/api/weekly/access", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
@@ -659,7 +661,7 @@ export default function Dashboard() {
         {session?.user?.email}
         {viewer && (
           <span style={{ marginLeft: 8, padding: "1px 8px", borderRadius: 999, background: "#f1f3f4", color: "#5f6368", fontSize: 11, fontWeight: 600 }}>
-            View-only
+            Read-only
           </span>
         )}
       </small>
@@ -926,13 +928,13 @@ export default function Dashboard() {
                     waiting={idxWaiting || (!!idxInbox && !idxInboxReady)}
                     onInboxHandled={idxInboxHandled}
                   />
-                  {/* "Check specific pages" runs URL Inspection, which view-only accounts can't use. */}
+                  {/* "Check specific pages" runs URL Inspection, which read-only accounts can't use. */}
                   {!viewer && <UrlCheck site={site} />}
                 </>
               )}
 
-              {/* view-only: no Start / Pause buttons */}
-              {site && tab === "checks" && <IndexChecks site={site} readOnly={viewer} />}
+              {/* Start / Pause only with "Index checks" ticked in Manage access, never for read-only accounts */}
+              {site && tab === "checks" && <IndexChecks site={site} readOnly={viewer || !canChecks} />}
               {site && tab === "captures" && canCapture && <WeeklyCaptures site={site} />}
 
               {site && tab === "crawl" && (
@@ -983,14 +985,14 @@ export default function Dashboard() {
               {/* Site investigation: the top bar's GA4 choice is a hint; the investigation checks it has data and finds the right one if not */}
               {site && tab === "audit" && canAudit && <Audit site={site} ga4={ga4} />}
 
-              {/* Manage access: access admins add or remove who can sign in (the API checks the account again) */}
+              {/* Manage access: the two access admins manage who can sign in and what they can do (the API checks again) */}
               {tab === "access" && admin && <AccessManager />}
             </>
           )}
         </main>
       </SourcesProvider>
 
-      {/* view-only: the URL report shows saved results only, no new inspections */}
+      {/* Read-only accounts: the URL report shows saved results only, no new inspections */}
       {!compareMode && lookup && gsc && (
         <UrlReport site={site} url={lookup} gsc={gsc} ga4={ga4} days={days} compare={compare} onClose={closeLookup} readOnly={viewer} />
       )}
