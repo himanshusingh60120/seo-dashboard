@@ -1,10 +1,11 @@
 // lib/captureKey.ts
 // A personal "extension key" so the Chrome extension can send captures without a dashboard login.
 // The key is the person's email plus a signature made with CAPTURE_SECRET (or NEXTAUTH_SECRET); nothing is stored.
+// Whether that person may still send captures is checked on every request (requireCapture in lib/permissions.ts), so
+// removing their "Weekly captures" tick in Manage access stops their extension at once.
 // To cancel every key at once, change CAPTURE_SECRET in Vercel. Server-only.
 import { createHmac, timingSafeEqual } from "crypto";
 import { HttpError } from "./token";
-import { isAllowedEmail } from "./auth";
 
 const secret = () => process.env.CAPTURE_SECRET || process.env.NEXTAUTH_SECRET || "";
 const sig = (email: string) => createHmac("sha256", secret()).update(`capture-key:v1:${email.toLowerCase()}`).digest("base64url").slice(0, 32);
@@ -30,6 +31,5 @@ export function verifyCaptureKey(key: string | null): string {
   if (!email || want.length !== got.length || !timingSafeEqual(want, got)) {
     throw new HttpError(401, "This extension key isn't valid. Copy it again from the dashboard.");
   }
-  if (!isAllowedEmail(email)) throw new HttpError(403, "This account isn't allowed to use the dashboard.");
   return email;
 }
