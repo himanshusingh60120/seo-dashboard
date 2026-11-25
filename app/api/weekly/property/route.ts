@@ -10,12 +10,12 @@ export const maxDuration = 120;
 
 export async function GET(req: NextRequest) {
   try {
-    await requireWeeklyUser(req);
+    const { sites: chosen } = await requireWeeklyUser(req);
     const p = req.nextUrl.searchParams;
     const token = await getGoogleAccessToken(req);
-    const { sites } = await weeklySites(token);
+    const { sites } = await weeklySites(token, chosen);
     const site = sites.find((s) => s.siteUrl === (p.get("site") || ""));
-    if (!site) throw new HttpError(404, "This property isn't part of the weekly report.");
+    if (!site) throw new HttpError(404, "This property isn't part of your weekly report.");
     return NextResponse.json(await propertyWeek(token, site, weekInfo(p.get("week"))));
   } catch (e) {
     return fail(e);
