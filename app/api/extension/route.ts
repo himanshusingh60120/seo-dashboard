@@ -2,13 +2,13 @@
 // GET → the Chrome extension as a .zip, set up for the signed-in person: this dashboard's address and their own
 // extension key are inside (config.json), Chrome is allowed to reach this dashboard (manifest host_permissions), and
 // bridge.js runs on this dashboard's pages so the "Capture this property now" button can reach the extension.
-// Only capture accounts (lib/captureAccess.ts) can download it.
+// Only capture accounts ("Weekly captures" in Manage access) can download it.
 import { promises as fs } from "fs";
 import path from "path";
 import { NextRequest, NextResponse } from "next/server";
 import { HttpError, requireUser } from "@/lib/token";
 import { captureKeyFor } from "@/lib/captureKey";
-import { assertCaptureEmail } from "@/lib/captureAccess";
+import { requireCapture } from "@/lib/permissions";
 import { makeZip } from "@/lib/zip";
 import { fail } from "@/lib/api";
 
@@ -20,7 +20,7 @@ const FOLDER = "kr-search-capture";
 export async function GET(req: NextRequest) {
   try {
     const email = await requireUser(req);
-    assertCaptureEmail(email);
+    await requireCapture(email);
     const origin = req.nextUrl.origin;
 
     let files: [string, Buffer][];
