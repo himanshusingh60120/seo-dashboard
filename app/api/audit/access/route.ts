@@ -1,17 +1,17 @@
 // app/api/audit/access/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/token";
-import { isAuditEmail } from "@/lib/auth";
+import { hasPerm } from "@/lib/accessList";
 import { llmConfig } from "@/lib/llm";
 import { fail } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 
-/** Tells the dashboard whether to show the audit tab. Every audit route checks the account again. */
+/** Tells the dashboard whether to show Site investigation. Every audit route checks the account again. */
 export async function GET(req: NextRequest) {
   try {
     const email = await requireUser(req);
-    if (!isAuditEmail(email)) return NextResponse.json({ allowed: false });
+    if (!(await hasPerm(email, "audit"))) return NextResponse.json({ allowed: false });
     const c = llmConfig();
     return NextResponse.json({
       allowed: true,
