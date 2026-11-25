@@ -194,8 +194,6 @@ const TOPBAR_CSS = `
 .topbar .tb-summary-txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topbar .tb-summary-chg { flex: 0 0 auto; color: #1a73e8; font-weight: 600; }
 .topbar .tb-tool[aria-pressed="true"] { background: #e8f0fe; border-color: #1a73e8; color: #174ea6; }
-.topbar .tb-link { border: none; background: none; color: #1a73e8; font-weight: 600; font-size: 14px; cursor: pointer; padding: 6px 4px; white-space: nowrap; }
-.topbar .tb-link:hover { text-decoration: underline; }
 .topbar .tb-tabs { display: flex; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
 .topbar .tb-tabs::-webkit-scrollbar { display: none; }
 .tb-tabs .tab { flex: 0 0 auto; }
@@ -816,18 +814,6 @@ export default function Dashboard() {
                       </select>
                     </label>
                   </Group>
-                )}
-
-                {!narrow && (
-                  <button
-                    type="button"
-                    className="tb-link"
-                    onClick={() => setOpen(false)}
-                    title="Fold these settings into one line"
-                    style={{ alignSelf: "flex-start" }}
-                  >
-                    Hide ▴
-                  </button>
                 )}
               </div>
 
