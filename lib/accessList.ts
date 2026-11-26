@@ -1,6 +1,9 @@
 // lib/accessList.ts
 // Who can sign in and what each person can do. Managed in the "Manage access" tab and stored in Upstash Redis under
 // "access:config". The two access admins are fixed below: nothing saved in Redis or Vercel can make anyone else an admin.
+// Accounts on a sign-in domain who aren't listed can sign in and look, but get no extra tools; tools come only from the
+// ticks given to a listed person.
+// Each person chooses their own weekly report properties in the Weekly report tab ("weekly:sites:<email>" in Redis).
 // The first time the list is read, it's filled from the old settings (people added earlier in Manage access, and
 // CAPTURE_EMAILS, VIEWER_EMAILS, WEEKLY_REPORT_EMAILS, AUDIT_EMAILS, WEEKLY_SITES or their defaults). After that those
 // Vercel variables aren't used. If Redis can't be reached, the admins and the built-in domains still get in. Server-only.
@@ -8,27 +11,35 @@ import { DEFAULT_ALLOWED_DOMAINS } from "./access";
 import { getJson, setJson, sharedStorageReady } from "./kvStore";
 
 export const ADMIN_EMAILS: readonly string[] = ["hsingh@kingsresearch.com", "sb@kingsresearch.com"];
+
 /** Domains that are always allowed, on top of DEFAULT_ALLOWED_DOMAINS or ALLOWED_DOMAINS. */
 const EXTRA_ALLOWED_DOMAINS = ["underratedclub.com"];
 
 export type Perm = "viewOnly" | "captures" | "indexChecks" | "audit" | "weekly";
 export const PERMS: readonly Perm[] = ["viewOnly", "captures", "indexChecks", "audit", "weekly"];
 export type Perms = Record<Perm, boolean>;
+
 const NONE: Perms = { viewOnly: false, captures: false, indexChecks: false, audit: false, weekly: false };
 const ALL: Perms = { viewOnly: false, captures: true, indexChecks: true, audit: true, weekly: true };
-/** What unlisted company-domain accounts get until an admin changes it (index checks, as before). */
-const DEFAULTS: Perms = { ...NONE, indexChecks: true };
 
 export type AccessUser = {
-  email: string; perms: Perms; weeklySites: string[]; addedBy: string; addedAt: string; updatedBy: string; updatedAt: string;
+  email: string;
+  perms: Perms;
+  /** Weekly report properties an admin picked earlier; used only until the person chooses their own. */
+  weeklySites: string[];
+  addedBy: string;
+  addedAt: string;
+  updatedBy: string;
+  updatedAt: string;
 };
 export type AddedDomain = { domain: string; addedBy: string; addedAt: string };
 export type AccessConfig = {
   v: 1;
   users: AccessUser[];
   domains: AddedDomain[];
+  /** No longer used: unlisted accounts get no extra tools. Kept so older saved lists still read. */
   domainDefaults: Perms;
-  /** Each admin's own weekly report properties ([] = the default list). */
+  /** Weekly report properties picked earlier for the admins; used only until they choose their own. */
   adminSites: Record<string, string[]>;
   updatedAt: string;
   updatedBy: string;
@@ -36,6 +47,7 @@ export type AccessConfig = {
 
 const KEY = "access:config";
 const OLD_KEY = "access:granted";
+const WEEKLY_KEY = (email: string) => `weekly:sites:${email}`;
 const CACHE_MS = 30_000; // a change reaches every server within 30 seconds
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -46,7 +58,6 @@ export const domainOf = (email: string) => {
   const at = e.lastIndexOf("@");
   return at > 0 ? e.slice(at + 1) : "";
 };
-
 export const isAccessAdmin = (email?: string | null) => !!email && ADMIN_EMAILS.includes(norm(email));
 
 /** Domains set in code (lib/access.ts, or ALLOWED_DOMAINS in Vercel, which replaces it) plus underratedclub.com. */
@@ -98,7 +109,7 @@ function tidy(raw: Partial<AccessConfig> | null): AccessConfig {
     v: 1,
     users,
     domains,
-    domainDefaults: raw?.domainDefaults ? cleanPerms(raw.domainDefaults) : { ...DEFAULTS },
+    domainDefaults: { ...NONE },
     adminSites,
     updatedAt: String(raw?.updatedAt || ""),
     updatedBy: String(raw?.updatedBy || ""),
@@ -121,6 +132,7 @@ async function fromOldSettings(): Promise<AccessConfig> {
     const l = split(env);
     return l.length ? l : fallback;
   };
+
   const old = sharedStorageReady() ? await getJson<{ email?: string }[]>(OLD_KEY).catch(() => null) : null;
   for (const g of old || []) add(String(g?.email || ""), {});
   for (const e of or(process.env.CAPTURE_EMAILS, ["asavalekar@kingstechmedia.com", "pkadu@ondot.com"])) add(e, { captures: true });
@@ -128,6 +140,7 @@ async function fromOldSettings(): Promise<AccessConfig> {
   for (const e of or(process.env.VIEWER_EMAILS, ["intentimizeweb@gmail.com"])) add(e, { viewOnly: true });
   for (const e of or(process.env.WEEKLY_REPORT_EMAILS, [])) add(e, { weekly: true });
   for (const e of or(process.env.AUDIT_EMAILS, [])) add(e, { audit: true });
+
   const domains = builtInDomains();
   const sites = cleanSites((process.env.WEEKLY_SITES || "").split(/[,\s]+/));
   for (const u of users.values()) {
@@ -135,7 +148,7 @@ async function fromOldSettings(): Promise<AccessConfig> {
     if (u.perms.weekly) u.weeklySites = sites;
     u.perms = cleanPerms(u.perms);
   }
-  return { v: 1, users: [...users.values()], domains: [], domainDefaults: { ...DEFAULTS }, adminSites: {}, updatedAt: at, updatedBy: by };
+  return { v: 1, users: [...users.values()], domains: [], domainDefaults: { ...NONE }, adminSites: {}, updatedAt: at, updatedBy: by };
 }
 
 let cache: { at: number; c: AccessConfig } | null = null;
@@ -182,25 +195,39 @@ export async function canSignIn(email?: string | null): Promise<boolean> {
   return c.users.some((u) => u.email === e) || c.domains.some((x) => x.domain === d);
 }
 
-/** What this person can do: admins everything; listed people their ticks; other allowed accounts the domain defaults. */
+/** What this person can do: admins everything; listed people exactly their ticks; everyone else no extra tools. */
 export async function permsFor(email?: string | null): Promise<Perms> {
   const e = norm(email);
   if (!e) return { ...NONE };
   if (isAccessAdmin(e)) return { ...ALL };
   const c = await loadAccess();
   const u = c.users.find((x) => x.email === e);
-  if (u) return cleanPerms(u.perms);
-  return (await canSignIn(e)) ? cleanPerms(c.domainDefaults) : { ...NONE };
+  return u ? cleanPerms(u.perms) : { ...NONE };
 }
 
 export async function hasPerm(email: string | null | undefined, perm: Perm): Promise<boolean> {
   return (await permsFor(email))[perm];
 }
 
-/** The properties picked for this person's weekly report ([] = the default list). */
+/**
+ * The properties in this person's weekly report ([] = the default list): what they chose in the Weekly report tab, or,
+ * until they choose, what an admin picked for them earlier.
+ */
 export async function weeklySitesFor(email?: string | null): Promise<string[]> {
   const e = norm(email);
+  if (!e) return [];
+  if (sharedStorageReady()) {
+    const own = await getJson<string[]>(WEEKLY_KEY(e)).catch(() => null);
+    if (Array.isArray(own)) return cleanSites(own);
+  }
   const c = await loadAccess();
   if (isAccessAdmin(e)) return c.adminSites[e] || [];
   return c.users.find((u) => u.email === e)?.weeklySites || [];
+}
+
+/** Saves this person's own weekly report properties ([] = the default list). */
+export async function saveWeeklySites(email: string, sites: string[]): Promise<string[]> {
+  const clean = cleanSites(sites);
+  await setJson(WEEKLY_KEY(norm(email)), clean);
+  return clean;
 }
