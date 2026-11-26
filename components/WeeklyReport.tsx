@@ -1,10 +1,11 @@
 // components/WeeklyReport.tsx
 "use client";
-// Weekly report tab (accounts with "Weekly report" ticked in Manage access): the week for the properties in this
-// person's report (picked in Manage access, or the Data Demand properties by default), Monday to Sunday, side by side,
-// then a full review of one property at a time. /api/weekly says which week and which properties; /api/weekly/property
-// loads each property in parallel, so each one appears as soon as it's ready. "Download Excel" builds one workbook from
-// what's on screen: a Summary sheet plus one sheet per property (lib/weeklyExcel.ts).
+// Weekly report tab (accounts with "Weekly report" ticked in Manage access): the week for the properties this person
+// chose ("Choose properties", from the Search Console properties their own Google account can open), or the Data Demand
+// properties by default, Monday to Sunday, side by side, then a full review of one property at a time. /api/weekly says
+// which week and which properties; /api/weekly/property loads each property in parallel, so each one appears as soon as
+// it's ready; /api/weekly/sites lists and saves the person's choice. "Download Excel" builds one workbook from what's on
+// screen: a Summary sheet plus one sheet per property (lib/weeklyExcel.ts).
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { Sources } from "@/lib/types";
@@ -15,6 +16,7 @@ import { DataTable, Delta, Kpis, PanelTitle, Section, SourcesProvider, SubTabs, 
 
 type Meta = { week: WeekInfo; sites: WeeklySite[]; missing: string[]; alsoMatched: Record<string, string[]>; rules: string[] };
 type Result = { loading: boolean; data?: PropertyWeek; error?: string };
+type SiteChoice = { all: string[]; chosen: string[]; max: number };
 
 const axis = { fontSize: 12, fill: "#5b6573" };
 const STATUS: Record<Status, { label: string; bg: string; fg: string }> = {
@@ -34,6 +36,13 @@ async function getJson<T>(url: string): Promise<T> {
   return data as T;
 }
 
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, { method: "POST", cache: "no-store", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  return data as T;
+}
+
 function addDaysLocal(d: string, n: number) {
   const t = new Date(`${d}T00:00:00Z`);
   t.setUTCDate(t.getUTCDate() + n);
@@ -44,6 +53,7 @@ const weekLabel = (start: string, end: string) =>
   `${fmtDate(start, { weekday: "short", day: "numeric", month: "short" })} – ${fmtDate(end, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}`;
 /** Plain change text, for figures where a rise isn't good news (404s, not indexed). */
 const chgText = (now: number, base: number) => (base ? `${now >= base ? "+" : ""}${(((now - base) / base) * 100).toFixed(0)}%` : now ? "new" : "no change");
+const shortSite = (s: string) => s.replace(/^sc-domain:/, "").replace(/^https?:\/\//, "").replace(/\/$/, "");
 
 function Pill({ s, children }: { s: Status; children?: ReactNode }) {
   const c = STATUS[s];
@@ -78,6 +88,109 @@ const counts = (areas: Area[]) => {
   for (const a of areas) if (a.status === "good" || a.status === "watch" || a.status === "problem") c[a.status]++;
   return c;
 };
+
+/* ---------------- Choose properties ---------------- */
+
+/** The person's own choice of properties, from the Search Console properties their Google account can open. */
+function PropertyPicker({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+  const [data, setData] = useState<SiteChoice | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    getJson<SiteChoice>("/api/weekly/sites")
+      .then((d) => {
+        if (!live) return;
+        setData(d);
+        setSel(new Set(d.chosen.filter((s) => d.all.includes(s))));
+      })
+      .catch((e) => live && setErr(e instanceof Error ? e.message : "Couldn't load your properties"));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const all = useMemo(() => (data ? [...data.all].sort((a, b) => shortSite(a).localeCompare(shortSite(b))) : []), [data]);
+  const f = filter.trim().toLowerCase();
+  const shown = f ? all.filter((s) => s.toLowerCase().includes(f)) : all;
+  const max = data?.max || 50;
+  const flip = (s: string) =>
+    setSel((cur) => {
+      const n = new Set(cur);
+      if (n.has(s)) n.delete(s);
+      else n.add(s);
+      return n;
+    });
+
+  const save = async (sites: string[]) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await postJson("/api/weekly/sites", { sites });
+      onSaved();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Couldn't save your choice");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="panel" style={{ marginBottom: 16 }}>
+      <PanelTitle>Choose the properties in your weekly report</PanelTitle>
+      <p className="muted" style={{ marginTop: 0 }}>
+        These are the Search Console properties your own Google account can open. Tick the ones you want, or use the default list
+        (aitech, martech, readmagazine, itdigest). Your choice is saved for you only.
+      </p>
+      {err && <div className="notice error">{err}</div>}
+      {!data && !err && <p className="muted">Loading your Search Console properties…</p>}
+      {data && (
+        <>
+          <input
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Filter properties"
+            aria-label="Filter properties"
+            style={{ minWidth: 240 }}
+          />
+          {!all.length ? (
+            <p className="muted">Your Google account can&apos;t open any Search Console properties.</p>
+          ) : (
+            <div
+              style={{
+                maxHeight: 300, overflowY: "auto", display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+                gap: "4px 12px", margin: "10px 0",
+              }}
+            >
+              {shown.map((s) => (
+                <label key={s} title={s} style={{ display: "flex", gap: 6, alignItems: "center", minWidth: 0 }}>
+                  <input type="checkbox" checked={sel.has(s)} onChange={() => flip(s)} />
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {shortSite(s)}
+                    {s.startsWith("sc-domain:") ? " (domain)" : ""}
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <button className="btn primary" disabled={busy || sel.size > max} onClick={() => save(all.filter((s) => sel.has(s)))}>
+              {busy ? "Saving…" : sel.size ? `Save ${sel.size} ${sel.size === 1 ? "property" : "properties"}` : "Save (default list)"}
+            </button>
+            <button className="btn" disabled={busy} onClick={() => save([])}>Use the default list</button>
+            <button className="btn" disabled={busy} onClick={onClose}>Cancel</button>
+            <span className="muted">
+              {sel.size > max ? `Pick up to ${max}.` : sel.size ? `${sel.size} ticked` : "Nothing ticked = the default list"}
+            </span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 /* ---------------- Tables ---------------- */
 
@@ -544,6 +657,7 @@ export default function WeeklyReport() {
   const [sel, setSel] = useState("");
   const [xlsBusy, setXlsBusy] = useState(false);
   const [xlsError, setXlsError] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
   const req = useRef(0);
 
   const load = useCallback(async (w: string) => {
@@ -602,7 +716,7 @@ export default function WeeklyReport() {
     <SourcesProvider value={sources}>
       <Section
         title="Weekly report"
-        lede="The week for the properties in your report (the Data Demand properties unless an admin picked others for you in Manage access), Monday to Sunday in Search Console's time zone (Pacific), compared with the week before and the 4-week average. Pick a property below for its full review."
+        lede="The week for the properties you chose (Choose properties), or the Data Demand properties if you haven't chosen, Monday to Sunday in Search Console's time zone (Pacific), compared with the week before and the 4-week average. Pick a property below for its full review."
       >
         {error && <div className="notice error">{error}</div>}
         {!meta && !error && <p className="muted">Finding the properties…</p>}
@@ -627,6 +741,9 @@ export default function WeeklyReport() {
                     ))}
                   </select>
                 </label>
+                <button className={`btn${picking ? " primary" : ""}`} onClick={() => setPicking((p) => !p)}>
+                  Choose properties ({meta.sites.length})
+                </button>
                 <button className="btn" onClick={() => load(week)}>Refresh</button>
                 <button
                   className="btn primary"
@@ -640,13 +757,25 @@ export default function WeeklyReport() {
               </div>
             </div>
 
+            {picking && (
+              <PropertyPicker
+                onClose={() => setPicking(false)}
+                onSaved={() => {
+                  setPicking(false);
+                  load(week);
+                }}
+              />
+            )}
+
             {xlsError && <div className="notice error">Excel: {xlsError}</div>}
             {meta.missing.length > 0 && (
-              <div className="notice">Not found in your Search Console properties: {meta.missing.join(", ")}.</div>
+              <div className="notice">
+                Not found in your Search Console properties: {meta.missing.join(", ")}. Use Choose properties to pick ones your Google account can open.
+              </div>
             )}
             {Object.entries(meta.alsoMatched).map(([site, others]) => (
               <div key={site} className="notice">
-                Using {site} for this report; also matched {others.join(", ")}. An admin can pick exact properties for you in Manage access.
+                Using {site} for this report; also matched {others.join(", ")}. Use Choose properties to pick exactly the ones you want.
               </div>
             ))}
 
