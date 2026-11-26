@@ -7,6 +7,7 @@ import type { Source, Sources } from "@/lib/types";
 import type { Compare } from "@/lib/dates";
 import type { AiTrafficResponse } from "@/app/api/ga4/ai-traffic/route";
 import { AI_ASSISTANT_LIST, AI_SOURCE_PATTERN } from "@/lib/aiSources";
+import { FRESH, cachedFetch } from "@/lib/clientCache";
 import { Bars, DataTable, Delta, Kpis, PanelTitle, Section, SourcesProvider, num, pct, useSources, type Col, type KpiItem } from "./ui";
 
 const axis = { fontSize: 12, fill: "#5b6573" };
@@ -49,14 +50,14 @@ export default function AiTraffic({ site, ga4, days, compare }: { site: string; 
     setError(null);
     if (!ga4) return;
     const q = new URLSearchParams({ property: ga4, days: String(days), compare });
-    fetch(`/api/ga4/ai-traffic?${q}`, { cache: "no-store" })
-      .then(async (r) => {
-        const j = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
-        return j as AiTrafficResponse;
-      })
-      .then((j) => live && setData(j))
-      .catch((e) => live && setError(e instanceof Error ? e.message : "Couldn't load GA4 data"));
+    let shown = false;
+    cachedFetch<AiTrafficResponse>(`/api/ga4/ai-traffic?${q}`, FRESH.ga, (j) => {
+      if (!live) return;
+      shown = true;
+      setData(j);
+    }).catch((e) => {
+      if (live && !shown) setError(e instanceof Error ? e.message : "Couldn't load GA4 data");
+    });
     return () => {
       live = false;
     };
