@@ -13,9 +13,26 @@ type GOpts = {
   timeoutMs?: number;
 };
 
-/** JSON in/out. Retries 5xx, and 429 unless the caller says a 429 means "daily quota used up". */
+/** Retries after the first try, for Google server errors, "too many requests" and dropped connections. */
+const MAX_RETRIES = 3;
+
+/** A dropped connection or DNS hiccup (worth another try), as opposed to our own time limit running out. */
+function isNetworkError(e: unknown) {
+  const err = e as { name?: string; message?: string; cause?: { code?: string } } | undefined;
+  if (err?.name === "AbortError" || err?.name === "TimeoutError") return false;
+  return /fetch failed|network|socket|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|UND_ERR/i.test(`${err?.message || ""} ${err?.cause?.code || ""}`);
+}
+
+/**
+ * JSON in/out. Retries Google server errors, dropped connections, and 429 unless the caller says a 429 means "daily
+ * quota used up". Waits grow each time (with a little randomness, so many calls don't retry in step), follow Google's
+ * Retry-After when it sends one, and never run past the call's time limit.
+ */
 async function g<T = any>(token: string, url: string, init: RequestInit = {}, opts: GOpts = {}): Promise<T> {
+  const deadline = opts.timeoutMs ? Date.now() + opts.timeoutMs : 0;
   const signal = opts.timeoutMs ? AbortSignal.timeout(opts.timeoutMs) : undefined;
+  /** True when there's still time to wait `ms` and try again. */
+  const roomFor = (ms: number) => !signal?.aborted && (!deadline || Date.now() + ms < deadline - 1_000);
   for (let attempt = 0; ; attempt++) {
     let res: Response;
     let text: string;
@@ -31,6 +48,11 @@ async function g<T = any>(token: string, url: string, init: RequestInit = {}, op
       if (signal?.aborted) {
         throw new HttpError(504, `Google didn't answer within ${Math.round((opts.timeoutMs || 0) / 1000)} seconds. Try again in a minute.`);
       }
+      const wait = 1_000 * 2 ** attempt + Math.random() * 500;
+      if (attempt < MAX_RETRIES && isNetworkError(e) && roomFor(wait)) {
+        await sleep(wait);
+        continue;
+      }
       throw e;
     }
     let data: any = {};
@@ -41,9 +63,13 @@ async function g<T = any>(token: string, url: string, init: RequestInit = {}, op
     }
     if (res.ok) return data as T;
     const retry = res.status >= 500 || (res.status === 429 && opts.retry429 !== false);
-    if (retry && attempt < 2 && !signal?.aborted) {
-      await sleep(800 * 2 ** attempt);
-      continue;
+    if (retry && attempt < MAX_RETRIES) {
+      const asked = Number(res.headers.get("retry-after"));
+      const wait = asked > 0 ? Math.min(asked * 1000, 20_000) : 800 * 2 ** attempt + Math.random() * 400;
+      if (roomFor(wait)) {
+        await sleep(wait);
+        continue;
+      }
     }
     throw new HttpError(res.status, data?.error?.message || `Google API error ${res.status}`);
   }
