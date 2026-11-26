@@ -47,6 +47,32 @@ export function Kpis({ items }: { items: KpiItem[] }) {
   );
 }
 
+/** One-line intro under a section title. Longer text is cut to one line, with a "More" link that opens it. */
+export function Lede({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLParagraphElement>(null);
+  const [open, setOpen] = useState(false);
+  const [long, setLong] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const check = () => setLong(el.scrollWidth > el.clientWidth + 1);
+    check();
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [children, open]);
+  return (
+    <div className={`lede-wrap${open ? " open" : ""}`}>
+      <p ref={ref} className="lede">{children}</p>
+      {(long || open) && (
+        <button type="button" className="lede-more" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+          {open ? "Less" : "More"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function Section({ title, lede, children, source }: { title: string; lede?: ReactNode; children: ReactNode; source?: string[] }) {
   return (
     <section className="section">
@@ -54,7 +80,7 @@ export function Section({ title, lede, children, source }: { title: string; lede
         {title}
         {source && <SourceButton ids={source} title={title} />}
       </h2>
-      {lede && <p className="lede">{lede}</p>}
+      {lede && <Lede>{lede}</Lede>}
       {children}
     </section>
   );
