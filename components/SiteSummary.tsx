@@ -9,6 +9,7 @@ import type { GscData, Ga4Data } from "@/lib/types";
 import type { Compare } from "@/lib/dates";
 import { buildSummary, type IdxDays, type Move, type Pointer, type SignalsInput, type SocialInput } from "@/lib/insights";
 import { downloadCsv } from "./ui";
+import { FRESH, cachedFetch } from "@/lib/clientCache";
 
 const SHOW = 5;
 
@@ -18,15 +19,6 @@ const span = (r: { startDate: string; endDate: string }) => `${fmt(r.startDate)}
 function openStudy(m: Move) {
   if (!m.study) return;
   window.dispatchEvent(new CustomEvent("dash:open", { detail: { tab: m.study.tab, find: m.study.find } }));
-}
-
-async function getOptional(url: string): Promise<any> {
-  try {
-    const r = await fetch(url, { cache: "no-store" });
-    return r.ok ? await r.json() : null;
-  } catch {
-    return null;
-  }
 }
 
 export default function SiteSummary({
@@ -55,8 +47,19 @@ export default function SiteSummary({
     setSocial(undefined);
     setSignals(undefined);
     const q = `property=${ga4}&days=${days}&compare=${compare}`;
-    getOptional(`/api/ga4/social?${q}`).then((d) => live && setSocial(d && d.totals ? (d as SocialInput) : null));
-    getOptional(`/api/ga4/signals?${q}`).then((d) => live && setSignals(d && d.site ? (d as SignalsInput) : null));
+    /** Optional extras: a saved copy shows at once (lib/clientCache.ts); a failure just leaves them out. */
+    const optional = <T,>(url: string, ok: (d: any) => boolean, set: (v: T | null) => void) => {
+      let shown = false;
+      cachedFetch<any>(url, FRESH.ga, (d) => {
+        if (!live) return;
+        shown = true;
+        set(d && ok(d) ? (d as T) : null);
+      }).catch(() => {
+        if (live && !shown) set(null);
+      });
+    };
+    optional<SocialInput>(`/api/ga4/social?${q}`, (d) => !!d.totals, setSocial);
+    optional<SignalsInput>(`/api/ga4/signals?${q}`, (d) => !!d.site, setSignals);
     return () => {
       live = false;
     };
