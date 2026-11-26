@@ -302,3 +302,51 @@ tr:hover td { background: #f8fafb; }
 /* Collapsible explanation boxes, e.g. "Where these numbers come from" */
 details.notice > summary { cursor: pointer; }
 details.notice[open] > summary { margin-bottom: 8px; }
+
+
+/* ============================================================================
+   Compact layout (26 Nov 2026): less space everywhere, one-line intros with "More"
+   ============================================================================ */
+main { padding: 16px 20px; gap: 18px; }
+.section h2 { font-size: 18px; margin: 0 0 2px; }
+.section > p.lede { margin: 0 0 10px; font-size: 13.5px; }
+.lede-wrap { display: flex; align-items: baseline; gap: 8px; margin: 0 0 10px; min-width: 0; }
+.lede-wrap .lede { margin: 0; flex: 1 1 auto; min-width: 0; color: var(--ink-2); font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lede-wrap.open .lede { white-space: normal; overflow: visible; }
+.lede-more { flex: 0 0 auto; border: 0; background: none; padding: 0; color: var(--link); font-size: 13px; font-weight: 500; cursor: pointer; }
+.lede-more:hover { text-decoration: underline; }
+.panel { padding: 12px 14px; }
+.panel h3 { margin: 0 0 8px; font-size: 14.5px; }
+.grid-2, .bt-grid { gap: 12px; }
+.kpi { padding: 10px 12px; }
+.kpi .label { font-size: 12.5px; }
+.kpi .value { font-size: 22px; }
+th { padding: 6px 8px; }
+td { padding: 5px 8px; }
+.table-tools { margin-bottom: 6px; }
+.notice { padding: 8px 12px; font-size: 13.5px; }
+.bt-card { padding: 12px 14px; }
+.subtabs { margin-bottom: 8px; }
+.status-line { margin: 0; font-size: 12.5px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* "Open" scrolls a section into view below the sticky top bar */
+main h2, main h3 { scroll-margin-top: 140px; }
+
+/* ---------- Overview summary (Vibe check) ---------- */
+.sum-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.sum-head h2 { margin: 0; }
+.sum-tone { display: inline-flex; border: 1px solid var(--rule); border-radius: 999px; overflow: hidden; }
+.sum-tone button { border: 0; background: var(--surface); padding: 3px 12px; font-size: 12.5px; cursor: pointer; color: var(--ink-2); }
+.sum-tone button[aria-pressed="true"] { background: var(--ink); color: #fff; }
+.sum-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 12px; margin-top: 8px; }
+.sum-grid > * { min-width: 0; }
+.sum-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+.sum-list li { position: relative; padding-left: 14px; font-size: 14px; line-height: 1.45; }
+.sum-list li::before { content: ""; position: absolute; left: 0; top: 0.55em; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-3); }
+.sum-good li::before { background: var(--up); }
+.sum-bad li::before { background: var(--down); }
+.sum-moves li::before { background: var(--link); }
+.sum-study { margin-top: 3px; font-size: 12.5px; color: var(--ink-3); display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
+.linkbtn { border: 0; background: none; padding: 0; color: var(--link); font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.linkbtn:hover { text-decoration: underline; }
+.sum-empty { margin: 0; color: var(--ink-3); font-size: 13.5px; }
+@media (max-width: 520px) { .sum-grid { grid-template-columns: 1fr; } }
