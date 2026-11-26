@@ -1,7 +1,8 @@
 // app/api/cron/index-plan/route.ts
-// Hourly (vercel.json). First moves the Sheet to the one-tab-per-property layout if that hasn't happened yet, then
-// plans each enabled property's checks once per Pacific day, after Google's quota resets.
-// Properties not reached in this call are planned in the next hour.
+// Twice an hour, at :05 and :35 (vercel.json). First moves the Sheet to the one-tab-per-property layout if that hasn't
+// happened yet, then plans each enabled property's checks once per Pacific day, after Google's quota resets.
+// Properties not reached in this call are planned in the next one, 30 minutes later, so even 20+ properties are all
+// planned within a few hours of the reset.
 import { NextRequest, NextResponse } from "next/server";
 import { assertCron } from "@/lib/cron";
 import { serviceAccountReady } from "@/lib/serviceAccount";
