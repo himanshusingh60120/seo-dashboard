@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
+import { FRESH, cachedFetch } from '@/lib/clientCache';
 import { BarTable } from './BarTable';
 import BotCheck from './BotCheck';
 
@@ -47,12 +48,21 @@ export default function ChannelDrilldown({ propertyId, days }: { propertyId: str
   const [view, setView] = useState<ViewKey>('sources');
 
   useEffect(() => {
+    let live = true;
+    let shown = false;
     setData(null);
     setErr('');
-    fetch(`/api/ga4/channels?property=${propertyId}&days=${days}`, { cache: 'no-store' })
-      .then(r => r.json())
-      .then(j => (j.error ? setErr(j.error) : setData(j)))
-      .catch(e => setErr(String(e)));
+    cachedFetch<any>(`/api/ga4/channels?property=${propertyId}&days=${days}`, FRESH.ga, j => {
+      if (!live) return;
+      shown = true;
+      if (j?.error) setErr(j.error);
+      else setData(j);
+    }).catch(e => {
+      if (live && !shown) setErr(e instanceof Error ? e.message : String(e));
+    });
+    return () => {
+      live = false;
+    };
   }, [propertyId, days]);
 
   const channels = useMemo(() => agg(data?.sources, ['sessionDefaultChannelGroup']), [data]);
