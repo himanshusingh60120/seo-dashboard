@@ -8,6 +8,7 @@ import type { Source, Sources } from "@/lib/types";
 import type { Compare } from "@/lib/dates";
 import type { SocialResponse } from "@/app/api/ga4/social/route";
 import { SOCIAL_CHANNELS, SOCIAL_NETWORK_LIST, SOCIAL_SOURCE_PATTERN } from "@/lib/socialSources";
+import { FRESH, cachedFetch } from "@/lib/clientCache";
 import { Bars, DataTable, Delta, Kpis, PanelTitle, Section, SourcesProvider, SubTabs, duration, num, pct, useSources, type Col, type KpiItem } from "./ui";
 
 const axis = { fontSize: 12, fill: "#5b6573" };
@@ -92,14 +93,14 @@ export default function SocialTraffic({ site, ga4, days, compare }: { site: stri
     setNet("all");
     if (!ga4) return;
     const q = new URLSearchParams({ property: ga4, days: String(days), compare });
-    fetch(`/api/ga4/social?${q}`, { cache: "no-store" })
-      .then(async (r) => {
-        const j = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
-        return j as SocialResponse;
-      })
-      .then((j) => live && setData(j))
-      .catch((e) => live && setError(e instanceof Error ? e.message : "Couldn't load social media traffic"));
+    let shown = false;
+    cachedFetch<SocialResponse>(`/api/ga4/social?${q}`, FRESH.ga, (j) => {
+      if (!live) return;
+      shown = true;
+      setData(j);
+    }).catch((e) => {
+      if (live && !shown) setError(e instanceof Error ? e.message : "Couldn't load social media traffic");
+    });
     return () => {
       live = false;
     };
