@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
+import { FRESH, cachedFetch } from '@/lib/clientCache';
 import { BarTable } from './BarTable';
 import BotCheck from './BotCheck';
 import { CTAS, CTA_REGEX } from '@/lib/cta';
@@ -102,12 +103,21 @@ export default function CtaSection({ propertyId, days }: { propertyId: string; d
   const [cta, setCta] = useState('all');
 
   useEffect(() => {
+    let live = true;
+    let shown = false;
     setData(null);
     setErr('');
-    fetch(`/api/ga4/cta?property=${propertyId}&days=${days}`, { cache: 'no-store' })
-      .then(r => r.json())
-      .then(j => (j.error ? setErr(j.error) : setData(j)))
-      .catch(e => setErr(String(e)));
+    cachedFetch<any>(`/api/ga4/cta?property=${propertyId}&days=${days}`, FRESH.ga, j => {
+      if (!live) return;
+      shown = true;
+      if (j?.error) setErr(j.error);
+      else setData(j);
+    }).catch(e => {
+      if (live && !shown) setErr(e instanceof Error ? e.message : String(e));
+    });
+    return () => {
+      live = false;
+    };
   }, [propertyId, days]);
 
   const totals: Record<string, { views: number; users: number }> = data?.totals ?? {};
