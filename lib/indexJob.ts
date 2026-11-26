@@ -8,7 +8,7 @@
 // so each URL is re-checked about every (URLs ÷ daily budget) days, automatically.
 //
 // Each property has ONE row in _Jobs and ONE Sheet, whoever started it, so nothing is checked twice.
-//   plan (hourly; acts once per Pacific day per property, after Google's quota resets): reads the sitemaps and the
+//   plan (twice an hour; acts once per Pacific day per property, after Google's quota resets): reads the sitemaps and the
 //     Search Console impressions per page (both free), adds new URLs, recounts the "By sitemap" summary and builds
 //     today's queue:
 //       1. pages with no impressions for 4+ days that had impressions before (up to half the budget),
@@ -20,8 +20,12 @@
 //       7. everything else, oldest result first (the rotation).
 //     A sitemap that can't be read on a given day (for example the site's server is slow) keeps its URLs as they were,
 //     so a slow server never makes pages disappear from the counts or the rotation.
-//   run (every 10 minutes): inspects queued URLs in batches of 40, writes each result to its row, and updates the
-//     "By sitemap" counts after every batch (only the sitemaps that changed), so the dashboard moves every 10 minutes.
+//   run (every 30 minutes, see vercel.json): works on up to INDEX_LANES properties at the same time (default 3), each in
+//     batches of 40 URLs, always giving the next batch to the property that has waited longest. A batch costs one Google
+//     Sheets read (the queued rows, the "By sitemap" counts and the "404 link sources" together) and one write (the
+//     results, the updated counts and the updated 404 sources together), plus one write for the property's _Jobs row,
+//     and one more read and write when it finds status changes. The run's _Log lines are saved together at the end.
+//     That keeps several properties at once well inside Google's limit of 60 Sheets writes a minute.
 //     For URLs that return 404 / soft 404 it also saves the pages and sitemaps Google says link to them ("404 link
 //     sources"), from the same inspection, so the Site investigation can show where each 404 is linked from.
 // Search Console is read as the service account when it has been added to the property; otherwise as the person who
@@ -64,6 +68,8 @@ const FLAG_QUIET = `No impressions for ${QUIET_DAYS}+ days, checking`;
 const FLAG_BACK = "Back in search, checking";
 const BATCH = 40;
 const PARALLEL = 6;
+/** Properties worked on at the same time in one run (INDEX_LANES, 1–6). Each has its own queue, Sheet and Google quota. */
+const LANES = Math.max(1, Math.min(6, Math.floor(Number(process.env.INDEX_LANES) || 3)));
 const SEARCH_ONLY = "(found in search, not in a sitemap)";
 const UNKNOWN_SITEMAP = "(sitemap unknown)";
 
@@ -94,6 +100,15 @@ const pad = (r: Row): Row => {
   while (out.length < W) out.push("");
   return out;
 };
+/** Pads or cuts a row to a section's width. */
+const fitTo = (width: number) => (r: Row): Row => {
+  const out = r.slice(0, width);
+  while (out.length < width) out.push("");
+  return out;
+};
+/** Rows FIRST_ROW … FIRST_ROW + count − 1 of a section, e.g. "AO3:AW12". */
+const sectionRows = (key: "sitemaps" | "links404", count: number) =>
+  `${SEC[key].L}${FIRST_ROW}:${SEC[key].R}${FIRST_ROW + count - 1}`;
 const ageDays = (day: string, iso: string) =>
   iso ? (Date.parse(`${day}T00:00:00Z`) - Date.parse(`${iso.slice(0, 10)}T00:00:00Z`)) / DAY : Infinity;
 const isIndexedVerdict = (v: string) => v === "PASS" || v === "PARTIAL";
@@ -113,6 +128,15 @@ async function pool<T, R>(items: T[], size: number, fn: (t: T) => Promise<R>): P
     })
   );
   return out;
+}
+
+/** Random order (Fisher–Yates), in place. */
+function shuffle<T>(list: T[]): T[] {
+  for (let i = list.length - 1; i > 0; i--) {
+    const k = Math.floor(Math.random() * (i + 1));
+    [list[i], list[k]] = [list[k], list[i]];
+  }
+  return list;
 }
 
 /* ---------------- Counting URLs per sitemap ---------------- */
@@ -193,14 +217,19 @@ export async function readJobs(): Promise<Job[]> {
     .filter((j) => j.site);
 }
 
+/** Saves the job's row: the tab name and the plan/run columns, in one request. */
 async function saveJob(j: Job) {
-  const control = controlBook();
-  await writeRange(control, JOBS_TAB, `B${j.row}:B${j.row}`, [[j.tab]]);
-  await writeRange(control, JOBS_TAB, `G${j.row}:O${j.row}`, [
-    [
-      j.planDay, j.planStatus, j.plannedAt, j.queue.join(","), j.checkedToday, j.lastRun, j.message.slice(0, 500), j.runAs,
-      j.stats ? JSON.stringify(j.stats) : "",
-    ],
+  await writeRanges(controlBook(), JOBS_TAB, [
+    { range: `B${j.row}:B${j.row}`, values: [[j.tab]] },
+    {
+      range: `G${j.row}:O${j.row}`,
+      values: [
+        [
+          j.planDay, j.planStatus, j.plannedAt, j.queue.join(","), j.checkedToday, j.lastRun, j.message.slice(0, 500), j.runAs,
+          j.stats ? JSON.stringify(j.stats) : "",
+        ],
+      ],
+    },
   ]);
 }
 
@@ -211,16 +240,24 @@ function jobToken(j: Job): Promise<string> {
 
 type Counts = { used: number; indexed: number; notIndexed: number; errors: number; drops: number };
 
-async function log(site: string, step: string, c: Partial<Counts>, note: string) {
+const logRow = (site: string, step: string, c: Partial<Counts>, note: string): Row => [
+  new Date().toISOString(), site, step, c.used ?? 0, c.indexed ?? 0, c.notIndexed ?? 0, c.errors ?? 0, c.drops ?? 0, note.slice(0, 500),
+];
+
+/** Adds rows to _Log in one request. Never fails a job. */
+async function appendLog(rows: Row[]) {
+  if (!rows.length) return;
   try {
     const control = controlBook();
     await ensureTab(control, LOG_TAB, LOG_HEADERS);
-    await appendRows(control, LOG_TAB, [
-      [new Date().toISOString(), site, step, c.used ?? 0, c.indexed ?? 0, c.notIndexed ?? 0, c.errors ?? 0, c.drops ?? 0, note.slice(0, 500)],
-    ]);
+    await appendRows(control, LOG_TAB, rows);
   } catch {
     /* the log is a convenience; never fail a job because of it */
   }
+}
+
+async function log(site: string, step: string, c: Partial<Counts>, note: string) {
+  await appendLog([logRow(site, step, c, note)]);
 }
 
 /** Adds rows to the property's "Status changes" section. Never fails a job. */
@@ -240,38 +277,38 @@ const is404Result = (r: InspectionResult) =>
 const joinCell = (list: unknown) => (Array.isArray(list) ? list.map(String).filter(Boolean).join(" | ").slice(0, 45_000) : "");
 
 /**
- * Keeps the "404 link sources" section in step with the latest inspections: a URL that returns 404 / soft 404 gets
- * (or updates) its row; a URL that no longer does loses it. Failed checks change nothing. Never fails a job.
+ * The "404 link sources" rows after one batch, from the rows read with that batch: a URL that returns 404 / soft 404
+ * gets (or updates) its row; a URL that no longer does loses it. Failed checks change nothing. Returns the rows to
+ * write from the section's first row (blank rows at the end when the list got shorter), or null when nothing changed.
  */
-async function saveLinkSources(book: Book, title: string, updates: Map<string, Row | null>) {
-  if (!updates.size) return;
-  try {
-    await ensureSections(book, title);
-    const rows = (await readRange(book, title, sectionRange("links404"))).filter((r) => s(r[0]));
-    const out: Row[] = [];
-    const seen = new Set<string>();
-    let changed = false;
-    for (const r of rows) {
-      const u = s(r[0]);
-      if (!updates.has(u)) {
-        out.push(r);
-        continue;
-      }
-      seen.add(u);
-      const next = updates.get(u);
-      if (next) out.push(next);
+function linksAfter(current: Row[], updates: Map<string, Row | null>): Row[] | null {
+  if (!updates.size) return null;
+  const out: Row[] = [];
+  const seen = new Set<string>();
+  let changed = false;
+  for (const r of current) {
+    const u = s(r[0]);
+    if (!u) continue;
+    if (!updates.has(u)) {
+      out.push(r);
+      continue;
+    }
+    seen.add(u);
+    const next = updates.get(u);
+    if (next) out.push(next);
+    changed = true;
+  }
+  for (const [u, next] of updates) {
+    if (next && !seen.has(u)) {
+      out.push(next);
       changed = true;
     }
-    for (const [u, next] of updates) {
-      if (next && !seen.has(u)) {
-        out.push(next);
-        changed = true;
-      }
-    }
-    if (changed) await writeSection(book, title, "links404", out);
-  } catch {
-    /* a convenience, like the log */
   }
+  if (!changed) return null;
+  const width = SEC.links404.width;
+  const rows = out.map(fitTo(width));
+  while (rows.length < current.length) rows.push(Array.from({ length: width }, () => ""));
+  return rows;
 }
 
 /* ---------------- Turning checks on and off ---------------- */
@@ -367,16 +404,19 @@ async function writeSitemapSummary(book: Book, title: string, rows: Row[], probl
   await writeSection(book, title, "sitemaps", out);
 }
 
-/** Applies the changes from one batch of checks to the "By sitemap" counts (reads and rewrites only that small table). */
-async function applyToSummary(book: Book, title: string, delta: Map<string, Tally>) {
-  if (!delta.size) return;
-  const rows = await readRange(book, title, sectionRange("sitemaps"));
+/**
+ * Applies one batch's changes to the "By sitemap" rows read with that batch. Returns the rows to write back, or null
+ * when nothing changed. Only counts change, never the number of rows, so the same range is written back.
+ */
+function summaryAfter(rows: Row[], delta: Map<string, Tally>): Row[] | null {
+  if (!delta.size || !rows.length) return null;
   const now = new Date().toISOString();
   let changed = false;
-  for (const r of rows) {
+  const out = rows.map((raw) => {
+    const r = fitTo(SEC.sitemaps.width)(raw);
     const d = delta.get(s(r[0]));
     const urls = n(r[1]);
-    if (!d || !urls) continue;
+    if (!d || !urls) return r;
     const indexed = Math.max(0, n(r[3]) + d.indexed);
     const notIndexed = Math.max(0, n(r[4]) + d.notIndexed);
     const errors = Math.max(0, n(r[5]) + d.errors);
@@ -391,8 +431,9 @@ async function applyToSummary(book: Book, title: string, delta: Map<string, Tall
     r[7] = pctOf(verified, urls);
     r[8] = now;
     changed = true;
-  }
-  if (changed) await writeSection(book, title, "sitemaps", rows);
+    return r;
+  });
+  return changed ? out : null;
 }
 
 /* ---------------- Plan: once per Pacific day per property ---------------- */
@@ -624,10 +665,14 @@ export async function planProperty(job: Job, day: string): Promise<string> {
 
 /* ---------------- Run: inspect queued URLs ---------------- */
 
-type BatchResult = Counts & { done: Set<number>; stop: string; quota: boolean; delta: Map<string, Tally> };
+type BatchResult = Counts & { done: Set<number>; stop: string; quota: boolean };
 
 async function checkBatch(job: Job, rowNums: number[], token: string, day: string): Promise<BatchResult> {
-  const got = await readRanges(job.book, job.tab, rowNums.map(rowRange));
+  // One read for the whole batch: the queued rows, the "By sitemap" counts and the "404 link sources".
+  await ensureSections(job.book, job.tab);
+  const got = await readRanges(job.book, job.tab, [...rowNums.map(rowRange), sectionRange("sitemaps"), sectionRange("links404")]);
+  const summaryRows = got[rowNums.length] || [];
+  const linkRows = got[rowNums.length + 1] || [];
   const items = rowNums.map((row, k) => ({ row, cells: pad(got[k]?.[0] || []) }));
   const done = new Set<number>(items.filter((x) => !s(x.cells[C.url])).map((x) => x.row)); // emptied rows leave the queue
   const work = items.filter((x) => s(x.cells[C.url]));
@@ -721,9 +766,14 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
     });
     data.push({ range: `${U(C.nextCheck)}${r}:${U(C.link)}${r}`, values: [["In rotation", flag, res.link]] });
   }
+
+  // One write for the whole batch: the results, the updated "By sitemap" counts and the updated 404 sources.
+  const summary = summaryAfter(summaryRows, delta);
+  if (summary) data.push({ range: sectionRows("sitemaps", summary.length), values: summary });
+  const linked = linksAfter(linkRows, links);
+  if (linked?.length) data.push({ range: sectionRows("links404", linked.length), values: linked });
   if (data.length) await writeRanges(job.book, job.tab, data);
   await recordChanges(job.book, job.tab, changes);
-  await saveLinkSources(job.book, job.tab, links);
 
   const who = job.runAs === SA_LABEL ? "the service account" : job.runAs;
   const stop = quota
@@ -733,10 +783,13 @@ async function checkBatch(job: Job, rowNums: number[], token: string, day: strin
       : rateLimited
         ? "Google asked to slow down; continuing in the next run."
         : "";
-  return { ...c, done, stop, quota, delta };
+  return { ...c, done, stop, quota };
 }
 
-/** Called every 10 minutes. Works through each property's queue in turns until the time budget is used. */
+/**
+ * Called every 30 minutes. Works on up to LANES properties at the same time, one batch at a time each, always giving
+ * the next batch to the property that has waited longest, until the time budget is used.
+ */
 export async function runChecks(deadline: number) {
   const day = today();
   const jobs = (await readJobs()).filter(
@@ -747,60 +800,88 @@ export async function runChecks(deadline: number) {
   const tokens = new Map<Job, string>();
   const stopped = new Set<Job>();
   const touched = new Set<Job>();
+  const busy = new Set<Job>();
+  /** When each property last got a batch, so turns rotate fairly. */
+  const lastTurn = new Map<Job, number>();
+  const logRows: Row[] = [];
   const timeLeft = () => Date.now() < deadline - 15_000;
   let used = 0;
 
-  while (timeLeft()) {
-    const active = jobs.filter((j) => !stopped.has(j) && j.queue.length > 0 && j.checkedToday < j.budget);
-    if (!active.length) break;
-    for (const j of active) {
-      if (!timeLeft()) break;
-      try {
-        if (!j.book) {
-          const ref = await findSheet(j.site);
-          if (!ref) throw new Error("This property's Google Sheet wasn't found. It's set up again with the next daily plan.");
-          j.book = ref.book;
-          j.tab = ref.title;
-        }
-        let token = tokens.get(j);
-        if (!token) {
-          token = await jobToken(j);
-          tokens.set(j, token);
-        }
-        const size = Math.min(BATCH, j.budget - j.checkedToday);
-        const r = await checkBatch(j, j.queue.slice(0, size), token, day);
-        j.queue = j.queue.filter((row) => !r.done.has(row));
-        j.checkedToday += r.used;
-        used += r.used;
-        if (r.used) touched.add(j);
-        // Keep the "By sitemap" counts current after every batch (a small read and write).
-        await applyToSummary(j.book, j.tab, r.delta).catch(() => {});
-        j.lastRun = new Date().toISOString();
-        if (r.stop) {
-          stopped.add(j);
-          j.message = r.stop;
-          if (r.quota) j.checkedToday = Math.max(j.checkedToday, j.budget);
-        } else {
-          j.message = j.queue.length
-            ? `Checked ${j.checkedToday.toLocaleString()} today · ${j.queue.length.toLocaleString()} still queued`
-            : `Today's checks are done: ${j.checkedToday.toLocaleString()} URLs inspected.`;
-        }
-        await saveJob(j);
-        await log(j.site, "check", r, r.stop);
-      } catch (e) {
+  /** The property that has waited longest for a batch and isn't being worked on right now, or null. */
+  const nextJob = (): Job | null => {
+    let best: Job | null = null;
+    for (const j of jobs) {
+      if (stopped.has(j) || busy.has(j) || !j.queue.length || j.checkedToday >= j.budget) continue;
+      if (!best || (lastTurn.get(j) || 0) < (lastTurn.get(best) || 0)) best = j;
+    }
+    return best;
+  };
+
+  /** One batch of up to 40 URLs for one property. Never throws: a problem pauses that property only. */
+  const turn = async (j: Job) => {
+    try {
+      if (!j.book) {
+        const ref = await findSheet(j.site);
+        if (!ref) throw new Error("This property's Google Sheet wasn't found. It's set up again with the next daily plan.");
+        j.book = ref.book;
+        j.tab = ref.title;
+      }
+      let token = tokens.get(j);
+      if (!token) {
+        token = await jobToken(j);
+        tokens.set(j, token);
+      }
+      const size = Math.min(BATCH, j.budget - j.checkedToday);
+      const r = await checkBatch(j, j.queue.slice(0, size), token, day);
+      j.queue = j.queue.filter((row) => !r.done.has(row));
+      j.checkedToday += r.used;
+      used += r.used;
+      if (r.used) touched.add(j);
+      j.lastRun = new Date().toISOString();
+      if (r.stop) {
         stopped.add(j);
-        j.message = `Checks paused: ${e instanceof Error ? e.message : "error"}`.slice(0, 500);
-        j.lastRun = new Date().toISOString();
-        await saveJob(j).catch(() => {});
-        await log(j.site, "check", {}, j.message);
+        j.message = r.stop;
+        if (r.quota) j.checkedToday = Math.max(j.checkedToday, j.budget);
+      } else {
+        j.message = j.queue.length
+          ? `Checked ${j.checkedToday.toLocaleString()} today · ${j.queue.length.toLocaleString()} still queued`
+          : `Today's checks are done: ${j.checkedToday.toLocaleString()} URLs inspected.`;
+      }
+      await saveJob(j);
+      logRows.push(logRow(j.site, "check", r, r.stop));
+    } catch (e) {
+      stopped.add(j);
+      j.message = `Checks paused: ${e instanceof Error ? e.message : "error"}`.slice(0, 500);
+      j.lastRun = new Date().toISOString();
+      await saveJob(j).catch(() => {});
+      logRows.push(logRow(j.site, "check", {}, j.message));
+    }
+  };
+
+  const lane = async () => {
+    while (timeLeft()) {
+      const j = nextJob();
+      if (!j) return; // the rest are finished, stopped, or being worked on by another lane
+      busy.add(j);
+      lastTurn.set(j, Date.now());
+      try {
+        await turn(j);
+      } finally {
+        busy.delete(j);
       }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(LANES, jobs.length) }, () => lane()));
 
-  // The overview at the left of each tab uses the "By sitemap" counts, so refresh it for properties checked in this run.
-  for (const j of touched) {
-    if (Date.now() > deadline - 5_000) break;
+  // This run's log lines, in one request.
+  await appendLog(logRows);
+
+  // The overview at the left of each tab uses the "By sitemap" counts, so refresh it for properties checked in this
+  // run, in random order so every property gets its turn when time runs short. Stops well before Vercel's limit.
+  const overviewUntil = deadline + 10_000;
+  await pool(shuffle([...touched]), 2, async (j) => {
+    if (Date.now() > overviewUntil) return;
     await writeOverview(j.site).catch(() => {});
-  }
+  });
   return { day, used, jobs: jobs.map((j) => ({ site: j.site, checkedToday: j.checkedToday, queued: j.queue.length })) };
 }
