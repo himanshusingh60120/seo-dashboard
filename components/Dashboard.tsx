@@ -7,7 +7,7 @@ import { indexScanSource, loadIndexCache, peekIndexCache } from "@/lib/indexCach
 import { downloadJson, fileSafe } from "@/lib/evidence";
 import { DEFAULT_DAYS, MAX_DAYS, yoyAllowed, type Compare } from "@/lib/dates";
 import { urlInProperty } from "@/lib/url";
-import { SourcesProvider } from "./ui";
+import { Lede, SourcesProvider } from "./ui";
 import Overview from "./Overview";
 import Rankings from "./Rankings";
 import IndexReport from "./IndexReport";
@@ -110,6 +110,12 @@ function siteOf(raw: string | null): string {
     return "";
   }
 }
+
+/* ---------------- Short dates for the status line ---------------- */
+
+const dshort = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
+const dspan = (r: { startDate: string; endDate: string }) => `${dshort(r.startDate)}–${dshort(r.endDate)}`;
+const tzShort = (tz: string) => (/Calcutta|Kolkata/.test(tz) ? "IST" : /Los_Angeles/.test(tz) ? "Pacific time" : tz);
 
 /* ---------------- Phones ---------------- */
 
@@ -383,6 +389,30 @@ export default function Dashboard() {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => setCanWeekly(!!d?.allowed))
       .catch(() => {});
+  }, []);
+
+  // "Open" buttons (the Overview summary's next moves) ask to show a tab and scroll to one of its sections:
+  // window.dispatchEvent(new CustomEvent("dash:open", { detail: { tab: "rankings", find: ["lost"] } }))
+  useEffect(() => {
+    const ids = new Set<string>([...TAB_GROUPS.flat(), ...TOOL_TABS].map((t) => t.id));
+    const on = (e: Event) => {
+      const d = (e as CustomEvent<{ tab?: string; find?: string[] }>).detail || {};
+      if (!d.tab || !ids.has(d.tab)) return;
+      setCompareMode(false);
+      setTab(d.tab as Tab);
+      const words = (d.find || []).map((w) => w.toLowerCase());
+      let tries = 0;
+      const seek = () => {
+        const heads = Array.from(document.querySelectorAll<HTMLElement>("main h2, main h3"));
+        const hit = words.length ? heads.find((h) => words.some((w) => (h.textContent || "").toLowerCase().includes(w))) : undefined;
+        if (hit) hit.scrollIntoView({ behavior: "smooth", block: "start" });
+        else if (words.length && tries++ < 40) setTimeout(seek, 250); // the tab may still be loading its data
+        else window.scrollTo({ top: 0, behavior: "smooth" });
+      };
+      setTimeout(seek, 150);
+    };
+    window.addEventListener("dash:open", on);
+    return () => window.removeEventListener("dash:open", on);
   }, []);
 
   // Receive data from the old bookmarks. Each opens this page with a "wait" hash first, then the data:
@@ -884,18 +914,17 @@ export default function Dashboard() {
               {lookup && !gsc && <div className="notice">Loading Search Console data before opening {lookup}…</div>}
 
               {updated && (
-                <p className="muted" style={{ margin: 0, fontSize: narrow ? 12 : undefined }}>
-                  Updated {updated.toLocaleTimeString()}
-                  {gsc && ` · Search data ${gsc.range.startDate} to ${gsc.range.endDate} vs ${gsc.previousRange.startDate} to ${gsc.previousRange.endDate}`}
-                  {gsc?.dataThrough && ` · Search Console is complete through ${gsc.dataThrough}`}
-                  {ga?.timeZone && ` · GA4 dates in ${ga.timeZone}`}
-                  {gsc && !narrow && " · Every figure has a Source button showing the Google API call behind it."}
+                <p className="status-line" title="Every figure has a Source button showing the Google API call behind it.">
+                  Updated {updated.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  {gsc && ` · Search ${dspan(gsc.range)} vs ${dspan(gsc.previousRange)}`}
+                  {gsc?.dataThrough && ` · complete to ${dshort(gsc.dataThrough)}`}
+                  {ga?.timeZone && ` · GA4 in ${tzShort(ga.timeZone)}`}
                 </p>
               )}
               {previousIncomplete && (
-                <div className="notice" style={{ marginTop: 8 }}>
-                  Search Console keeps about 16 months, so the previous {days} days are only partly available and its change figures
-                  aren&apos;t reliable. To compare older periods, switch to <b>Compare months</b> at the top: it uses your saved history.
+                <div className="notice">
+                  Search Console keeps about 16 months, so the previous {days} days are only partly available. For older periods, use{" "}
+                  <b>Compare months</b>.
                 </div>
               )}
 
@@ -958,10 +987,10 @@ export default function Dashboard() {
                   <SocialTraffic key={`social-${ga4}-${days}-${compare}`} site={site} ga4={ga4} days={days} compare={compare} />
                   <section className="section">
                     <h2>Channel drill-down</h2>
-                    <p className="lede">
-                      Click a channel to see exactly where its traffic came from: source and medium, landing pages, countries, devices and
-                      campaigns. Rows with many sessions but almost no engagement are usually bots or tracking problems.
-                    </p>
+                    <Lede>
+                      Click a channel for its sources, landing pages, countries, devices and campaigns. Many sessions with almost no
+                      engagement usually means bots or a tracking problem.
+                    </Lede>
                     {ga4 ? <ChannelDrilldown key={`ch-${ga4}-${days}`} propertyId={ga4} days={days} /> : noGa4Notice}
                   </section>
                 </>
@@ -970,11 +999,10 @@ export default function Dashboard() {
               {tab === "cta" && (
                 <section className="section">
                   <h2>CTA clicks</h2>
-                  <p className="lede">
-                    Visits to the Buy / License, Request sample, Talk to expert, Customization and Connect pages. Click a CTA to filter every
-                    table below to it: which channel and source the visitor came from, their country, region and city, which report they
-                    were interested in, and the page they clicked from.
-                  </p>
+                  <Lede>
+                    Visits to Buy / License, Request sample, Talk to expert, Customization and Connect. Click a CTA to filter every table
+                    below: channel and source, country, region and city, the report of interest, and the page clicked from.
+                  </Lede>
                   {ga4 ? <CtaSection key={`cta-${ga4}-${days}`} propertyId={ga4} days={days} /> : noGa4Notice}
                 </section>
               )}
