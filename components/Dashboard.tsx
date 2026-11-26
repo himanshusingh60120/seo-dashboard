@@ -7,6 +7,7 @@ import { indexScanSource, loadIndexCache, peekIndexCache } from "@/lib/indexCach
 import { downloadJson, fileSafe } from "@/lib/evidence";
 import { DEFAULT_DAYS, MAX_DAYS, yoyAllowed, type Compare } from "@/lib/dates";
 import { urlInProperty } from "@/lib/url";
+import { FRESH, cachedFetch, clearCache, setCacheUser } from "@/lib/clientCache";
 import { Lede, SourcesProvider } from "./ui";
 import Overview from "./Overview";
 import Rankings from "./Rankings";
@@ -116,6 +117,11 @@ function siteOf(raw: string | null): string {
 const dshort = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
 const dspan = (r: { startDate: string; endDate: string }) => `${dshort(r.startDate)}–${dshort(r.endDate)}`;
 const tzShort = (tz: string) => (/Calcutta|Kolkata/.test(tz) ? "IST" : /Los_Angeles/.test(tz) ? "Pacific time" : tz);
+/** "14:41" today, "25 Nov, 14:41" for a saved copy from an earlier day. */
+const updatedText = (d: Date) =>
+  d.toDateString() === new Date().toDateString()
+    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
 /* ---------------- Phones ---------------- */
 
@@ -275,6 +281,8 @@ function ViewSwitch({ compare, onChange, full = false }: { compare: boolean; onC
 
 export default function Dashboard() {
   const { data: session } = useSession();
+  // Answers saved in this browser belong to the signed-in person only (lib/clientCache.ts).
+  setCacheUser(session?.user?.email);
   const narrow = useNarrow();
   const scrolled = useScrolled();
   /** null: the bar follows the scroll (on phones it stays folded). true / false: the person opened or folded it. */
@@ -306,6 +314,8 @@ export default function Dashboard() {
   const [gaError, setGaError] = useState<string | null>(null);
   const [live, setLive] = useState(true);
   const [updated, setUpdated] = useState<Date | null>(null);
+  /** Shown when a saved copy is on screen and the refresh behind it failed. */
+  const [staleNote, setStaleNote] = useState<string | null>(null);
   const reqId = useRef(0);
   const [indexVersion, setIndexVersion] = useState(0);
   const bumpIndex = useCallback(() => setIndexVersion((v) => v + 1), []);
@@ -584,27 +594,62 @@ export default function Dashboard() {
     if (compare === "yoy" && !yoyAllowed(days)) setCompare("previous");
   }, [days, compare]);
 
-  const load = useCallback(async () => {
-    if (!site || compareMode) return; // Compare months mode reads the saved history instead
-    const id = ++reqId.current;
-    setLoading(true);
-    setError(null);
-    setGaError(null);
-    const [g, a] = await Promise.allSettled([
-      getJson<GscData>(`/api/gsc/performance?site=${encodeURIComponent(site)}&days=${days}&compare=${compare}&type=${searchType}`),
-      ga4 ? getJson<Ga4Data>(`/api/ga4/overview?property=${ga4}&days=${days}&compare=${compare}`) : Promise.resolve(null),
-    ]);
-    if (id !== reqId.current) return; // a newer request superseded this one
-    if (g.status === "fulfilled") setGsc(g.value);
-    else setError(g.reason?.message || "Search Console request failed");
-    if (a.status === "fulfilled") setGa(a.value);
-    else {
-      setGa(null);
-      setGaError(a.reason?.message || "GA4 request failed");
-    }
-    setUpdated(new Date());
-    setLoading(false);
-  }, [site, ga4, days, compare, searchType, compareMode]);
+  /**
+   * Search Console and GA4 for the top bar's choices. A copy saved in this browser (lib/clientCache.ts) shows at once,
+   * and fresh numbers replace it in the background. force (the Refresh button) always asks the server.
+   */
+  const load = useCallback(
+    async (force = false) => {
+      if (!site || compareMode) return; // Compare months mode reads the saved history instead
+      const id = ++reqId.current;
+      const current = () => id === reqId.current; // a newer request supersedes this one
+      const have = { g: false, a: false };
+      setLoading(true);
+      setError(null);
+      setGaError(null);
+      setStaleNote(null);
+      const [g, a] = await Promise.allSettled([
+        cachedFetch<GscData>(
+          `/api/gsc/performance?site=${encodeURIComponent(site)}&days=${days}&compare=${compare}&type=${searchType}`,
+          force ? 0 : FRESH.search,
+          (d, info) => {
+            if (!current()) return;
+            have.g = true;
+            setGsc(d);
+            setUpdated(new Date(info.at));
+          }
+        ),
+        ga4
+          ? cachedFetch<Ga4Data>(`/api/ga4/overview?property=${ga4}&days=${days}&compare=${compare}`, force ? 0 : FRESH.live, (d) => {
+              if (!current()) return;
+              have.a = true;
+              setGa(d);
+            })
+          : Promise.resolve(),
+      ]);
+      if (!current()) return;
+      // With a saved copy on screen, a failed refresh only adds a note; without one it's an error, as before.
+      if (g.status === "rejected") {
+        const msg = g.reason?.message || "Search Console request failed";
+        if (have.g) setStaleNote(`Showing saved Search Console numbers: the refresh failed (${msg}).`);
+        else {
+          setError(msg);
+          setUpdated(new Date());
+        }
+      }
+      if (!ga4) setGa(null);
+      else if (a.status === "rejected") {
+        const msg = a.reason?.message || "GA4 request failed";
+        if (have.a) setStaleNote((n) => n || `Showing saved GA4 numbers: the refresh failed (${msg}).`);
+        else {
+          setGa(null);
+          setGaError(msg);
+        }
+      }
+      setLoading(false);
+    },
+    [site, ga4, days, compare, searchType, compareMode]
+  );
 
   useEffect(() => {
     setGsc(null);
@@ -705,7 +750,13 @@ export default function Dashboard() {
   ));
 
   const signOutButton = (
-    <button className="btn" onClick={() => signOut({ callbackUrl: "/login" })}>
+    <button
+      className="btn"
+      onClick={async () => {
+        await clearCache(); // saved answers belong to this person only
+        signOut({ callbackUrl: "/login" });
+      }}
+    >
       Sign out
     </button>
   );
@@ -870,7 +921,7 @@ export default function Dashboard() {
                   </form>
 
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                    <button className="btn" onClick={load} disabled={loading || !site}>{loading ? "Refreshing…" : "Refresh"}</button>
+                    <button className="btn" onClick={() => load(true)} disabled={loading || !site}>{loading ? "Refreshing…" : "Refresh"}</button>
                     <button className="btn" onClick={downloadEvidence} disabled={!gsc} title="Download every number with the exact Google API request behind it">
                       Download evidence
                     </button>
@@ -915,12 +966,14 @@ export default function Dashboard() {
 
               {updated && (
                 <p className="status-line" title="Every figure has a Source button showing the Google API call behind it.">
-                  Updated {updated.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  Updated {updatedText(updated)}
                   {gsc && ` · Search ${dspan(gsc.range)} vs ${dspan(gsc.previousRange)}`}
                   {gsc?.dataThrough && ` · complete to ${dshort(gsc.dataThrough)}`}
                   {ga?.timeZone && ` · GA4 in ${tzShort(ga.timeZone)}`}
+                  {loading && gsc && " · checking for newer numbers…"}
                 </p>
               )}
+              {staleNote && <div className="notice">{staleNote}</div>}
               {previousIncomplete && (
                 <div className="notice">
                   Search Console keeps about 16 months, so the previous {days} days are only partly available. For older periods, use{" "}
