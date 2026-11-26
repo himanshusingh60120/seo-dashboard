@@ -6,8 +6,13 @@
 // limit per account. This keeps one shared count in Upstash Redis (the same store as Manage access), so together they
 // stay under it.
 //
-// The count is a sliding window: requests in the current minute, plus the share of the previous minute that still falls
-// inside the last 60 seconds. If Redis isn't set up, or doesn't answer within 1.5 seconds, requests go ahead (the
+// Kept cheap on Redis commands (Upstash's free plan allows 500,000 a month, and Manage access uses the same database):
+//   - a server that has sent fewer than QUIET requests for an account in the last minute (someone opening a screen)
+//     doesn't ask Redis at all; HEADROOM places a minute are left free for those requests;
+//   - a busy server (the scheduled jobs) takes LEASE places with one Redis request and uses them up locally;
+//   - after Redis says the minute is full, the server waits BLOCK_MS before asking again.
+// The count is a sliding window: places taken in the current minute, plus the share of the previous minute that still
+// falls inside the last 60 seconds. If Redis isn't set up, or doesn't answer within 1.5 seconds, requests go ahead (the
 // per-server pacing and the retries in lib/sheets.ts still apply) and Redis is skipped for a minute, so a Redis problem
 // can never stop the dashboard. Server-only.
 
@@ -19,6 +24,14 @@ const REDIS_TIMEOUT_MS = 1_500;
 const SKIP_AFTER_FAILURE_MS = 60_000;
 /** Keys outlive their minute long enough to be read as "the previous minute". */
 const KEY_TTL_S = 150;
+/** Requests a server may send per minute per account before it starts counting them in Redis. */
+const QUIET = 5;
+/** Places kept free each minute for quiet servers, which aren't counted in Redis. */
+const HEADROOM = 5;
+/** Places a busy server takes from Redis at a time. */
+const LEASE = 5;
+/** After Redis says the minute is full, wait this long before asking again. */
+const BLOCK_MS = 3_000;
 
 let skipUntil = 0;
 
@@ -51,30 +64,89 @@ async function redis(commands: Arg[][]): Promise<unknown[] | null> {
 const slotOf = (t: number) => Math.floor(t / WINDOW_MS);
 const slotKey = (key: string, slot: number) => `dash:budget:${key}:${slot}`;
 
-/**
- * Takes one request from the shared allowance for `key` (for example "sheets:write:0").
- * Returns true to go ahead, false when the last 60 seconds' allowance is used up (the caller waits and asks again).
- * Always true when Redis is unavailable. With force, the request is counted and always allowed.
- */
-export async function takeShared(key: string, perMinute: number, force = false): Promise<boolean> {
+/** This server's own view of one account: what it sent lately and the places it still holds this minute. */
+type Local = { sent: number[]; slot: number; left: number; blockedUntil: number; leasing: Promise<void> | null };
+const local = new Map<string, Local>();
+
+function stateOf(key: string): Local {
+  let st = local.get(key);
+  if (!st) {
+    st = { sent: [], slot: -1, left: 0, blockedUntil: 0, leasing: null };
+    local.set(key, st);
+  }
   const now = Date.now();
-  const slot = slotOf(now);
+  st.sent = st.sent.filter((t) => now - t < WINDOW_MS);
+  return st;
+}
+
+const use = (st: Local) => {
+  st.sent.push(Date.now());
+  return true;
+};
+
+/** Takes up to LEASE places from Redis for this minute. Sets st.left, or st.blockedUntil when the minute is full. */
+async function lease(st: Local, key: string, slot: number, perMinute: number) {
+  const now = Date.now();
   const cur = slotKey(key, slot);
-  const r = await redis([["INCR", cur], ["EXPIRE", cur, KEY_TTL_S], ["GET", slotKey(key, slot - 1)]]);
-  if (!r || force) return true;
-  const mine = Number(r[0]);
-  if (!Number.isFinite(mine)) return true;
+  const limit = Math.max(1, perMinute - HEADROOM);
+  const r = await redis([["INCRBY", cur, LEASE], ["EXPIRE", cur, KEY_TTL_S], ["GET", slotKey(key, slot - 1)]]);
+  if (!r) return; // Redis unavailable: skipUntil is now set, so requests go ahead on per-server pacing
+  const total = Number(r[0]);
+  if (!Number.isFinite(total)) {
+    st.slot = slot;
+    st.left = LEASE;
+    return;
+  }
   const before = Number(r[2]) || 0;
   const elapsed = (now % WINDOW_MS) / WINDOW_MS;
-  if (mine + before * (1 - elapsed) <= perMinute) return true;
-  await redis([["DECR", cur]]); // not sent after all: give the place back
-  return false;
+  const usedElsewhere = total - LEASE + before * (1 - elapsed);
+  const granted = Math.max(0, Math.min(LEASE, Math.floor(limit - usedElsewhere)));
+  if (granted < LEASE) await redis([["DECRBY", cur, LEASE - granted]]); // give back what can't be used
+  if (granted) {
+    st.slot = slot;
+    st.left = granted;
+  } else {
+    st.blockedUntil = Date.now() + BLOCK_MS;
+  }
+}
+
+/**
+ * Asks for one request's place in the shared allowance for `key` (for example "sheets:write:0").
+ * Returns true to go ahead, false when the last 60 seconds' allowance is used up (the caller waits and asks again).
+ * Always true when Redis is unavailable. With force, the request always goes ahead.
+ */
+export async function takeShared(key: string, perMinute: number, force = false): Promise<boolean> {
+  for (;;) {
+    const st = stateOf(key);
+    const now = Date.now();
+    const slot = slotOf(now);
+    if (st.slot !== slot) {
+      st.slot = slot;
+      st.left = 0; // places are only good for the minute they were taken in
+    }
+    if (force || st.sent.length < QUIET || !sharedBudgetOn() || now < skipUntil) return use(st);
+    if (st.left > 0) {
+      st.left--;
+      return use(st);
+    }
+    if (now < st.blockedUntil) return false;
+    if (st.leasing) {
+      await st.leasing; // another request on this server is already asking Redis
+      continue;
+    }
+    st.leasing = lease(st, key, slot, perMinute).finally(() => {
+      st.leasing = null;
+    });
+    await st.leasing;
+  }
 }
 
 /** After Google says "too many requests": marks this minute as used up for every server. */
 export async function fillShared(key: string, perMinute: number) {
-  const cur = slotKey(key, slotOf(Date.now()));
-  await redis([["SET", cur, perMinute + 1, "EX", KEY_TTL_S]]);
+  const st = stateOf(key);
+  st.left = 0;
+  st.blockedUntil = Date.now() + BLOCK_MS;
+  await redis([["SET", slotKey(key, slotOf(Date.now())), perMinute + 1, "EX", KEY_TTL_S]]);
 }
 
 /** Counts an event per day (kept 8 days), e.g. noteShared("sheets-refused:write"). */
