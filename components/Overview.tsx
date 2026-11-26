@@ -11,6 +11,7 @@ import { latestIdxDay } from "@/lib/indexStats";
 import { UpdatesList, updatesBetween, useGoogleUpdates } from "./googleUpdates";
 import AiOverview from "./AiImpressions";
 import AiTraffic from "./AiTraffic";
+import SiteSummary from "./SiteSummary";
 
 export default function Overview({
   gsc,
@@ -92,13 +93,24 @@ export default function Overview({
 
   return (
     <>
+      {/* 0. Summary: what's going well, what needs attention, next moves (rules only, lib/insights.ts) */}
+      <SiteSummary
+        gsc={gsc}
+        ga={ga}
+        site={site}
+        ga4={ga4}
+        days={days}
+        compare={compare}
+        idxDays={idx?.store.views.ALL_URLS?.days ?? null}
+      />
+
       {/* 1. Everyone who came, from every channel (GA4) */}
       <Section
         title="Site traffic"
         lede={
           ga
-            ? `From Google Analytics 4, all channels, ${ga.range.startDate} to ${ga.range.endDate}. “Active users” is GA4's standard user count — the same number its reports show.`
-            : "From Google Analytics 4, all channels."
+            ? `GA4, all channels, ${ga.range.startDate} to ${ga.range.endDate}. Users are GA4's active users, the number its own reports show.`
+            : "GA4, all channels."
         }
       >
         {!hasGa4 && <div className="notice">Choose a GA4 property in the top bar to see users, sessions and geography for this site.</div>}
@@ -106,7 +118,7 @@ export default function Overview({
         {g && (
           <>
             <Kpis items={traffic} />
-            <div className="panel" style={{ marginTop: 16 }}>
+            <div className="panel" style={{ marginTop: 12 }}>
               <PanelTitle source={["ga4.trend", "ga4.organic"]}>Active users and sessions</PanelTitle>
               <TrafficTrend data={ga!.trend} events={updates} />
             </div>
@@ -115,14 +127,17 @@ export default function Overview({
       </Section>
 
       {/* 2. How Google Search is doing (Search Console) */}
-      <Section title="Search performance" lede={`Google Search, ${gsc.range.startDate} to ${gsc.range.endDate}, compared with the ${gsc.previousRange.startDate} to ${gsc.previousRange.endDate} period.`}>
+      <Section
+        title="Search performance"
+        lede={`${gsc.range.startDate} to ${gsc.range.endDate}, vs ${gsc.previousRange.startDate} to ${gsc.previousRange.endDate}.`}
+      >
         <Kpis items={search} />
-        <div className="grid-2" style={{ marginTop: 16 }}>
+        <div className="grid-2" style={{ marginTop: 12 }}>
           <div className="panel"><PanelTitle source={["gsc.trend"]}>Clicks and impressions</PanelTitle><SearchTrend data={gsc.trend} events={updates} /></div>
           <div className="panel"><PanelTitle source={["gsc.trend"]}>Average position and CTR</PanelTitle><PositionTrend data={gsc.trend} events={updates} /></div>
         </div>
         {inPeriod.length > 0 && (
-          <div style={{ marginTop: 16 }}>
+          <div style={{ marginTop: 12 }}>
             <UpdatesList rows={inPeriod.map((u) => ({ u }))} />
           </div>
         )}
