@@ -7,13 +7,20 @@
 //
 // Staying inside Google's limits. Google allows 60 read and 60 write requests per minute per account, and the whole
 // dashboard (every screen, the saved-history updates and the index-check jobs) shares that. So this file:
-//   - paces requests: at most 55 a minute per account from this server, so bursts wait briefly instead of failing;
+//   - paces requests on two levels: at most 55 a minute per account from this server, and at most SHEETS_PER_MINUTE
+//     (default 50) a minute per account across every server Vercel is running at that moment, counted together in
+//     Upstash Redis (lib/sharedBudget.ts). Bursts wait briefly instead of failing. If Redis is unavailable, only the
+//     per-server pacing applies;
 //   - shares identical reads that run at the same moment, and reuses a property Sheet's reads for 10 seconds
 //     (any write to that Sheet clears them; the control Sheet, which holds locks and job state, is never reused);
 //   - spreads reads over extra read-only service accounts when GOOGLE_SHEETS_READER_JSON is set (each has its own 60);
-//   - when Google still says "too many requests", waits 2, 4, 8, 15 and 20 seconds (or as long as Google asks) and retries;
-//   - logs which tabs used the requests in that minute, so the cause shows up in Vercel's logs (search for "[sheets]").
+//   - when Google still says "too many requests", tells every server to hold off for the rest of the minute, waits
+//     2, 4, 8, 15 and 20 seconds (or as long as Google asks) and retries;
+//   - logs which tabs used the requests in that minute, so the cause shows up in Vercel's logs (search for "[sheets]"),
+//     and counts Google's refusals per day in Redis (dash:count:sheets-refused:read / :write).
+// SHEETS_PER_MINUTE: raise it only after Google approves a higher Sheets quota for the project.
 import { readerCount, serviceAccountToken, sheetsReaderToken } from "./serviceAccount";
+import { fillShared, noteShared, takeShared } from "./sharedBudget";
 
 const API = "https://sheets.googleapis.com/v4/spreadsheets";
 export type Cell = string | number | boolean;
@@ -39,8 +46,10 @@ export const sheetUrl = () => bookUrl(process.env.INDEX_SHEET_ID || "");
 
 type Kind = "read" | "write";
 const WINDOW_MS = 60_000;
-/** Requests per minute per account sent from this server (Google's limit is 60). */
-const PER_MINUTE = 55;
+/** Requests per minute per account, counted across every server (lib/sharedBudget.ts). Google's limit is 60. */
+const LIMIT = Math.max(10, Number(process.env.SHEETS_PER_MINUTE) || 50);
+/** Requests per minute per account sent from this server. On its own when Redis is unavailable. */
+const PER_MINUTE = Math.max(55, LIMIT);
 /** Longest a request waits for room before being sent anyway (Google then decides). */
 const MAX_PACE_WAIT_MS = 30_000;
 /** Pauses after Google says "too many requests". */
@@ -51,6 +60,9 @@ const SERVER_WAITS = [1_500, 3_000, 6_000, 12_000];
 const READ_CACHE_MS = 10_000;
 const READ_CACHE_MAX = 300;
 
+/** The shared (all-server) counter for a "kind:account" key. */
+const sharedKey = (key: string) => `sheets:${key}`;
+
 /** Send times per "kind:account", for pacing. */
 const sent = new Map<string, number[]>();
 function recentSent(key: string) {
@@ -60,24 +72,35 @@ function recentSent(key: string) {
   return list;
 }
 
-/** Waits until this account has room for one more request this minute. */
+/** Waits until this account has room for one more request this minute, on this server and across all servers. */
 async function pace(key: string) {
   const start = Date.now();
   for (;;) {
     const list = recentSent(key);
-    if (list.length < PER_MINUTE || Date.now() - start > MAX_PACE_WAIT_MS) {
+    if (Date.now() - start > MAX_PACE_WAIT_MS) {
+      // Waited long enough: send it anyway (still counted) and let Google decide; its "too many" answer is retried.
+      list.push(Date.now());
+      await takeShared(sharedKey(key), LIMIT, true);
+      return;
+    }
+    if (list.length >= PER_MINUTE) {
+      await sleep(Math.max(200, Math.min(5_000, WINDOW_MS - (Date.now() - list[0]) + 50)));
+      continue;
+    }
+    if (await takeShared(sharedKey(key), LIMIT)) {
       list.push(Date.now());
       return;
     }
-    await sleep(Math.max(200, Math.min(5_000, WINDOW_MS - (Date.now() - list[0]) + 50)));
+    await sleep(1_000 + Math.random() * 1_500); // other servers used this minute's allowance
   }
 }
 
-/** After a "too many requests", treat this account as full so other requests on this server wait too. */
+/** After a "too many requests", treat this account as full on this server and on every other server. */
 function markFull(key: string) {
   const list = recentSent(key);
   const now = Date.now();
   while (list.length < PER_MINUTE) list.push(now);
+  void fillShared(sharedKey(key), LIMIT);
 }
 
 /** What used the requests in the last minute, for the log line written when Google says "too many". */
@@ -160,7 +183,10 @@ async function call<T = any>(book: Book, path: string, init: RequestInit = {}, l
       tried.add(acct);
       // Another reader account may still have room this minute.
       if (kind === "read" && pickReader(book, tried) >= 0) continue;
-      if (quotaTry === 0) logBusy(kind);
+      if (quotaTry === 0) {
+        logBusy(kind);
+        void noteShared(`sheets-refused:${kind}`);
+      }
       if (quotaTry < QUOTA_WAITS.length) {
         const asked = Number(res.headers.get("retry-after"));
         await sleep(asked > 0 ? Math.min(asked * 1000, 30_000) : QUOTA_WAITS[quotaTry] + Math.random() * 1000);
