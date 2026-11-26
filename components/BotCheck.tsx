@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
+import { FRESH, cachedFetch } from '@/lib/clientCache';
 import { DataTable, num, pct } from './ui';
 
 type Flag = {
@@ -59,13 +60,22 @@ export default function BotCheck({ propertyId, days, scope }: { propertyId: stri
   const [open, setOpen] = useState<Box | null>(null);
 
   useEffect(() => {
+    let live = true;
+    let shown = false;
     setData(null);
     setErr('');
     setOpen(null);
-    fetch(`/api/ga4/bots?property=${propertyId}&days=${days}&scope=${scope}`, { cache: 'no-store' })
-      .then(r => r.json())
-      .then(j => (j.error ? setErr(j.error) : setData(j)))
-      .catch(e => setErr(String(e)));
+    cachedFetch<any>(`/api/ga4/bots?property=${propertyId}&days=${days}&scope=${scope}`, FRESH.ga, j => {
+      if (!live) return;
+      shown = true;
+      if (j?.error) setErr(j.error);
+      else setData(j);
+    }).catch(e => {
+      if (live && !shown) setErr(e instanceof Error ? e.message : String(e));
+    });
+    return () => {
+      live = false;
+    };
   }, [propertyId, days, scope]);
 
   const what = scope === 'cta' ? 'CTA page' : 'site';
