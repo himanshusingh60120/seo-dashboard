@@ -5,7 +5,8 @@
 // and Google's own count from the Page indexing report), the progress of the checks, and the status changes found.
 // Everything else is folded under "More details". Results live in the shared Google Sheet; one job per property,
 // whoever started it, so nothing is checked twice. View-only accounts (readOnly) see everything but no buttons.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { FRESH, cachedFetch, remember } from "@/lib/clientCache";
 import { DataTable, Kpis, PanelTitle, Section, num, pct, type Col, type KpiItem } from "./ui";
 
 const SA_LABEL = "Service account";
@@ -106,27 +107,34 @@ export default function IndexChecks({ site, readOnly = false }: { site: string; 
   const [busy, setBusy] = useState(false);
   const [changeFilter, setChangeFilter] = useState("all");
 
-  const load = useCallback(async () => {
-    try {
-      const r = await fetch(`/api/index-checks?site=${encodeURIComponent(site)}`, { cache: "no-store" });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
-      setSt(j as Status);
-      setErr(null);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Couldn't load index checks");
-    }
-  }, [site]);
-
+  // The saved copy shows at once (lib/clientCache.ts). Each check reads the Google Sheets, and the checks themselves run
+  // every 30 minutes, so the tab asks again every 5 minutes (it used to be every minute).
   useEffect(() => {
+    let live = true;
     setSt(null);
     setErr(null);
-    load();
+    const load = async (force: boolean) => {
+      let shown = false;
+      try {
+        await cachedFetch<Status>(`/api/index-checks?site=${encodeURIComponent(site)}`, force ? 0 : FRESH.live, (j) => {
+          if (!live) return;
+          shown = true;
+          setSt(j);
+          setErr(null);
+        });
+      } catch (e) {
+        if (live && !shown) setErr(e instanceof Error ? e.message : "Couldn't load index checks");
+      }
+    };
+    load(false);
     const t = setInterval(() => {
-      if (document.visibilityState === "visible") load();
-    }, 60_000);
-    return () => clearInterval(t);
-  }, [load]);
+      if (document.visibilityState === "visible") load(true);
+    }, 5 * 60_000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [site]);
 
   const post = async (body: Record<string, unknown>) => {
     setBusy(true);
@@ -140,6 +148,7 @@ export default function IndexChecks({ site, readOnly = false }: { site: string; 
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
       setSt(j as Status);
+      remember(`/api/index-checks?site=${encodeURIComponent(site)}`, j); // the saved copy shows the new setting
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Couldn't change the setting");
     }
@@ -288,7 +297,7 @@ export default function IndexChecks({ site, readOnly = false }: { site: string; 
             <details style={{ marginTop: 12 }}>
               <summary className="muted" style={{ cursor: "pointer" }}>More details</summary>
               <ul className="muted" style={{ margin: "8px 0 0", paddingLeft: 18 }}>
-                <li>Today&apos;s plan: {job.message || "waiting for the first daily plan (it runs every hour)."}</li>
+                <li>Today&apos;s plan: {job.message || "waiting for the first daily plan (it runs every half hour)."}</li>
                 <li>
                   Runs as: {runsAsPerson ? `${job.runAs}'s Google sign-in` : `the service account (${st.serviceAccount})`}.
                   {runsAsPerson && !readOnly && " If that sign-in stops working, anyone who can open the property can take over with “Use my Google sign-in”."}
